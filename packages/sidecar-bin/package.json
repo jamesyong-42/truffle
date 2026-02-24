@@ -1,5 +1,6 @@
 {
   "name": "@vibecook/truffle-sidecar-bin",
+  "private": true,
   "version": "0.1.0",
   "description": "Prebuilt sidecar binary for Truffle mesh networking",
   "license": "MIT",
