@@ -21,7 +21,7 @@
   "bugs": {
     "url": "https://github.com/jamesyong-42/truffle/issues"
   },
-  "files": ["dist"],
+  "files": ["dist", "!dist/__tests__"],
   "engines": {
     "node": ">=18"
   },
