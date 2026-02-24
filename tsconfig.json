@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/types" },
+    { "path": "packages/protocol" },
+    { "path": "packages/sidecar-client" },
+    { "path": "packages/transport" },
+    { "path": "packages/mesh" },
+    { "path": "packages/store-sync" },
+    { "path": "packages/core" },
+    { "path": "packages/react" },
+    { "path": "packages/cli" }
+  ]
+}

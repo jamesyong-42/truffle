@@ -19,8 +19,8 @@
   "scripts": {
     "build": "pnpm -r --filter '!@vibecook/truffle-docs' run build",
     "test": "pnpm -r run test",
-    "clean": "pnpm -r run clean",
-    "typecheck": "pnpm -r run typecheck",
+    "clean": "pnpm -r run clean && rm -f packages/*/tsconfig.tsbuildinfo",
+    "typecheck": "pnpm run build",
     "lint": "eslint 'packages/*/src/**/*.ts'",
     "lint:fix": "eslint 'packages/*/src/**/*.ts' --fix",
     "format": "prettier --write 'packages/*/src/**/*.ts'",
