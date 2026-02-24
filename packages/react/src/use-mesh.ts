@@ -64,12 +64,9 @@ export function useMesh(node: MeshNode | null): UseMeshResult {
     };
   }, [node]);
 
-  const broadcast = useCallback(
-    (namespace: string, type: string, payload: unknown) => {
-      busRef.current?.broadcast(namespace, type, payload);
-    },
-    [],
-  );
+  const broadcast = useCallback((namespace: string, type: string, payload: unknown) => {
+    busRef.current?.broadcast(namespace, type, payload);
+  }, []);
 
   const sendTo = useCallback(
     (deviceId: string, namespace: string, type: string, payload: unknown): boolean => {

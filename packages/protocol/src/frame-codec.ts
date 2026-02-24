@@ -103,7 +103,7 @@ export class FrameCodec {
 
   async encodeAsync<T>(
     message: NamespacedMessage<T>,
-    format?: SerializationFormat
+    format?: SerializationFormat,
   ): Promise<Buffer> {
     const useFormat = format ?? this.defaultFormat;
     let payload: Buffer;
@@ -208,7 +208,9 @@ export class FrameCodec {
     };
   }
 
-  decodeAll<T = unknown>(buffer: Buffer): {
+  decodeAll<T = unknown>(
+    buffer: Buffer,
+  ): {
     messages: NamespacedMessage<T>[];
     remaining: Buffer;
   } {

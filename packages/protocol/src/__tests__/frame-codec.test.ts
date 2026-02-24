@@ -68,11 +68,7 @@ describe('@vibecook/truffle-protocol - FrameCodec', () => {
       const msg2: NamespacedMessage = { namespace: 'b', type: 'two', payload: 2 };
       const msg3: NamespacedMessage = { namespace: 'c', type: 'three', payload: 3 };
 
-      const combined = Buffer.concat([
-        codec.encode(msg1),
-        codec.encode(msg2),
-        codec.encode(msg3),
-      ]);
+      const combined = Buffer.concat([codec.encode(msg1), codec.encode(msg2), codec.encode(msg3)]);
 
       const { messages, remaining } = codec.decodeAll(combined);
 

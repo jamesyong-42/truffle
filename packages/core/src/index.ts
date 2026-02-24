@@ -4,7 +4,12 @@
 
 // Mesh node (primary API)
 export { MeshNode, createMeshNode } from '@vibecook/truffle-mesh';
-export type { MeshNodeConfig, MeshNodeEvents, MeshTimingConfig, IncomingMeshMessage } from '@vibecook/truffle-mesh';
+export type {
+  MeshNodeConfig,
+  MeshNodeEvents,
+  MeshTimingConfig,
+  IncomingMeshMessage,
+} from '@vibecook/truffle-mesh';
 export { DeviceManager } from '@vibecook/truffle-mesh';
 export type { DeviceManagerEvents, DeviceIdentity } from '@vibecook/truffle-mesh';
 export { PrimaryElection } from '@vibecook/truffle-mesh';

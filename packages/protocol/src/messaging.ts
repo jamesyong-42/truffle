@@ -77,5 +77,8 @@ export interface IMessageBus extends EventEmitter {
 
   // Events
   on<K extends keyof MessageBusEvents>(event: K, listener: MessageBusEvents[K]): this;
-  emit<K extends keyof MessageBusEvents>(event: K, ...args: Parameters<MessageBusEvents[K]>): boolean;
+  emit<K extends keyof MessageBusEvents>(
+    event: K,
+    ...args: Parameters<MessageBusEvents[K]>
+  ): boolean;
 }

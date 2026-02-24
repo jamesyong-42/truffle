@@ -465,9 +465,12 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
   }
 
   private removeSidecarListeners(): void {
-    if (this.sidecarHandlers.statusChanged) this.sidecar.off('statusChanged', this.sidecarHandlers.statusChanged);
-    if (this.sidecarHandlers.authRequired) this.sidecar.off('authRequired', this.sidecarHandlers.authRequired);
-    if (this.sidecarHandlers.tailnetPeers) this.sidecar.off('tailnetPeers', this.sidecarHandlers.tailnetPeers);
+    if (this.sidecarHandlers.statusChanged)
+      this.sidecar.off('statusChanged', this.sidecarHandlers.statusChanged);
+    if (this.sidecarHandlers.authRequired)
+      this.sidecar.off('authRequired', this.sidecarHandlers.authRequired);
+    if (this.sidecarHandlers.tailnetPeers)
+      this.sidecar.off('tailnetPeers', this.sidecarHandlers.tailnetPeers);
     if (this.sidecarHandlers.error) this.sidecar.off('error', this.sidecarHandlers.error);
     this.sidecarHandlers = {};
   }
@@ -479,20 +482,18 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
       this.log.info(`WS connected: ${conn.id} (${conn.direction})`);
 
       const localDevice = this.deviceManager.getLocalDevice();
-      const announce = createMeshMessage<DeviceAnnouncePayload>(
-        'device:announce',
-        localDeviceId,
-        { device: localDevice, protocolVersion: 2 }
-      );
+      const announce = createMeshMessage<DeviceAnnouncePayload>('device:announce', localDeviceId, {
+        device: localDevice,
+        protocolVersion: 2,
+      });
       this.sendMeshMessageRaw(conn.id, announce);
 
       if (this.isPrimary()) {
         const devices = [localDevice, ...this.deviceManager.getDevices()];
-        const listMessage = createMeshMessage<DeviceListPayload>(
-          'device:list',
-          localDeviceId,
-          { devices, primaryId: localDeviceId }
-        );
+        const listMessage = createMeshMessage<DeviceListPayload>('device:list', localDeviceId, {
+          devices,
+          primaryId: localDeviceId,
+        });
         this.sendMeshMessageRaw(conn.id, listMessage);
       }
     };
@@ -523,9 +524,12 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
   }
 
   private removeTransportListeners(): void {
-    if (this.transportHandlers.connected) this.transport.off('connected', this.transportHandlers.connected);
-    if (this.transportHandlers.disconnected) this.transport.off('disconnected', this.transportHandlers.disconnected);
-    if (this.transportHandlers.deviceIdentified) this.transport.off('deviceIdentified', this.transportHandlers.deviceIdentified);
+    if (this.transportHandlers.connected)
+      this.transport.off('connected', this.transportHandlers.connected);
+    if (this.transportHandlers.disconnected)
+      this.transport.off('disconnected', this.transportHandlers.disconnected);
+    if (this.transportHandlers.deviceIdentified)
+      this.transport.off('deviceIdentified', this.transportHandlers.deviceIdentified);
     if (this.transportHandlers.data) this.transport.off('data', this.transportHandlers.data);
     this.transportHandlers = {};
   }
@@ -537,7 +541,10 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
       this.deviceManager.setLocalRole(isLocal ? 'primary' : 'secondary');
 
       for (const device of this.deviceManager.getDevices()) {
-        this.deviceManager.setDeviceRole(device.id, device.id === deviceId ? 'primary' : 'secondary');
+        this.deviceManager.setDeviceRole(
+          device.id,
+          device.id === deviceId ? 'primary' : 'secondary',
+        );
       }
 
       this.emit('roleChanged', isLocal ? 'primary' : 'secondary', isLocal);
@@ -743,9 +750,11 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
       if (peer.online) {
         const conn = this.transport.getConnectionByDeviceId(device.id);
         if (!conn || conn.status !== 'connected') {
-          this.transport.connect(device.id, device.tailscaleHostname, device.tailscaleDNSName, 443).catch((err) => {
-            this.log.error(`Failed to connect to ${device.name}:`, err);
-          });
+          this.transport
+            .connect(device.id, device.tailscaleHostname, device.tailscaleDNSName, 443)
+            .catch((err) => {
+              this.log.error(`Failed to connect to ${device.name}:`, err);
+            });
         }
       }
     }
@@ -782,11 +791,10 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
     }
 
     const localDevice = this.deviceManager.getLocalDevice();
-    const announce = createMeshMessage<DeviceAnnouncePayload>(
-      'device:announce',
-      localDeviceId,
-      { device: localDevice, protocolVersion: 2 }
-    );
+    const announce = createMeshMessage<DeviceAnnouncePayload>('device:announce', localDeviceId, {
+      device: localDevice,
+      protocolVersion: 2,
+    });
     this.broadcastMeshMessage(announce);
   }
 
@@ -794,11 +802,10 @@ export class MeshNode extends TypedEventEmitter<MeshNodeEvents> {
     const localDeviceId = this.deviceManager.getDeviceId();
     const localDevice = this.deviceManager.getLocalDevice();
     const devices = [localDevice, ...this.deviceManager.getDevices()];
-    const message = createMeshMessage<DeviceListPayload>(
-      'device:list',
-      localDeviceId,
-      { devices, primaryId: localDeviceId }
-    );
+    const message = createMeshMessage<DeviceListPayload>('device:list', localDeviceId, {
+      devices,
+      primaryId: localDeviceId,
+    });
     this.broadcastMeshMessage(message);
   }
 

@@ -82,7 +82,7 @@ describe('@vibecook/truffle-sidecar-client', () => {
       await startPromise;
 
       expect(mockProcess.stdin.write).toHaveBeenCalledWith(
-        expect.stringContaining('"command":"tsnet:start"')
+        expect.stringContaining('"command":"tsnet:start"'),
       );
       const call = mockProcess.stdin.write.mock.calls[0][0];
       const parsed = JSON.parse(call.replace('\n', ''));
@@ -119,9 +119,7 @@ describe('@vibecook/truffle-sidecar-client', () => {
       await startPromise;
 
       // First call is 'starting', second is 'running'
-      expect(statusHandler).toHaveBeenCalledWith(
-        expect.objectContaining({ state: 'running' })
-      );
+      expect(statusHandler).toHaveBeenCalledWith(expect.objectContaining({ state: 'running' }));
     });
 
     it('emits authRequired event', async () => {
@@ -134,18 +132,24 @@ describe('@vibecook/truffle-sidecar-client', () => {
       const authHandler = vi.fn();
       client.on('authRequired', authHandler);
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:authRequired',
-        data: { authUrl: 'https://login.tailscale.com/...' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:authRequired',
+          data: { authUrl: 'https://login.tailscale.com/...' },
+        }),
+      );
 
       expect(authHandler).toHaveBeenCalledWith('https://login.tailscale.com/...');
 
       // Complete startup to clean up
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', tailscaleIP: '100.64.0.1' },
+        }),
+      );
       await startPromise;
     });
 
@@ -156,29 +160,35 @@ describe('@vibecook/truffle-sidecar-client', () => {
         stateDir: '/state',
       });
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', tailscaleIP: '100.64.0.1' },
+        }),
+      );
       await startPromise;
 
       const peersHandler = vi.fn();
       client.on('tailnetPeers', peersHandler);
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:peers',
-        data: {
-          peers: [
-            {
-              id: 'p1',
-              hostname: 'myapp-desktop-abc',
-              dnsName: 'myapp-desktop-abc.tailnet.ts.net',
-              tailscaleIPs: ['100.64.0.2'],
-              online: true,
-            },
-          ],
-        },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:peers',
+          data: {
+            peers: [
+              {
+                id: 'p1',
+                hostname: 'myapp-desktop-abc',
+                dnsName: 'myapp-desktop-abc.tailnet.ts.net',
+                tailscaleIPs: ['100.64.0.2'],
+                online: true,
+              },
+            ],
+          },
+        }),
+      );
 
       expect(peersHandler).toHaveBeenCalledWith([
         expect.objectContaining({ id: 'p1', hostname: 'myapp-desktop-abc' }),
@@ -192,10 +202,13 @@ describe('@vibecook/truffle-sidecar-client', () => {
         stateDir: '/state',
       });
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', tailscaleIP: '100.64.0.1' },
+        }),
+      );
       await startPromise;
 
       const wsConnectHandler = vi.fn();
@@ -206,24 +219,33 @@ describe('@vibecook/truffle-sidecar-client', () => {
       client.on('wsMessage', wsMessageHandler);
       client.on('wsDisconnect', wsDisconnectHandler);
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:wsConnect',
-        data: { connectionId: 'conn-1', remoteAddr: '100.64.0.2:443' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:wsConnect',
+          data: { connectionId: 'conn-1', remoteAddr: '100.64.0.2:443' },
+        }),
+      );
 
       expect(wsConnectHandler).toHaveBeenCalledWith('conn-1', '100.64.0.2:443');
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:wsMessage',
-        data: { connectionId: 'conn-1', data: '{"test":"data"}' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:wsMessage',
+          data: { connectionId: 'conn-1', data: '{"test":"data"}' },
+        }),
+      );
 
       expect(wsMessageHandler).toHaveBeenCalledWith('conn-1', '{"test":"data"}');
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:wsDisconnect',
-        data: { connectionId: 'conn-1', reason: 'closed' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:wsDisconnect',
+          data: { connectionId: 'conn-1', reason: 'closed' },
+        }),
+      );
 
       expect(wsDisconnectHandler).toHaveBeenCalledWith('conn-1', 'closed');
     });
@@ -235,10 +257,13 @@ describe('@vibecook/truffle-sidecar-client', () => {
         stateDir: '/state',
       });
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', tailscaleIP: '100.64.0.1' },
+        }),
+      );
       await startPromise;
 
       const dialConnectedHandler = vi.fn();
@@ -251,24 +276,33 @@ describe('@vibecook/truffle-sidecar-client', () => {
       client.on('dialDisconnect', dialDisconnectHandler);
       client.on('dialError', dialErrorHandler);
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:dialConnected',
-        data: { deviceId: 'dev-2', remoteAddr: '100.64.0.2:443' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:dialConnected',
+          data: { deviceId: 'dev-2', remoteAddr: '100.64.0.2:443' },
+        }),
+      );
 
       expect(dialConnectedHandler).toHaveBeenCalledWith('dev-2', '100.64.0.2:443');
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:dialMessage',
-        data: { deviceId: 'dev-2', data: 'hello' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:dialMessage',
+          data: { deviceId: 'dev-2', data: 'hello' },
+        }),
+      );
 
       expect(dialMessageHandler).toHaveBeenCalledWith('dev-2', 'hello');
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:dialError',
-        data: { deviceId: 'dev-2', error: 'connection refused' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:dialError',
+          data: { deviceId: 'dev-2', error: 'connection refused' },
+        }),
+      );
 
       expect(dialErrorHandler).toHaveBeenCalledWith('dev-2', 'connection refused');
     });
@@ -287,10 +321,13 @@ describe('@vibecook/truffle-sidecar-client', () => {
         stateDir: '/state',
       });
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', hostname: 'test-host', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', hostname: 'test-host', tailscaleIP: '100.64.0.1' },
+        }),
+      );
 
       await startPromise;
 
@@ -321,10 +358,13 @@ describe('@vibecook/truffle-sidecar-client', () => {
         stateDir: '/state',
       });
 
-      mockRlEmitter.emit('line', JSON.stringify({
-        event: 'tsnet:status',
-        data: { state: 'running', tailscaleIP: '100.64.0.1' },
-      }));
+      mockRlEmitter.emit(
+        'line',
+        JSON.stringify({
+          event: 'tsnet:status',
+          data: { state: 'running', tailscaleIP: '100.64.0.1' },
+        }),
+      );
 
       await startPromise;
 

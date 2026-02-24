@@ -7,7 +7,12 @@
 
 import { TypedEventEmitter } from '@vibecook/truffle-types';
 import type { MeshEnvelope } from '@vibecook/truffle-types';
-import type { BusMessage, BusMessageHandler, IMessageBus, MessageBusEvents } from '@vibecook/truffle-protocol';
+import type {
+  BusMessage,
+  BusMessageHandler,
+  IMessageBus,
+  MessageBusEvents,
+} from '@vibecook/truffle-protocol';
 import type { MeshNode, IncomingMeshMessage } from './mesh-node.js';
 
 // ═══════════════════════════════════════════════════════════════════════════

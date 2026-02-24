@@ -97,7 +97,7 @@ export class StoreSyncAdapter {
     // Subscribe to sync messages via MessageBus
     this.unsubscribeMessages = this.messageBus.subscribe(
       STORE_SYNC_NAMESPACE,
-      this.handleSyncMessage.bind(this)
+      this.handleSyncMessage.bind(this),
     );
 
     // Subscribe to store 'localChanged' events
@@ -177,7 +177,11 @@ export class StoreSyncAdapter {
         storeId,
         fromDeviceId: deviceId,
       };
-      this.messageBus.broadcast(STORE_SYNC_NAMESPACE, STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST, payload);
+      this.messageBus.broadcast(
+        STORE_SYNC_NAMESPACE,
+        STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST,
+        payload,
+      );
     }
   }
 
@@ -236,7 +240,7 @@ export class StoreSyncAdapter {
   private handleSyncFull(
     store: ISyncableStore,
     from: string | undefined,
-    payload: SyncFullPayload<unknown>
+    payload: SyncFullPayload<unknown>,
   ): void {
     if (!from || from === this.localDeviceId) return;
 
@@ -253,7 +257,7 @@ export class StoreSyncAdapter {
   private handleSyncUpdate(
     store: ISyncableStore,
     from: string | undefined,
-    payload: SyncUpdatePayload<unknown>
+    payload: SyncUpdatePayload<unknown>,
   ): void {
     if (!from || from === this.localDeviceId) return;
 
@@ -327,7 +331,11 @@ export class StoreSyncAdapter {
   private requestSyncFromDevices(): void {
     for (const [storeId] of this.stores) {
       const payload: SyncRequestPayload = { storeId };
-      this.messageBus.broadcast(STORE_SYNC_NAMESPACE, STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST, payload);
+      this.messageBus.broadcast(
+        STORE_SYNC_NAMESPACE,
+        STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST,
+        payload,
+      );
     }
   }
 }

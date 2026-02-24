@@ -229,7 +229,7 @@ describe('@vibecook/truffle-transport - WebSocketTransport', () => {
       // Should have sent a pong back
       expect(sidecar.sendToConnection).toHaveBeenCalledWith(
         'conn-1',
-        expect.stringContaining('"type":"pong"')
+        expect.stringContaining('"type":"pong"'),
       );
     });
 
@@ -243,7 +243,10 @@ describe('@vibecook/truffle-transport - WebSocketTransport', () => {
 
       sidecar.emit('wsMessage', 'conn-1', '{"namespace":"sync","type":"update"}');
 
-      expect(dataHandler).toHaveBeenCalledWith('incoming:conn-1', '{"namespace":"sync","type":"update"}');
+      expect(dataHandler).toHaveBeenCalledWith(
+        'incoming:conn-1',
+        '{"namespace":"sync","type":"update"}',
+      );
     });
   });
 });

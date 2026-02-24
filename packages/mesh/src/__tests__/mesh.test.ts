@@ -154,13 +154,21 @@ describe('@vibecook/truffle-mesh', () => {
     it('handles device list from primary', () => {
       const devices: BaseDevice[] = [
         {
-          id: 'dev-1', type: 'desktop', name: 'Me',
-          tailscaleHostname: 'myapp-desktop-dev-1', status: 'online', capabilities: [],
+          id: 'dev-1',
+          type: 'desktop',
+          name: 'Me',
+          tailscaleHostname: 'myapp-desktop-dev-1',
+          status: 'online',
+          capabilities: [],
         },
         {
-          id: 'dev-2', type: 'desktop', name: 'Other',
-          tailscaleHostname: 'myapp-desktop-dev-2', status: 'online',
-          capabilities: [], role: 'secondary',
+          id: 'dev-2',
+          type: 'desktop',
+          name: 'Other',
+          tailscaleHostname: 'myapp-desktop-dev-2',
+          status: 'online',
+          capabilities: [],
+          role: 'secondary',
         },
       ];
 
@@ -365,7 +373,7 @@ describe('@vibecook/truffle-mesh', () => {
 
       // Should have broadcast our candidacy
       expect(broadcastHandler).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'election:candidate' })
+        expect.objectContaining({ type: 'election:candidate' }),
       );
     });
 

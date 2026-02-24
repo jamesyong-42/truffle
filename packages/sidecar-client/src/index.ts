@@ -115,7 +115,10 @@ export interface ISidecarClient extends EventEmitter {
 
   on<K extends keyof SidecarServiceEvents>(event: K, listener: SidecarServiceEvents[K]): this;
   off<K extends keyof SidecarServiceEvents>(event: K, listener: SidecarServiceEvents[K]): this;
-  emit<K extends keyof SidecarServiceEvents>(event: K, ...args: Parameters<SidecarServiceEvents[K]>): boolean;
+  emit<K extends keyof SidecarServiceEvents>(
+    event: K,
+    ...args: Parameters<SidecarServiceEvents[K]>
+  ): boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

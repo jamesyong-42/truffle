@@ -261,10 +261,7 @@ describe('Integration: Two-node mesh', () => {
     nodeA.dm.addDiscoveredPeer(peerB);
 
     // Primary sends device list to Node B
-    const devices: BaseDevice[] = [
-      nodeA.dm.getLocalDevice(),
-      ...nodeA.dm.getDevices(),
-    ];
+    const devices: BaseDevice[] = [nodeA.dm.getLocalDevice(), ...nodeA.dm.getDevices()];
 
     const primaryChangedHandler = vi.fn();
     nodeB.dm.on('primaryChanged', primaryChangedHandler);
@@ -298,7 +295,7 @@ describe('Integration: Two-node mesh', () => {
         namespace: 'custom',
         type: 'hello',
         payload: { greeting: 'world' },
-      })
+      }),
     );
   });
 
@@ -320,10 +317,10 @@ describe('Integration: Two-node mesh', () => {
 
     // Both should receive
     expect(handlerA).toHaveBeenCalledWith(
-      expect.objectContaining({ namespace: 'events', type: 'update' })
+      expect.objectContaining({ namespace: 'events', type: 'update' }),
     );
     expect(handlerB).toHaveBeenCalledWith(
-      expect.objectContaining({ namespace: 'events', type: 'update' })
+      expect.objectContaining({ namespace: 'events', type: 'update' }),
     );
   });
 
@@ -366,10 +363,14 @@ describe('Integration: Two-node mesh', () => {
     nodeB.election.handleNoPrimaryOnStartup();
 
     nodeA.election.handleElectionCandidate('dev-b', {
-      deviceId: 'dev-b', uptime: 30000, userDesignated: false,
+      deviceId: 'dev-b',
+      uptime: 30000,
+      userDesignated: false,
     });
     nodeB.election.handleElectionCandidate('dev-a', {
-      deviceId: 'dev-a', uptime: 120000, userDesignated: false,
+      deviceId: 'dev-a',
+      uptime: 120000,
+      userDesignated: false,
     });
 
     vi.advanceTimersByTime(4000);

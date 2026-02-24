@@ -160,7 +160,7 @@ export class WebSocketTransport extends TypedEventEmitter<TransportEvents> {
     deviceId: string,
     hostname: string,
     dnsName?: string,
-    port: number = 443
+    port: number = 443,
   ): Promise<WSConnection> {
     if (!this.running) {
       throw new Error('Transport not running');
@@ -340,13 +340,20 @@ export class WebSocketTransport extends TypedEventEmitter<TransportEvents> {
   }
 
   private removeSidecarListeners(): void {
-    if (this.sidecarHandlers.wsConnect) this.sidecar.off('wsConnect', this.sidecarHandlers.wsConnect);
-    if (this.sidecarHandlers.wsMessage) this.sidecar.off('wsMessage', this.sidecarHandlers.wsMessage);
-    if (this.sidecarHandlers.wsDisconnect) this.sidecar.off('wsDisconnect', this.sidecarHandlers.wsDisconnect);
-    if (this.sidecarHandlers.dialConnected) this.sidecar.off('dialConnected', this.sidecarHandlers.dialConnected);
-    if (this.sidecarHandlers.dialMessage) this.sidecar.off('dialMessage', this.sidecarHandlers.dialMessage);
-    if (this.sidecarHandlers.dialDisconnect) this.sidecar.off('dialDisconnect', this.sidecarHandlers.dialDisconnect);
-    if (this.sidecarHandlers.dialError) this.sidecar.off('dialError', this.sidecarHandlers.dialError);
+    if (this.sidecarHandlers.wsConnect)
+      this.sidecar.off('wsConnect', this.sidecarHandlers.wsConnect);
+    if (this.sidecarHandlers.wsMessage)
+      this.sidecar.off('wsMessage', this.sidecarHandlers.wsMessage);
+    if (this.sidecarHandlers.wsDisconnect)
+      this.sidecar.off('wsDisconnect', this.sidecarHandlers.wsDisconnect);
+    if (this.sidecarHandlers.dialConnected)
+      this.sidecar.off('dialConnected', this.sidecarHandlers.dialConnected);
+    if (this.sidecarHandlers.dialMessage)
+      this.sidecar.off('dialMessage', this.sidecarHandlers.dialMessage);
+    if (this.sidecarHandlers.dialDisconnect)
+      this.sidecar.off('dialDisconnect', this.sidecarHandlers.dialDisconnect);
+    if (this.sidecarHandlers.dialError)
+      this.sidecar.off('dialError', this.sidecarHandlers.dialError);
     this.sidecarHandlers = {};
   }
 
@@ -497,7 +504,9 @@ export class WebSocketTransport extends TypedEventEmitter<TransportEvents> {
     const timeSinceActivity = now - conn.lastActivityTime;
 
     if (timeSinceActivity > this.heartbeatTimeoutMs) {
-      this.log.info(`Heartbeat timeout for ${connectionId} (no activity for ${timeSinceActivity}ms)`);
+      this.log.info(
+        `Heartbeat timeout for ${connectionId} (no activity for ${timeSinceActivity}ms)`,
+      );
       this.stopHeartbeat(connectionId);
       this.handleHeartbeatTimeout(connectionId);
       return;
@@ -614,7 +623,8 @@ export class WebSocketTransport extends TypedEventEmitter<TransportEvents> {
       return;
     }
 
-    const errorMessage = payload.error instanceof Error ? payload.error.message : String(payload.error);
+    const errorMessage =
+      payload.error instanceof Error ? payload.error.message : String(payload.error);
     const connectionInfo = payload.connectionId ? ` connection=${payload.connectionId}` : '';
     this.log.error(`error:${connectionInfo} ${errorMessage}`);
   }

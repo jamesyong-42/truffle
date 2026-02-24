@@ -71,7 +71,7 @@ export function generateHostname(prefix: string, type: string, id: string): stri
  */
 export function parseHostname(
   prefix: string,
-  hostname: string
+  hostname: string,
 ): { type: string; id: string } | null {
   const regex = new RegExp(`^${prefix}-([^-]+)-(.+)$`);
   const match = hostname.match(regex);
@@ -164,7 +164,7 @@ export function createMeshMessage<T>(
   from: string,
   payload: T,
   to?: string,
-  correlationId?: string
+  correlationId?: string,
 ): MeshMessage<T> {
   return {
     type,
@@ -508,9 +508,7 @@ export function createLogger(prefix: string): Logger {
  *
  * Usage: `class Foo extends TypedEventEmitter<{ myEvent: (x: number) => void }>`
  */
-export class TypedEventEmitter<
-  Events extends {} = {},
-> extends EventEmitter {
+export class TypedEventEmitter<Events extends {} = {}> extends EventEmitter {
   override on<K extends string & keyof Events>(
     event: K,
     listener: Events[K] & ((...args: any[]) => void),

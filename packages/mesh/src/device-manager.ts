@@ -5,11 +5,7 @@
  * All config provided via constructor injection.
  */
 
-import {
-  TypedEventEmitter,
-  parseHostname,
-  createLogger,
-} from '@vibecook/truffle-types';
+import { TypedEventEmitter, parseHostname, createLogger } from '@vibecook/truffle-types';
 import type {
   BaseDevice,
   DeviceRole,

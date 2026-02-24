@@ -45,7 +45,9 @@ function createMockMessageBus(): IMessageBus & {
   const bus = {
     subscribe: vi.fn((namespace: string, handler: BusMessageHandler) => {
       handlers.set(namespace, handler);
-      return () => { handlers.delete(namespace); };
+      return () => {
+        handlers.delete(namespace);
+      };
     }),
     publish: vi.fn(),
     broadcast: vi.fn(),
@@ -92,10 +94,7 @@ describe('@vibecook/truffle-store-sync', () => {
       createAdapter();
       adapter.start();
 
-      expect(bus.subscribe).toHaveBeenCalledWith(
-        STORE_SYNC_NAMESPACE,
-        expect.any(Function)
-      );
+      expect(bus.subscribe).toHaveBeenCalledWith(STORE_SYNC_NAMESPACE, expect.any(Function));
     });
 
     it('broadcasts all stores on start', () => {
@@ -118,7 +117,7 @@ describe('@vibecook/truffle-store-sync', () => {
           storeId: 'tasks',
           deviceId: 'dev-1',
           data: { items: ['a', 'b'] },
-        })
+        }),
       );
     });
 
@@ -129,12 +128,12 @@ describe('@vibecook/truffle-store-sync', () => {
       expect(bus.broadcast).toHaveBeenCalledWith(
         STORE_SYNC_NAMESPACE,
         STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST,
-        expect.objectContaining({ storeId: 'tasks' })
+        expect.objectContaining({ storeId: 'tasks' }),
       );
       expect(bus.broadcast).toHaveBeenCalledWith(
         STORE_SYNC_NAMESPACE,
         STORE_SYNC_MESSAGE_TYPES.SYNC_REQUEST,
-        expect.objectContaining({ storeId: 'settings' })
+        expect.objectContaining({ storeId: 'settings' }),
       );
     });
 
@@ -256,7 +255,7 @@ describe('@vibecook/truffle-store-sync', () => {
           storeId: 'tasks',
           deviceId: 'dev-1',
           data: { items: ['local'] },
-        })
+        }),
       );
     });
 
@@ -381,7 +380,7 @@ describe('@vibecook/truffle-store-sync', () => {
           deviceId: 'dev-1',
           data: { items: ['updated'] },
           version: 6,
-        })
+        }),
       );
     });
 
@@ -422,7 +421,7 @@ describe('@vibecook/truffle-store-sync', () => {
           storeId: 'tasks',
           deviceId: 'dev-2',
           reason: 'offline',
-        })
+        }),
       );
       expect(bus.broadcast).toHaveBeenCalledWith(
         STORE_SYNC_NAMESPACE,
@@ -431,7 +430,7 @@ describe('@vibecook/truffle-store-sync', () => {
           storeId: 'settings',
           deviceId: 'dev-2',
           reason: 'offline',
-        })
+        }),
       );
     });
 
@@ -457,7 +456,7 @@ describe('@vibecook/truffle-store-sync', () => {
         expect.objectContaining({
           storeId: 'tasks',
           deviceId: 'dev-1',
-        })
+        }),
       );
 
       // Should request sync from discovered device
@@ -467,7 +466,7 @@ describe('@vibecook/truffle-store-sync', () => {
         expect.objectContaining({
           storeId: 'tasks',
           fromDeviceId: 'dev-3',
-        })
+        }),
       );
     });
   });

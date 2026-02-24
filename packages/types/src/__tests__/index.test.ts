@@ -190,14 +190,12 @@ describe('@vibecook/truffle-types', () => {
 
     it('validates PongPayload', () => {
       expect(
-        PongPayloadSchema.safeParse({ timestamp: Date.now(), echoTimestamp: Date.now() }).success
+        PongPayloadSchema.safeParse({ timestamp: Date.now(), echoTimestamp: Date.now() }).success,
       ).toBe(true);
     });
 
     it('validates MeshErrorPayload', () => {
-      expect(
-        MeshErrorPayloadSchema.safeParse({ code: 'ERR', message: 'test' }).success
-      ).toBe(true);
+      expect(MeshErrorPayloadSchema.safeParse({ code: 'ERR', message: 'test' }).success).toBe(true);
     });
   });
 
@@ -254,7 +252,7 @@ describe('@vibecook/truffle-types', () => {
     it('validates SyncRequestPayload', () => {
       expect(SyncRequestPayloadSchema.safeParse({ storeId: 'mystore' }).success).toBe(true);
       expect(
-        SyncRequestPayloadSchema.safeParse({ storeId: 'mystore', fromDeviceId: 'dev-1' }).success
+        SyncRequestPayloadSchema.safeParse({ storeId: 'mystore', fromDeviceId: 'dev-1' }).success,
       ).toBe(true);
     });
 

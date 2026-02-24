@@ -7,11 +7,7 @@
  * 3. Alphabetically lowest device ID as tiebreaker
  */
 
-import {
-  TypedEventEmitter,
-  createMeshMessage,
-  createLogger,
-} from '@vibecook/truffle-types';
+import { TypedEventEmitter, createMeshMessage, createLogger } from '@vibecook/truffle-types';
 import type {
   MeshMessage,
   ElectionCandidatePayload,
@@ -166,7 +162,7 @@ export class PrimaryElection extends TypedEventEmitter<PrimaryElectionEvents> {
     const candidateMessage = createMeshMessage(
       'election:candidate',
       this.config.deviceId,
-      myCandidate
+      myCandidate,
     );
     this.emit('broadcast', candidateMessage);
 
@@ -228,11 +224,7 @@ export class PrimaryElection extends TypedEventEmitter<PrimaryElectionEvents> {
       newPrimaryId: this.config.deviceId,
       reason: 'election',
     };
-    const resultMessage = createMeshMessage(
-      'election:result',
-      this.config.deviceId,
-      resultPayload
-    );
+    const resultMessage = createMeshMessage('election:result', this.config.deviceId, resultPayload);
     this.emit('broadcast', resultMessage);
     this.emit('primaryElected', this.config.deviceId, true);
   }
@@ -261,7 +253,7 @@ export class PrimaryElection extends TypedEventEmitter<PrimaryElectionEvents> {
       const candidateMessage = createMeshMessage(
         'election:candidate',
         this.config.deviceId,
-        myCandidate
+        myCandidate,
       );
       this.emit('broadcast', candidateMessage);
 
@@ -274,7 +266,7 @@ export class PrimaryElection extends TypedEventEmitter<PrimaryElectionEvents> {
   handleElectionCandidate(from: string, payload: ElectionCandidatePayload): void {
     if (!this.config) return;
     this.log.info(
-      `Received candidacy from ${from}: uptime=${payload.uptime}, designated=${payload.userDesignated}`
+      `Received candidacy from ${from}: uptime=${payload.uptime}, designated=${payload.userDesignated}`,
     );
     this.state.candidates.set(payload.deviceId, payload);
   }

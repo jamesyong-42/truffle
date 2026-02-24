@@ -14,9 +14,4 @@ export {
   MAX_MESSAGE_SIZE,
 } from './frame-codec.js';
 
-export type {
-  BusMessage,
-  BusMessageHandler,
-  IMessageBus,
-  MessageBusEvents,
-} from './messaging.js';
+export type { BusMessage, BusMessageHandler, IMessageBus, MessageBusEvents } from './messaging.js';
