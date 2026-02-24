@@ -8,7 +8,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'API', link: '/api/' },
-      { text: 'GitHub', link: 'https://github.com/vibecook/truffle' },
+      { text: 'GitHub', link: 'https://github.com/jamesyong-42/truffle' },
     ],
     sidebar: {
       '/guide/': [

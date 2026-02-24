@@ -37,7 +37,7 @@ function getDownloadUrl(version) {
   if (!asset) {
     return null;
   }
-  return `https://github.com/vibecook/truffle/releases/download/v${version}/${asset}`;
+  return `https://github.com/jamesyong-42/truffle/releases/download/v${version}/${asset}`;
 }
 
 function download(url) {

@@ -42,4 +42,4 @@ npm install @vibecook/truffle
 | Package | Description |
 |---------|-------------|
 | [`@vibecook/truffle-react`](/api/react) | React hooks |
-| [`@vibecook/truffle-cli`](https://github.com/vibecook/truffle/tree/main/packages/cli) | CLI tool |
+| [`@vibecook/truffle-cli`](https://github.com/jamesyong-42/truffle/tree/main/packages/cli) | CLI tool |
