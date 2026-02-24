@@ -1,0 +1,28 @@
+{
+  "name": "@vibecook/truffle-sidecar-bin",
+  "version": "0.1.0",
+  "description": "Prebuilt sidecar binary for Truffle mesh networking",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibecook/truffle.git",
+    "directory": "packages/sidecar-bin"
+  },
+  "homepage": "https://github.com/vibecook/truffle#readme",
+  "bugs": {
+    "url": "https://github.com/vibecook/truffle/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "files": [
+    "src",
+    "bin"
+  ],
+  "scripts": {
+    "postinstall": "node src/install.js"
+  }
+}

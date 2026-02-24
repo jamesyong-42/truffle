@@ -1,0 +1,45 @@
+{
+  "name": "@vibecook/truffle-mesh",
+  "version": "0.1.0",
+  "description": "Main entry point for Truffle mesh networking - device discovery, STAR routing, primary election",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibecook/truffle.git",
+    "directory": "packages/mesh"
+  },
+  "homepage": "https://github.com/vibecook/truffle#readme",
+  "bugs": {
+    "url": "https://github.com/vibecook/truffle/issues"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vibecook/truffle-types": "workspace:*",
+    "@vibecook/truffle-protocol": "workspace:*",
+    "@vibecook/truffle-sidecar-client": "workspace:*",
+    "@vibecook/truffle-transport": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

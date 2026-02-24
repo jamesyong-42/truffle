@@ -1,0 +1,42 @@
+{
+  "name": "@vibecook/truffle",
+  "version": "0.1.0",
+  "description": "Mesh networking for local-first apps, built on Tailscale",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibecook/truffle.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/vibecook/truffle#readme",
+  "bugs": {
+    "url": "https://github.com/vibecook/truffle/issues"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vibecook/truffle-types": "workspace:*",
+    "@vibecook/truffle-protocol": "workspace:*",
+    "@vibecook/truffle-mesh": "workspace:*",
+    "@vibecook/truffle-store-sync": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

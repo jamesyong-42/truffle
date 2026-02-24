@@ -1,0 +1,64 @@
+name: Release Sidecar Binaries
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            asset: tsnet-sidecar-darwin-arm64
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            asset: tsnet-sidecar-darwin-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            asset: tsnet-sidecar-linux-amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            asset: tsnet-sidecar-linux-arm64
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            asset: tsnet-sidecar-windows-amd64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: packages/sidecar/go.sum
+
+      - name: Build sidecar
+        working-directory: packages/sidecar
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          SUFFIX=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then SUFFIX=".exe"; fi
+          go build -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
+            -o "${{ matrix.asset }}" .
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "packages/sidecar/${{ matrix.asset }}" \
+            --clobber

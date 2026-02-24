@@ -1,0 +1,47 @@
+{
+  "name": "@vibecook/truffle-root",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Standalone mesh networking library built on Tailscale",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibecook/truffle.git"
+  },
+  "homepage": "https://github.com/vibecook/truffle#readme",
+  "bugs": {
+    "url": "https://github.com/vibecook/truffle/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r --filter '!@vibecook/truffle-docs' run build",
+    "test": "pnpm -r run test",
+    "clean": "pnpm -r run clean",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "eslint 'packages/*/src/**/*.ts'",
+    "lint:fix": "eslint 'packages/*/src/**/*.ts' --fix",
+    "format": "prettier --write 'packages/*/src/**/*.ts'",
+    "format:check": "prettier --check 'packages/*/src/**/*.ts'",
+    "docs:dev": "pnpm --filter @vibecook/truffle-docs dev",
+    "docs:build": "pnpm --filter @vibecook/truffle-docs build",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm run build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^10.0.2",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.56.1",
+    "vitest": "^3.0.0"
+  }
+}

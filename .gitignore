@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Sidecar binary
+packages/sidecar-bin/bin/
+
+# VitePress
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# State directories
+.truffle-state/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

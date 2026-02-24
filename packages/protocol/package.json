@@ -1,0 +1,43 @@
+{
+  "name": "@vibecook/truffle-protocol",
+  "version": "0.1.0",
+  "description": "Wire format and message bus interface for Truffle mesh networking",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vibecook/truffle.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/vibecook/truffle#readme",
+  "bugs": {
+    "url": "https://github.com/vibecook/truffle/issues"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0",
+    "@vibecook/truffle-types": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
