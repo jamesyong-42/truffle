@@ -2,6 +2,15 @@
 name = "truffle-core"
 version = "0.1.0"
 edition = "2021"
+description = "Mesh networking for local-first apps, built on Tailscale"
+license = "MIT"
+repository = "https://github.com/jamesyong-42/truffle"
+homepage = "https://github.com/jamesyong-42/truffle"
+documentation = "https://docs.rs/truffle-core"
+readme = "../../README.md"
+keywords = ["mesh", "networking", "tailscale", "local-first", "p2p"]
+categories = ["network-programming", "asynchronous"]
+exclude = ["tests/", "benches/"]
 
 [lib]
 name = "truffle_core"

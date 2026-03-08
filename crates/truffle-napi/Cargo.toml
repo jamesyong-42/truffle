@@ -2,6 +2,10 @@
 name = "truffle-napi"
 version = "0.1.0"
 edition = "2021"
+description = "NAPI-RS bindings for truffle-core (published to npm, not crates.io)"
+license = "MIT"
+repository = "https://github.com/jamesyong-42/truffle"
+publish = false
 
 [lib]
 crate-type = ["cdylib"]

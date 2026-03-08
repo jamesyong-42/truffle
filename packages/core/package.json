@@ -2,16 +2,8 @@
   "name": "@vibecook/truffle",
   "version": "0.1.0",
   "description": "Mesh networking for local-first apps, built on Tailscale",
-  "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
   "license": "MIT",
+  "author": "James Yong",
   "repository": {
     "type": "git",
     "url": "https://github.com/jamesyong-42/truffle.git",
@@ -21,10 +13,34 @@
   "bugs": {
     "url": "https://github.com/jamesyong-42/truffle/issues"
   },
-  "files": ["dist"],
+  "keywords": [
+    "mesh",
+    "networking",
+    "tailscale",
+    "local-first",
+    "p2p",
+    "napi",
+    "rust"
+  ],
   "engines": {
     "node": ">=18"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",

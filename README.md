@@ -1,101 +1,153 @@
 # Truffle
 
-[![CI](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/truffle-core)](https://crates.io/crates/truffle-core)
 [![npm](https://img.shields.io/npm/v/@vibecook/truffle)](https://www.npmjs.com/package/@vibecook/truffle)
+[![CI](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Mesh networking for local-first apps, built on Tailscale.**
 
-Truffle lets your devices discover each other, elect a primary, and exchange messages over a secure Tailscale network — no central server required.
+Truffle lets your devices discover each other, elect a primary, and exchange messages over a secure Tailscale network -- no central server required. The core is written in Rust with bindings for Node.js (via NAPI-RS) and Tauri desktop apps.
 
 ## Features
 
-- **Device Discovery** — Automatic peer discovery via Tailscale
-- **STAR Topology** — Primary election with automatic failover
-- **Message Bus** — Namespace-based pub/sub across devices
-- **State Sync** — Cross-device store synchronization
-- **File Transfer** — Native Go data plane with resumable transfers, SHA-256 verification, and real-time progress (no file bytes in JS)
-- **Wire Protocol** — MessagePack/JSON framing with length-prefixed codec
-- **Zero Config** — Works out of the box with Tailscale auth keys
+- **Device Discovery** -- Automatic peer discovery via Tailscale
+- **STAR Topology** -- Primary election with automatic failover
+- **Message Bus** -- Namespace-based pub/sub across devices
+- **State Sync** -- Cross-device store synchronization
+- **File Transfer** -- Resumable transfers with SHA-256 verification and real-time progress
+- **Reverse Proxy** -- Built-in HTTP reverse proxy over the mesh
+- **Wire Protocol** -- MessagePack/JSON framing with length-prefixed codec
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Your App                        │
-├─────────────────────────────────────────────────┤
-│  Layer 2: MessageBus (pub/sub)                  │
-│           StoreSyncAdapter                       │
-│           FileTransferAdapter (control plane)    │
-├─────────────────────────────────────────────────┤
-│  Layer 1: MeshNode (routing, election, discovery)│
-├─────────────────────────────────────────────────┤
-│  Layer 0: WebSocketTransport (connections)       │
-├─────────────────────────────────────────────────┤
-│  SidecarClient (IPC to Go binary)               │
-├─────────────────────────────────────────────────┤
-│  Go Sidecar (tsnet + file transfer data plane)  │
-└─────────────────────────────────────────────────┘
++---------------------------------------------------+
+|                   Your App                        |
++---------------------------------------------------+
+|  React Hooks / CLI (optional)                     |
++---------------------------------------------------+
+|  @vibecook/truffle (npm) | truffle-core (cargo)   |
++---------------------------------------------------+
+|  NAPI-RS bridge (Node.js) | Tauri plugin (desktop) |
++---------------------------------------------------+
+|             truffle-core (Rust)                    |
++---------------------------------------------------+
+|           Go shim (tsnet sidecar)                  |
++---------------------------------------------------+
+|             Tailscale network                      |
++---------------------------------------------------+
 ```
 
-File transfers use a split architecture: the TypeScript `FileTransferAdapter` handles signaling (offer/accept/reject via MessageBus) while the Go sidecar streams file bytes directly over Tailscale TCP — no file data passes through Node.js. See [RFC 002](docs/rfcs/002-file-transfer-native.md) for design details.
+The Rust core (`truffle-core`) implements all mesh logic: device discovery, primary election, message routing, store sync, file transfer, and reverse proxy. A thin Go shim (`sidecar-slim`) provides the Tailscale `tsnet` integration -- it manages the Tailscale node and bridges connections to the Rust core via WebSocket.
 
-## Quick Start
+## Installation
+
+**npm:**
 
 ```bash
 npm install @vibecook/truffle
 ```
 
-```typescript
-import { createMeshNode } from '@vibecook/truffle';
+**Cargo:**
 
-const node = createMeshNode({
+```toml
+[dependencies]
+truffle-core = "0.1"
+```
+
+**Tauri v2:**
+
+```toml
+[dependencies]
+truffle-tauri-plugin = { git = "https://github.com/jamesyong-42/truffle" }
+```
+
+## Quick Start
+
+### Node.js
+
+```typescript
+import { NapiMeshNode } from '@vibecook/truffle';
+
+const node = new NapiMeshNode({
   deviceId: 'my-device-id',
   deviceName: 'My Laptop',
   deviceType: 'desktop',
   hostnamePrefix: 'myapp',
-  sidecarPath: './path/to/sidecar',
+  sidecarPath: './sidecar-slim',
   stateDir: './tailscale-state',
 });
 
-node.on('deviceDiscovered', (device) => {
-  console.log('Found device:', device.name);
-});
-
-node.on('roleChanged', (role, isPrimary) => {
-  console.log(`Role: ${role}, isPrimary: ${isPrimary}`);
+// Subscribe to events
+node.onEvent((err, event) => {
+  if (err) return;
+  console.log(event.eventType, event.deviceId, event.payload);
 });
 
 await node.start();
+
+// Discover devices
+const devices = await node.devices();
+console.log('Devices on mesh:', devices);
+
+// Send a message
+await node.broadcastEnvelope('chat', 'message', { text: 'Hello mesh!' });
+```
+
+### Rust
+
+```rust
+use truffle_core::mesh::MeshNode;
+use truffle_core::types::MeshNodeConfig;
+
+let config = MeshNodeConfig {
+    device_id: "my-device".into(),
+    device_name: "My Laptop".into(),
+    device_type: "desktop".into(),
+    hostname_prefix: "myapp".into(),
+    sidecar_path: "./sidecar-slim".into(),
+    state_dir: "./tailscale-state".into(),
+    ..Default::default()
+};
+
+let node = MeshNode::new(config);
+node.start().await?;
+
+let devices = node.devices().await;
+node.broadcast_envelope("chat", "message", payload).await?;
+```
+
+### React
+
+```tsx
+import { useMesh } from '@vibecook/truffle-react';
+
+function MeshStatus({ node }) {
+  const { devices, isPrimary, role, broadcast } = useMesh(node);
+
+  return (
+    <div>
+      <p>Role: {role} {isPrimary ? '(primary)' : ''}</p>
+      <p>Devices: {devices.length}</p>
+      <button onClick={() => broadcast('chat', 'ping', { ts: Date.now() })}>
+        Ping
+      </button>
+    </div>
+  );
+}
 ```
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| [`@vibecook/truffle`](packages/core) | Unified entry point — install this |
-| [`@vibecook/truffle-types`](packages/types) | Type definitions and Zod schemas |
-| [`@vibecook/truffle-protocol`](packages/protocol) | Wire format (MessagePack/JSON codec) and message bus interface |
-| [`@vibecook/truffle-sidecar-client`](packages/sidecar-client) | TypeScript client for the Go sidecar process |
-| [`@vibecook/truffle-transport`](packages/transport) | WebSocket transport layer over Tailscale |
-| [`@vibecook/truffle-mesh`](packages/mesh) | Device discovery, STAR routing, primary election, file transfer adapter |
-| [`@vibecook/truffle-store-sync`](packages/store-sync) | Cross-device state synchronization |
+| [`@vibecook/truffle`](packages/core) | Main npm package -- install this |
+| [`@vibecook/truffle-native`](crates/truffle-napi) | NAPI-RS native addon (used internally) |
 | [`@vibecook/truffle-react`](packages/react) | React hooks (`useMesh`, `useSyncedStore`) |
 | [`@vibecook/truffle-cli`](packages/cli) | CLI tool for scaffolding and dev mode |
-
-## Prerequisites
-
-- **Node.js** >= 18
-- **Tailscale** — installed and authenticated (or use an auth key)
-- **Go** >= 1.22 — required to build the sidecar binary
-
-## Examples
-
-See the [`examples/`](examples) directory:
-
-- **[discovery](examples/discovery)** — Find peers on the mesh
-- **[chat](examples/chat)** — Cross-device messaging
-- **[shared-state](examples/shared-state)** — Synced todo list using `StoreSyncAdapter`
+| [`truffle-core`](crates/truffle-core) | Pure Rust library (crates.io) |
+| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Tauri v2 plugin |
 
 ## Development
 
@@ -103,25 +155,27 @@ See the [`examples/`](examples) directory:
 # Install dependencies
 pnpm install
 
-# Build all packages
+# Build Rust + NAPI addon
+cargo build --workspace
+cd crates/truffle-napi && pnpm run build
+
+# Build TypeScript packages
 pnpm run build
 
-# Run TypeScript tests
-pnpm run test
+# Run Rust tests (186 tests)
+cargo test --workspace
 
-# Run Go sidecar tests
-cd packages/sidecar && go test ./...
-
-# Run Go file transfer tests with verbose output
-cd packages/sidecar && go test -v ./internal/filetransfer/...
-
-# Lint & format
+# Lint and format
 pnpm run lint
 pnpm run format:check
-
-# Run docs site locally
-pnpm run docs:dev
 ```
+
+### Prerequisites
+
+- **Rust** >= 1.75
+- **Node.js** >= 18
+- **Go** >= 1.22 (for building the sidecar shim)
+- **Tailscale** installed and authenticated (or use an auth key)
 
 ## License
 

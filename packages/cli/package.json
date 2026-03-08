@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "CLI for Truffle mesh networking",
   "license": "MIT",
+  "author": "James Yong",
   "repository": {
     "type": "git",
     "url": "https://github.com/jamesyong-42/truffle.git",
@@ -12,8 +13,19 @@
   "bugs": {
     "url": "https://github.com/jamesyong-42/truffle/issues"
   },
+  "keywords": [
+    "mesh",
+    "networking",
+    "tailscale",
+    "local-first",
+    "p2p",
+    "cli"
+  ],
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "type": "module",
   "bin": {

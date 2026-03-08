@@ -2,6 +2,10 @@
 name = "truffle-tauri-plugin"
 version = "0.1.0"
 edition = "2021"
+description = "Tauri v2 plugin for truffle-core mesh networking"
+license = "MIT"
+repository = "https://github.com/jamesyong-42/truffle"
+publish = false
 links = "truffle-tauri-plugin"
 
 [lib]
