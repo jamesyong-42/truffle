@@ -62,7 +62,7 @@ impl<R: AsyncRead> AsyncRead for HashingReader<R> {
 pub async fn hash_file(
     path: &str,
     _total_size: i64,
-    on_progress: Option<&dyn Fn(i64)>,
+    on_progress: Option<&(dyn Fn(i64) + Send + Sync)>,
 ) -> std::io::Result<String> {
     use tokio::io::AsyncReadExt;
 
@@ -208,14 +208,14 @@ mod tests {
         let data = vec![42u8; 1024 * 1024]; // 1MB
         tokio::fs::write(&path, &data).await.unwrap();
 
-        let progress_called = std::cell::Cell::new(false);
+        let progress_called = std::sync::atomic::AtomicBool::new(false);
         let hash = hash_file(path.to_str().unwrap(), data.len() as i64, Some(&|_bytes| {
-            progress_called.set(true);
+            progress_called.store(true, std::sync::atomic::Ordering::SeqCst);
         }))
         .await
         .unwrap();
 
-        assert!(progress_called.get());
+        assert!(progress_called.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!hash.is_empty());
     }
 
