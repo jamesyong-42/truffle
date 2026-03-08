@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-primary-id"
+description = "Enables the primary_id command without any pre-configured scope."
+commands.allow = ["primary_id"]
+
+[[permission]]
+identifier = "deny-primary-id"
+description = "Denies the primary_id command without any pre-configured scope."
+commands.deny = ["primary_id"]

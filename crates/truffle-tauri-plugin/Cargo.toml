@@ -1,0 +1,21 @@
+[package]
+name = "truffle-tauri-plugin"
+version = "0.1.0"
+edition = "2021"
+links = "truffle-tauri-plugin"
+
+[lib]
+name = "truffle_tauri_plugin"
+path = "src/lib.rs"
+
+[dependencies]
+truffle-core = { path = "../truffle-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin = { version = "2", features = ["build"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

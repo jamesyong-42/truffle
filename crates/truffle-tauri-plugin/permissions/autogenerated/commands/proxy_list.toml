@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-proxy-list"
+description = "Enables the proxy_list command without any pre-configured scope."
+commands.allow = ["proxy_list"]
+
+[[permission]]
+identifier = "deny-proxy-list"
+description = "Denies the proxy_list command without any pre-configured scope."
+commands.deny = ["proxy_list"]

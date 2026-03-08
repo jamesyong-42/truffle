@@ -1,0 +1,20 @@
+[default]
+description = "Default permissions for the Truffle plugin"
+permissions = [
+    "allow-start",
+    "allow-stop",
+    "allow-is-running",
+    "allow-device-id",
+    "allow-devices",
+    "allow-device-by-id",
+    "allow-is-primary",
+    "allow-primary-id",
+    "allow-role",
+    "allow-send-envelope",
+    "allow-broadcast-envelope",
+    "allow-handle-tailnet-peers",
+    "allow-set-local-online",
+    "allow-proxy-add",
+    "allow-proxy-remove",
+    "allow-proxy-list",
+]

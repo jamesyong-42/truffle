@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-handle-tailnet-peers"
+description = "Enables the handle_tailnet_peers command without any pre-configured scope."
+commands.allow = ["handle_tailnet_peers"]
+
+[[permission]]
+identifier = "deny-handle-tailnet-peers"
+description = "Denies the handle_tailnet_peers command without any pre-configured scope."
+commands.deny = ["handle_tailnet_peers"]

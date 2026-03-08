@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-proxy-remove"
+description = "Enables the proxy_remove command without any pre-configured scope."
+commands.allow = ["proxy_remove"]
+
+[[permission]]
+identifier = "deny-proxy-remove"
+description = "Denies the proxy_remove command without any pre-configured scope."
+commands.deny = ["proxy_remove"]

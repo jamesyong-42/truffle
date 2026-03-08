@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-send-envelope"
+description = "Enables the send_envelope command without any pre-configured scope."
+commands.allow = ["send_envelope"]
+
+[[permission]]
+identifier = "deny-send-envelope"
+description = "Denies the send_envelope command without any pre-configured scope."
+commands.deny = ["send_envelope"]
