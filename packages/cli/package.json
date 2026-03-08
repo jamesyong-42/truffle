@@ -28,9 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vibecook/truffle-mesh": "workspace:*",
-    "@vibecook/truffle-types": "workspace:*",
-    "@vibecook/truffle-sidecar-client": "workspace:*",
+    "@vibecook/truffle": "workspace:*",
     "citty": "^0.1.6",
     "consola": "^3.4.0"
   }

@@ -1,5 +1,7 @@
 # Truffle
 
+[![CI](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@vibecook/truffle)](https://www.npmjs.com/package/@vibecook/truffle)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Mesh networking for local-first apps, built on Tailscale.**
@@ -12,6 +14,7 @@ Truffle lets your devices discover each other, elect a primary, and exchange mes
 - **STAR Topology** — Primary election with automatic failover
 - **Message Bus** — Namespace-based pub/sub across devices
 - **State Sync** — Cross-device store synchronization
+- **File Transfer** — Native Go data plane with resumable transfers, SHA-256 verification, and real-time progress (no file bytes in JS)
 - **Wire Protocol** — MessagePack/JSON framing with length-prefixed codec
 - **Zero Config** — Works out of the box with Tailscale auth keys
 
@@ -23,6 +26,7 @@ Truffle lets your devices discover each other, elect a primary, and exchange mes
 ├─────────────────────────────────────────────────┤
 │  Layer 2: MessageBus (pub/sub)                  │
 │           StoreSyncAdapter                       │
+│           FileTransferAdapter (control plane)    │
 ├─────────────────────────────────────────────────┤
 │  Layer 1: MeshNode (routing, election, discovery)│
 ├─────────────────────────────────────────────────┤
@@ -30,9 +34,11 @@ Truffle lets your devices discover each other, elect a primary, and exchange mes
 ├─────────────────────────────────────────────────┤
 │  SidecarClient (IPC to Go binary)               │
 ├─────────────────────────────────────────────────┤
-│  Go Sidecar (embeds Tailscale tsnet)            │
+│  Go Sidecar (tsnet + file transfer data plane)  │
 └─────────────────────────────────────────────────┘
 ```
+
+File transfers use a split architecture: the TypeScript `FileTransferAdapter` handles signaling (offer/accept/reject via MessageBus) while the Go sidecar streams file bytes directly over Tailscale TCP — no file data passes through Node.js. See [RFC 002](docs/rfcs/002-file-transfer-native.md) for design details.
 
 ## Quick Start
 
@@ -72,14 +78,24 @@ await node.start();
 | [`@vibecook/truffle-protocol`](packages/protocol) | Wire format (MessagePack/JSON codec) and message bus interface |
 | [`@vibecook/truffle-sidecar-client`](packages/sidecar-client) | TypeScript client for the Go sidecar process |
 | [`@vibecook/truffle-transport`](packages/transport) | WebSocket transport layer over Tailscale |
-| [`@vibecook/truffle-mesh`](packages/mesh) | Device discovery, STAR routing, primary election |
+| [`@vibecook/truffle-mesh`](packages/mesh) | Device discovery, STAR routing, primary election, file transfer adapter |
 | [`@vibecook/truffle-store-sync`](packages/store-sync) | Cross-device state synchronization |
+| [`@vibecook/truffle-react`](packages/react) | React hooks (`useMesh`, `useSyncedStore`) |
+| [`@vibecook/truffle-cli`](packages/cli) | CLI tool for scaffolding and dev mode |
 
 ## Prerequisites
 
 - **Node.js** >= 18
 - **Tailscale** — installed and authenticated (or use an auth key)
-- **Go** >= 1.21 — required to build the sidecar binary
+- **Go** >= 1.22 — required to build the sidecar binary
+
+## Examples
+
+See the [`examples/`](examples) directory:
+
+- **[discovery](examples/discovery)** — Find peers on the mesh
+- **[chat](examples/chat)** — Cross-device messaging
+- **[shared-state](examples/shared-state)** — Synced todo list using `StoreSyncAdapter`
 
 ## Development
 
@@ -90,11 +106,21 @@ pnpm install
 # Build all packages
 pnpm run build
 
-# Run all tests
+# Run TypeScript tests
 pnpm run test
 
-# Type check
-pnpm run typecheck
+# Run Go sidecar tests
+cd packages/sidecar && go test ./...
+
+# Run Go file transfer tests with verbose output
+cd packages/sidecar && go test -v ./internal/filetransfer/...
+
+# Lint & format
+pnpm run lint
+pnpm run format:check
+
+# Run docs site locally
+pnpm run docs:dev
 ```
 
 ## License

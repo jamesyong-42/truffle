@@ -31,10 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vibecook/truffle-types": "workspace:*",
-    "@vibecook/truffle-protocol": "workspace:*",
-    "@vibecook/truffle-mesh": "workspace:*",
-    "@vibecook/truffle-store-sync": "workspace:*"
+    "@vibecook/truffle-native": "file:../../crates/truffle-napi"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

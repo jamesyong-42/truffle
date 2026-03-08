@@ -7,8 +7,6 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../types" },
-    { "path": "../mesh" },
-    { "path": "../store-sync" }
+    { "path": "../core" }
   ]
 }

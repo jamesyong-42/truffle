@@ -1,0 +1,183 @@
+name: NAPI Build
+
+env:
+  DEBUG: napi:*
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+permissions:
+  contents: write
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: |
+              cd crates/truffle-napi
+              npx napi build --platform --release --target aarch64-apple-darwin
+              strip -x *.node
+
+          - host: macos-13
+            target: x86_64-apple-darwin
+            build: |
+              cd crates/truffle-napi
+              npx napi build --platform --release --target x86_64-apple-darwin
+              strip -x *.node
+
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: |
+              cd crates/truffle-napi
+              npx napi build --platform --release --target x86_64-unknown-linux-gnu
+              strip *.node
+
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: |
+              cd crates/truffle-napi
+              npx napi build --platform --release --target aarch64-unknown-linux-gnu
+              aarch64-linux-gnu-strip *.node
+
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: |
+              cd crates/truffle-napi
+              npx napi build --platform --release --target x86_64-pc-windows-msvc
+
+    name: Build - ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install dependencies
+        run: |
+          cd crates/truffle-napi
+          npm install
+
+      - name: Build native addon
+        run: ${{ matrix.settings.build }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/truffle-napi/*.node
+          if-no-files-found: error
+
+  test:
+    name: Test bindings
+    needs: build
+    runs-on: ${{ matrix.settings.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: macos-13
+            target: x86_64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          cd crates/truffle-napi
+          npm install
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/truffle-napi
+
+      - name: Test bindings
+        run: |
+          cd crates/truffle-napi
+          node -e "const m = require('./index.js'); console.log('Native addon loaded successfully. Exports:', Object.keys(m))"
+
+  cargo-test:
+    name: Cargo tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+  publish:
+    name: Publish to npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, cargo-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: |
+          cd crates/truffle-napi
+          npm install
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: crates/truffle-napi/artifacts
+
+      - name: Move artifacts
+        run: npx napi artifacts --cwd crates/truffle-napi
+
+      - name: Publish
+        run: |
+          cd crates/truffle-napi
+          npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

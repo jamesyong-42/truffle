@@ -9,12 +9,7 @@
   "linked": [
     [
       "@vibecook/truffle",
-      "@vibecook/truffle-types",
-      "@vibecook/truffle-protocol",
-      "@vibecook/truffle-sidecar-client",
-      "@vibecook/truffle-transport",
-      "@vibecook/truffle-mesh",
-      "@vibecook/truffle-store-sync",
+      "@vibecook/truffle-native",
       "@vibecook/truffle-react",
       "@vibecook/truffle-cli"
     ]
@@ -23,7 +18,6 @@
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": [
-    "@vibecook/truffle-docs",
-    "@vibecook/truffle-sidecar-bin"
+    "@vibecook/truffle-docs"
   ]
 }

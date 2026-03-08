@@ -2,6 +2,12 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# NAPI native binaries
+*.node
+
+# Rust build output
+target/
+
 # Sidecar binary
 packages/sidecar-bin/bin/
 

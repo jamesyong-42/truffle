@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { BaseDevice, DeviceRole } from '@vibecook/truffle-types';
-import type { MeshNode } from '@vibecook/truffle-mesh';
+// TODO: Rewrite to use NapiMeshNode API (async methods, callback-based events)
+import type { NapiBaseDevice as BaseDevice, NapiMeshNode as MeshNode } from '@vibecook/truffle';
+type DeviceRole = string;
 
 export interface UseMeshResult {
   devices: BaseDevice[];

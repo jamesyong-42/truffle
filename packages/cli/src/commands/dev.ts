@@ -2,8 +2,10 @@ import { defineCommand } from 'citty';
 import { consola } from 'consola';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { createMeshNode } from '@vibecook/truffle-mesh';
-import type { BaseDevice, DeviceRole, Logger } from '@vibecook/truffle-types';
+// TODO: Rewrite to use NapiMeshNode API (async methods, callback-based events)
+import type { NapiMeshNode, NapiMeshNodeConfig, NapiBaseDevice as BaseDevice } from '@vibecook/truffle';
+type DeviceRole = string;
+type Logger = { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void; debug: (...args: any[]) => void; };
 
 function createCliLogger(): Logger {
   return {
@@ -62,7 +64,8 @@ export const devCommand = defineCommand({
 
     consola.start(`Starting Truffle dev node: ${args.name} (${deviceId})`);
 
-    const node = createMeshNode({
+    // TODO: Rewrite event handling for NAPI callback-based API
+    const node = new NapiMeshNode({
       deviceId,
       deviceName: args.name,
       deviceType: args.type,
@@ -70,7 +73,6 @@ export const devCommand = defineCommand({
       sidecarPath: args.sidecar,
       stateDir: args['state-dir'],
       authKey: args['auth-key'],
-      logger,
     });
 
     node.on('started', () => {

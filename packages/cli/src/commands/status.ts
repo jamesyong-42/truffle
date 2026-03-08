@@ -46,7 +46,7 @@ export const statusCommand = defineCommand({
       consola.success(`Sidecar: ${sidecarPath}`);
     } catch {
       consola.warn('Sidecar binary not found at ./sidecar');
-      consola.info('Install with: npm install @vibecook/truffle-sidecar-bin');
+      consola.info('Build the sidecar-slim binary from packages/sidecar-slim/');
     }
 
     // Check for package.json dependencies

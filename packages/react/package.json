@@ -27,9 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vibecook/truffle-types": "workspace:*",
-    "@vibecook/truffle-mesh": "workspace:*",
-    "@vibecook/truffle-store-sync": "workspace:*"
+    "@vibecook/truffle": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18"

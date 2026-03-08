@@ -6,8 +6,6 @@
   },
   "include": ["src"],
   "references": [
-    { "path": "../types" },
-    { "path": "../mesh" },
-    { "path": "../sidecar-client" }
+    { "path": "../core" }
   ]
 }

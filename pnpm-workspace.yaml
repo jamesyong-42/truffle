@@ -1,3 +1,4 @@
 packages:
   - 'packages/*'
+  - 'crates/truffle-napi'
   - 'docs'

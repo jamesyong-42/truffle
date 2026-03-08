@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react';
-import type { DeviceSlice } from '@vibecook/truffle-types';
-import type { ISyncableStore } from '@vibecook/truffle-store-sync';
+// TODO: Rewrite to use NapiStoreSyncAdapter API
+import type { NapiDeviceSlice as DeviceSlice } from '@vibecook/truffle';
+
+interface ISyncableStore<T> {
+  getLocalSlice(): DeviceSlice | null;
+  on(event: string, handler: (...args: any[]) => void): void;
+  off(event: string, handler: (...args: any[]) => void): void;
+}
 
 export interface UseSyncedStoreResult<T> {
   localSlice: DeviceSlice<T> | null;
