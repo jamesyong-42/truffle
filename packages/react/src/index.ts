@@ -1,2 +1,2 @@
-export { useMesh } from './use-mesh.js';
-export { useSyncedStore } from './use-synced-store.js';
+export { useMesh, type UseMeshResult } from './use-mesh.js';
+export { useSyncedStore, type UseSyncedStoreResult } from './use-synced-store.js';

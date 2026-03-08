@@ -2,19 +2,8 @@ import { defineCommand } from 'citty';
 import { consola } from 'consola';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-// TODO: Rewrite to use NapiMeshNode API (async methods, callback-based events)
-import type { NapiMeshNode, NapiMeshNodeConfig, NapiBaseDevice as BaseDevice } from '@vibecook/truffle';
-type DeviceRole = string;
-type Logger = { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void; debug: (...args: any[]) => void; };
-
-function createCliLogger(): Logger {
-  return {
-    info: (msg, ...args) => consola.info(msg, ...args),
-    warn: (msg, ...args) => consola.warn(msg, ...args),
-    error: (msg, ...args) => consola.error(msg, ...args),
-    debug: (msg, ...args) => consola.debug(msg, ...args),
-  };
-}
+import { NapiMeshNode } from '@vibecook/truffle';
+import type { NapiBaseDevice as BaseDevice, NapiMeshEvent } from '@vibecook/truffle';
 
 function formatDevice(device: BaseDevice): string {
   const role = device.role === 'primary' ? ' [primary]' : '';
@@ -60,11 +49,9 @@ export const devCommand = defineCommand({
   },
   async run({ args }) {
     const deviceId = randomUUID().slice(0, 8);
-    const logger = createCliLogger();
 
     consola.start(`Starting Truffle dev node: ${args.name} (${deviceId})`);
 
-    // TODO: Rewrite event handling for NAPI callback-based API
     const node = new NapiMeshNode({
       deviceId,
       deviceName: args.name,
@@ -75,38 +62,62 @@ export const devCommand = defineCommand({
       authKey: args['auth-key'],
     });
 
-    node.on('started', () => {
-      consola.success('Mesh node started');
-      consola.info(`Local device: ${args.name} (${deviceId})`);
-      consola.info('Waiting for peers...');
-    });
-
-    node.on('devicesChanged', (devices: BaseDevice[]) => {
-      consola.info(`Devices (${devices.length}):`);
-      for (const device of devices) {
-        consola.log(formatDevice(device));
+    // Subscribe to mesh events via NAPI callback
+    node.onEvent((err: null | Error, event: NapiMeshEvent) => {
+      if (err) {
+        consola.error('Mesh error:', err.message);
+        return;
       }
-    });
 
-    node.on('deviceDiscovered', (device: BaseDevice) => {
-      consola.success(`Discovered: ${device.name} (${device.id})`);
-    });
+      switch (event.eventType) {
+        case 'started':
+          consola.success('Mesh node started');
+          consola.info(`Local device: ${args.name} (${deviceId})`);
+          consola.info('Waiting for peers...');
+          break;
 
-    node.on('deviceOffline', (deviceId: string) => {
-      consola.warn(`Offline: ${deviceId}`);
-    });
+        case 'devicesChanged':
+          if (Array.isArray(event.payload)) {
+            const devices = event.payload as BaseDevice[];
+            consola.info(`Devices (${devices.length}):`);
+            for (const device of devices) {
+              consola.log(formatDevice(device));
+            }
+          }
+          break;
 
-    node.on('roleChanged', (role: DeviceRole, isPrimary: boolean) => {
-      consola.info(`Role changed: ${role}${isPrimary ? ' (primary)' : ''}`);
-    });
+        case 'deviceDiscovered':
+          if (event.payload) {
+            const device = event.payload as BaseDevice;
+            consola.success(`Discovered: ${device.name} (${device.id})`);
+          } else if (event.deviceId) {
+            consola.success(`Discovered: ${event.deviceId}`);
+          }
+          break;
 
-    node.on('authRequired', (authUrl: string) => {
-      consola.warn('Authentication required!');
-      consola.info(`Open: ${authUrl}`);
-    });
+        case 'deviceOffline':
+          consola.warn(`Offline: ${event.deviceId ?? 'unknown'}`);
+          break;
 
-    node.on('error', (error: Error) => {
-      consola.error('Mesh error:', error.message);
+        case 'roleChanged':
+          node.role().then((r) => {
+            node.isPrimary().then((p) => {
+              consola.info(`Role changed: ${r}${p ? ' (primary)' : ''}`);
+            });
+          });
+          break;
+
+        case 'authRequired':
+          consola.warn('Authentication required!');
+          if (event.payload?.url) {
+            consola.info(`Open: ${event.payload.url}`);
+          }
+          break;
+
+        case 'error':
+          consola.error('Mesh error:', event.payload?.message ?? event.payload);
+          break;
+      }
     });
 
     // Graceful shutdown

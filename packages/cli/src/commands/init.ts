@@ -3,9 +3,9 @@ import { consola } from 'consola';
 import { writeFile, mkdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const TRUFFLE_CONFIG_TEMPLATE = `import type { MeshNodeConfig } from '@vibecook/truffle';
+const TRUFFLE_CONFIG_TEMPLATE = `import type { NapiMeshNodeConfig } from '@vibecook/truffle';
 
-const config: Partial<MeshNodeConfig> = {
+const config: Partial<NapiMeshNodeConfig> = {
   // Unique device ID (auto-generated at runtime if not set)
   // deviceId: 'my-device',
 

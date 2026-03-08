@@ -1,49 +1,60 @@
-import { useState, useEffect } from 'react';
-// TODO: Rewrite to use NapiStoreSyncAdapter API
-import type { NapiDeviceSlice as DeviceSlice } from '@vibecook/truffle';
-
-interface ISyncableStore<T> {
-  getLocalSlice(): DeviceSlice | null;
-  on(event: string, handler: (...args: any[]) => void): void;
-  off(event: string, handler: (...args: any[]) => void): void;
-}
+import { useState, useEffect, useRef } from 'react';
+import type { NapiDeviceSlice as DeviceSlice, NapiStoreSyncAdapter } from '@vibecook/truffle';
 
 export interface UseSyncedStoreResult<T> {
-  localSlice: DeviceSlice<T> | null;
+  localSlice: DeviceSlice | null;
   localData: T | null;
   version: number;
 }
 
 /**
- * React hook for a synced store.
+ * React hook for a synced store backed by NapiStoreSyncAdapter.
  *
- * Subscribes to store changes and returns the current local slice data.
- * Use with StoreSyncAdapter for cross-device synchronization.
+ * Tracks local slice state and listens for outgoing sync messages.
+ * Call `handleLocalChanged` on the adapter when your local data changes,
+ * and this hook will reflect the updated slice.
+ *
+ * @param adapter - The NapiStoreSyncAdapter instance (or null if not ready)
+ * @param storeId - The store identifier to track
+ * @param initialSlice - Optional initial slice value
  */
-export function useSyncedStore<T>(store: ISyncableStore<T> | null): UseSyncedStoreResult<T> {
-  const [localSlice, setLocalSlice] = useState<DeviceSlice<T> | null>(
-    store?.getLocalSlice() ?? null,
-  );
+export function useSyncedStore<T>(
+  adapter: NapiStoreSyncAdapter | null,
+  storeId: string,
+  initialSlice?: DeviceSlice | null,
+): UseSyncedStoreResult<T> {
+  const [localSlice, setLocalSlice] = useState<DeviceSlice | null>(initialSlice ?? null);
+  const adapterRef = useRef<NapiStoreSyncAdapter | null>(null);
 
   useEffect(() => {
-    if (!store) return;
+    if (!adapter) return;
 
-    setLocalSlice(store.getLocalSlice());
+    adapterRef.current = adapter;
+    let cancelled = false;
 
-    const onLocalChanged = (slice: DeviceSlice<T>) => {
-      setLocalSlice(slice);
-    };
+    // Listen for outgoing sync messages to detect local changes
+    adapter.onOutgoing((err, message) => {
+      if (err || cancelled) return;
 
-    store.on('localChanged', onLocalChanged);
+      // When the adapter emits an outgoing message, the local data has changed.
+      // The payload contains the sync data including the slice.
+      if (message.payload && typeof message.payload === 'object') {
+        const payload = message.payload as Record<string, unknown>;
+        if (payload.storeId === storeId && payload.slice) {
+          setLocalSlice(payload.slice as DeviceSlice);
+        }
+      }
+    });
 
     return () => {
-      store.off('localChanged', onLocalChanged);
+      cancelled = true;
+      adapterRef.current = null;
     };
-  }, [store]);
+  }, [adapter, storeId]);
 
   return {
     localSlice,
-    localData: localSlice?.data ?? null,
+    localData: (localSlice?.data as T) ?? null,
     version: localSlice?.version ?? 0,
   };
 }
