@@ -8,7 +8,7 @@
  *
  * Prerequisites:
  *   - Tailscale installed and running
- *   - NAPI addon built (cd crates/truffle-napi && pnpm run build)
+ *   - npm install @vibecook/truffle
  */
 
 import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';

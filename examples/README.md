@@ -1,16 +1,18 @@
 # Truffle Examples
 
-Each example demonstrates a different Truffle capability. Run from the project root.
+Each example demonstrates a different Truffle capability.
 
 ## Prerequisites
 
 - Node.js 18+
 - Tailscale installed and running
-- NAPI addon built: `cd crates/truffle-napi && pnpm run build`
+- `npm install @vibecook/truffle` (prebuilt native addon + sidecar binary included)
 
-The Go sidecar binary is resolved automatically via `resolveSidecarPath()`. For local development, build it manually:
+For local development (cloning this repo), build from source instead:
 
 ```bash
+pnpm install
+cd crates/truffle-napi && pnpm run build
 cd packages/sidecar-slim && go build -o bin/sidecar-slim
 ```
 

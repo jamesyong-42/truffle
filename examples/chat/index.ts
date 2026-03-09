@@ -3,6 +3,10 @@
  *
  * Starts a mesh node and uses broadcastEnvelope for pub/sub chat.
  *
+ * Prerequisites:
+ *   - Tailscale installed and running
+ *   - npm install @vibecook/truffle
+ *
  * Usage:
  *   npx tsx examples/chat/index.ts
  *
