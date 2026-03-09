@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { NapiBaseDevice as BaseDevice, NapiMeshNode as MeshNode, NapiMeshEvent } from '@vibecook/truffle';
+import type {
+  NapiBaseDevice as BaseDevice,
+  NapiMeshNode as MeshNode,
+  NapiMeshEvent,
+} from '@vibecook/truffle';
 
 type DeviceRole = string;
 

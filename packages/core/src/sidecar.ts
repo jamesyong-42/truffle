@@ -9,12 +9,12 @@
  * Follows the esbuild pattern for distributing platform-specific binaries.
  */
 
-import { existsSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const require = createRequire(import.meta.url)
+const require = createRequire(import.meta.url);
 
 const PLATFORM_PACKAGES: Record<string, string> = {
   'darwin-arm64': '@vibecook/truffle-sidecar-darwin-arm64',
@@ -22,7 +22,7 @@ const PLATFORM_PACKAGES: Record<string, string> = {
   'linux-x64': '@vibecook/truffle-sidecar-linux-x64',
   'linux-arm64': '@vibecook/truffle-sidecar-linux-arm64',
   'win32-x64': '@vibecook/truffle-sidecar-win32-x64',
-}
+};
 
 /**
  * Resolve the path to the Go sidecar binary for the current platform.
@@ -34,33 +34,33 @@ const PLATFORM_PACKAGES: Record<string, string> = {
  * @throws {Error} if no binary is found for the current platform
  */
 export function resolveSidecarPath(): string {
-  const key = `${process.platform}-${process.arch}`
-  const ext = process.platform === 'win32' ? '.exe' : ''
-  const binName = `sidecar-slim${ext}`
+  const key = `${process.platform}-${process.arch}`;
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const binName = `sidecar-slim${ext}`;
 
   // 1. Try platform-specific npm package (optionalDependency)
-  const pkg = PLATFORM_PACKAGES[key]
+  const pkg = PLATFORM_PACKAGES[key];
   if (pkg) {
     try {
-      const pkgJsonPath = require.resolve(`${pkg}/package.json`)
-      const binPath = join(dirname(pkgJsonPath), 'bin', binName)
-      if (existsSync(binPath)) return binPath
+      const pkgJsonPath = require.resolve(`${pkg}/package.json`);
+      const binPath = join(dirname(pkgJsonPath), 'bin', binName);
+      if (existsSync(binPath)) return binPath;
     } catch {
       // Package not installed — fall through
     }
   }
 
   // 2. Try postinstall-downloaded binary (fallback)
-  const __dirname = dirname(fileURLToPath(import.meta.url))
-  const localBin = join(__dirname, '..', 'bin', binName)
-  if (existsSync(localBin)) return localBin
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const localBin = join(__dirname, '..', 'bin', binName);
+  if (existsSync(localBin)) return localBin;
 
   // 3. Nothing found
-  const supported = Object.keys(PLATFORM_PACKAGES).join(', ')
+  const supported = Object.keys(PLATFORM_PACKAGES).join(', ');
   throw new Error(
     `[truffle] Sidecar binary not found for platform "${key}".\n` +
       `Supported platforms: ${supported}\n` +
       `Try reinstalling: npm install @vibecook/truffle\n` +
       `Or build from source: cd packages/sidecar-slim && go build -o bin/sidecar-slim`,
-  )
+  );
 }

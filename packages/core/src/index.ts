@@ -4,7 +4,7 @@ export {
   NapiFileTransferAdapter,
   NapiMessageBus,
   NapiStoreSyncAdapter,
-} from '@vibecook/truffle-native'
+} from '@vibecook/truffle-native';
 
 // Re-export interfaces/types from the native Rust addon
 export type {
@@ -22,7 +22,7 @@ export type {
   NapiStoreSyncConfig,
   NapiOutgoingSyncMessage,
   NapiDeviceSlice,
-} from '@vibecook/truffle-native'
+} from '@vibecook/truffle-native';
 
 // Sidecar binary resolution
-export { resolveSidecarPath } from './sidecar.js'
+export { resolveSidecarPath } from './sidecar.js';
