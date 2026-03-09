@@ -1,0 +1,23 @@
+{
+  "name": "@vibecook/truffle-sidecar-darwin-x64",
+  "version": "0.1.0",
+  "description": "Truffle sidecar binary for macOS x64 (Intel)",
+  "license": "MIT",
+  "author": "James Yong",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamesyong-42/truffle.git",
+    "directory": "npm/truffle-sidecar-darwin-x64"
+  },
+  "homepage": "https://github.com/jamesyong-42/truffle#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "preferUnplugged": true,
+  "files": ["bin"],
+  "engines": {
+    "node": ">=18"
+  }
+}

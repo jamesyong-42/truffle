@@ -2,6 +2,7 @@ import { defineCommand } from 'citty';
 import { consola } from 'consola';
 import { readFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
+import { resolveSidecarPath } from '@vibecook/truffle';
 
 export const statusCommand = defineCommand({
   meta: {
@@ -39,14 +40,14 @@ export const statusCommand = defineCommand({
       consola.warn(`State dir not found: ${stateDir}`);
     }
 
-    // Check for sidecar binary
-    const sidecarPath = join(dir, 'sidecar');
+    // Check for sidecar binary (auto-resolved from platform package)
     try {
+      const sidecarPath = resolveSidecarPath();
       await access(sidecarPath);
       consola.success(`Sidecar: ${sidecarPath}`);
     } catch {
-      consola.warn('Sidecar binary not found at ./sidecar');
-      consola.info('Build the sidecar-slim binary from packages/sidecar-slim/');
+      consola.warn('Sidecar binary not found');
+      consola.info('Reinstall @vibecook/truffle or build from source: cd packages/sidecar-slim && go build');
     }
 
     // Check for package.json dependencies

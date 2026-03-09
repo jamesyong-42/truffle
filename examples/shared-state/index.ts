@@ -1,7 +1,7 @@
 /**
  * Shared State Example - Todo list synced across devices
  *
- * Demonstrates StoreSyncAdapter for cross-device state synchronization.
+ * Demonstrates NapiStoreSyncAdapter for cross-device state synchronization.
  *
  * Usage:
  *   npx tsx examples/shared-state/index.ts
@@ -9,110 +9,135 @@
  * Run on multiple devices to see todos sync in real-time.
  */
 
-import { createMeshNode, StoreSyncAdapter } from '@vibecook/truffle';
-import type { ISyncableStore } from '@vibecook/truffle';
-import { EventEmitter } from 'events';
+import { NapiMeshNode, NapiStoreSyncAdapter, resolveSidecarPath } from '@vibecook/truffle';
+import type { NapiMeshEvent, NapiDeviceSlice, NapiOutgoingSyncMessage } from '@vibecook/truffle';
 import { createInterface } from 'readline';
 
 // ─────────────────────────────────────────────────────────────────────────
-// Define a simple todo store
+// Local todo state
 // ─────────────────────────────────────────────────────────────────────────
 
 interface TodoData {
   todos: Array<{ id: string; text: string; done: boolean }>;
 }
 
-class TodoStore extends EventEmitter implements ISyncableStore<TodoData> {
-  readonly storeId = 'todos';
-  private data: TodoData = { todos: [] };
-  private version = 0;
+const deviceId = `todo-${Date.now()}`;
+let localData: TodoData = { todos: [] };
+let version = 0;
 
-  getData(): TodoData {
-    return { ...this.data, todos: [...this.data.todos] };
-  }
+function getSlice(): NapiDeviceSlice {
+  return {
+    deviceId,
+    data: localData as unknown as Record<string, unknown>,
+    updatedAt: Date.now(),
+    version,
+  };
+}
 
-  getVersion(): number {
-    return this.version;
-  }
+function addTodo(text: string): void {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  localData.todos.push({ id, text, done: false });
+  version++;
+  onLocalChanged();
+}
 
-  applyRemoteData(data: TodoData, version: number): void {
-    this.data = data;
-    this.version = Math.max(this.version, version);
-    this.emit('changed', this.storeId);
+function toggleTodo(index: number): void {
+  if (index >= 0 && index < localData.todos.length) {
+    localData.todos[index].done = !localData.todos[index].done;
+    version++;
+    onLocalChanged();
   }
+}
 
-  addTodo(text: string): void {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    this.data.todos.push({ id, text, done: false });
-    this.version++;
-    this.emit('changed', this.storeId);
+function removeTodo(index: number): void {
+  if (index >= 0 && index < localData.todos.length) {
+    localData.todos.splice(index, 1);
+    version++;
+    onLocalChanged();
   }
+}
 
-  toggleTodo(index: number): void {
-    if (index >= 0 && index < this.data.todos.length) {
-      this.data.todos[index].done = !this.data.todos[index].done;
-      this.version++;
-      this.emit('changed', this.storeId);
-    }
+function printTodos(): void {
+  if (localData.todos.length === 0) {
+    console.log('  (no todos)');
+    return;
   }
-
-  removeTodo(index: number): void {
-    if (index >= 0 && index < this.data.todos.length) {
-      this.data.todos.splice(index, 1);
-      this.version++;
-      this.emit('changed', this.storeId);
-    }
-  }
-
-  printTodos(): void {
-    if (this.data.todos.length === 0) {
-      console.log('  (no todos)');
-      return;
-    }
-    this.data.todos.forEach((t, i) => {
-      const check = t.done ? '[x]' : '[ ]';
-      console.log(`  ${i}. ${check} ${t.text}`);
-    });
-  }
+  localData.todos.forEach((t, i) => {
+    const check = t.done ? '[x]' : '[ ]';
+    console.log(`  ${i}. ${check} ${t.text}`);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Set up mesh + sync
 // ─────────────────────────────────────────────────────────────────────────
 
-const deviceId = `todo-${Date.now()}`;
-
-const node = createMeshNode({
+const node = new NapiMeshNode({
   deviceId,
   deviceName: `Todo App (${deviceId.slice(-4)})`,
   deviceType: 'desktop',
   hostnamePrefix: 'truffle-todo',
-  sidecarPath: './packages/sidecar/bin/tsnet-sidecar',
+  sidecarPath: resolveSidecarPath(),
   stateDir: `./tmp/todo-state-${deviceId}`,
 });
 
-const store = new TodoStore();
-const bus = node.getMessageBus();
+const sync = new NapiStoreSyncAdapter({ localDeviceId: deviceId });
 
-const sync = new StoreSyncAdapter({
-  localDeviceId: deviceId,
-  messageBus: bus,
-  stores: [store],
-});
-
-store.on('changed', () => {
+// When local state changes, notify the sync adapter
+function onLocalChanged(): void {
+  sync.handleLocalChanged('todos', getSlice());
   console.log('\nTodos:');
-  store.printTodos();
+  printTodos();
   rl.prompt();
+}
+
+// Relay outgoing sync messages to the mesh
+sync.onOutgoing((_err: null | Error, msg: NapiOutgoingSyncMessage) => {
+  node.broadcastEnvelope('sync', msg.msgType, msg.payload);
 });
 
-node.on('started', () => {
-  console.log('Todo app started. Commands: add <text>, toggle <n>, rm <n>, list, quit');
-  sync.start();
-});
+// Subscribe to mesh events
+node.onEvent(async (err: null | Error, event: NapiMeshEvent) => {
+  if (err) return;
 
-node.on('authRequired', (url) => {
-  console.log(`Auth required - visit: ${url}`);
+  switch (event.eventType) {
+    case 'started':
+      console.log('Todo app started. Commands: add <text>, toggle <n>, rm <n>, list, quit');
+      await sync.start();
+      rl.prompt();
+      break;
+
+    case 'authRequired':
+      console.log(`Auth required - visit: ${event.payload}`);
+      break;
+
+    case 'deviceDiscovered':
+      if (event.deviceId) {
+        await sync.handleDeviceDiscovered(event.deviceId);
+      }
+      break;
+
+    case 'deviceOffline':
+      if (event.deviceId) {
+        await sync.handleDeviceOffline(event.deviceId);
+      }
+      break;
+
+    case 'message': {
+      // Route sync-namespace messages to the adapter
+      if (event.payload && typeof event.payload === 'object') {
+        const p = event.payload as Record<string, unknown>;
+        if (p.namespace === 'sync') {
+          await sync.handleSyncMessage(
+            event.deviceId ?? undefined,
+            p.type as string,
+            p.payload as Record<string, unknown>,
+          );
+        }
+      }
+      break;
+    }
+  }
 });
 
 await node.start();
@@ -123,7 +148,6 @@ await node.start();
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 rl.setPrompt('todo> ');
-rl.prompt();
 
 rl.on('line', (line) => {
   const parts = line.trim().split(/\s+/);
@@ -131,18 +155,18 @@ rl.on('line', (line) => {
 
   switch (cmd) {
     case 'add':
-      store.addTodo(parts.slice(1).join(' '));
+      addTodo(parts.slice(1).join(' '));
       break;
     case 'toggle':
-      store.toggleTodo(parseInt(parts[1], 10));
+      toggleTodo(parseInt(parts[1], 10));
       break;
     case 'rm':
     case 'remove':
-      store.removeTodo(parseInt(parts[1], 10));
+      removeTodo(parseInt(parts[1], 10));
       break;
     case 'list':
       console.log('\nTodos:');
-      store.printTodos();
+      printTodos();
       break;
     case 'quit':
     case 'exit':
@@ -155,7 +179,7 @@ rl.on('line', (line) => {
 });
 
 rl.on('close', async () => {
-  sync.dispose();
+  await sync.dispose();
   await node.stop();
   process.exit(0);
 });

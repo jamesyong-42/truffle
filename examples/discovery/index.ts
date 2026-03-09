@@ -8,48 +8,64 @@
  *
  * Prerequisites:
  *   - Tailscale installed and running
- *   - Sidecar binary built (cd packages/sidecar && make build)
+ *   - NAPI addon built (cd crates/truffle-napi && pnpm run build)
  */
 
-import { createMeshNode } from '@vibecook/truffle';
+import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
+import type { NapiMeshEvent } from '@vibecook/truffle';
 
-const node = createMeshNode({
+const node = new NapiMeshNode({
   deviceId: `discovery-${Date.now()}`,
   deviceName: 'Discovery Example',
   deviceType: 'desktop',
   hostnamePrefix: 'truffle-example',
-  sidecarPath: './packages/sidecar/bin/tsnet-sidecar',
+  sidecarPath: resolveSidecarPath(),
   stateDir: './tmp/discovery-state',
 });
 
-node.on('started', () => {
-  console.log('Mesh node started');
-  console.log('Local device:', node.getLocalDevice());
-  console.log('Discovering peers...');
-});
+// Subscribe to mesh events via NAPI callback
+node.onEvent((err: null | Error, event: NapiMeshEvent) => {
+  if (err) return;
 
-node.on('deviceDiscovered', (device) => {
-  console.log(`\nDiscovered: ${device.name}`);
-  console.log(`  ID:   ${device.id}`);
-  console.log(`  Type: ${device.type}`);
-  console.log(`  IP:   ${device.tailscaleIP}`);
-  console.log(`  OS:   ${device.os ?? 'unknown'}`);
-});
+  switch (event.eventType) {
+    case 'started':
+      console.log('Mesh node started');
+      node.localDevice().then((device) => {
+        console.log('Local device:', device);
+      });
+      console.log('Discovering peers...');
+      break;
 
-node.on('deviceOffline', (deviceId) => {
-  console.log(`Device offline: ${deviceId}`);
-});
+    case 'deviceDiscovered':
+      console.log(`\nDiscovered: ${event.payload?.name ?? event.deviceId}`);
+      console.log(`  ID:   ${event.deviceId}`);
+      if (event.payload && typeof event.payload === 'object') {
+        const p = event.payload as Record<string, unknown>;
+        console.log(`  Type: ${p.deviceType ?? 'unknown'}`);
+        console.log(`  IP:   ${p.tailscaleIp ?? 'unknown'}`);
+        console.log(`  OS:   ${p.os ?? 'unknown'}`);
+      }
+      break;
 
-node.on('roleChanged', (role, isPrimary) => {
-  console.log(`Role: ${role} (isPrimary=${isPrimary})`);
-});
+    case 'deviceOffline':
+      console.log(`Device offline: ${event.deviceId}`);
+      break;
 
-node.on('authRequired', (url) => {
-  console.log(`\nAuth required - visit: ${url}`);
-});
+    case 'roleChanged':
+      if (event.payload && typeof event.payload === 'object') {
+        const p = event.payload as Record<string, unknown>;
+        console.log(`Role: ${p.role} (isPrimary=${p.isPrimary})`);
+      }
+      break;
 
-node.on('error', (err) => {
-  console.error('Error:', err.message);
+    case 'authRequired':
+      console.log(`\nAuth required - visit: ${event.payload}`);
+      break;
+
+    case 'error':
+      console.error('Error:', event.payload);
+      break;
+  }
 });
 
 // Graceful shutdown

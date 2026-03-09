@@ -49,6 +49,8 @@ The Rust core (`truffle-core`) implements all mesh logic: device discovery, prim
 npm install @vibecook/truffle
 ```
 
+The Go sidecar binary is automatically installed for your platform (macOS, Linux, Windows). No manual downloads needed.
+
 **Cargo:**
 
 ```toml
@@ -68,15 +70,14 @@ truffle-tauri-plugin = { git = "https://github.com/jamesyong-42/truffle" }
 ### Node.js
 
 ```typescript
-import { NapiMeshNode } from '@vibecook/truffle';
+import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
 
 const node = new NapiMeshNode({
   deviceId: 'my-device-id',
   deviceName: 'My Laptop',
   deviceType: 'desktop',
   hostnamePrefix: 'myapp',
-  sidecarPath: './sidecar-slim',
-  stateDir: './tailscale-state',
+  sidecarPath: resolveSidecarPath(),
 });
 
 // Subscribe to events
@@ -98,24 +99,32 @@ await node.broadcastEnvelope('chat', 'message', { text: 'Hello mesh!' });
 ### Rust
 
 ```rust
-use truffle_core::mesh::MeshNode;
-use truffle_core::types::MeshNodeConfig;
+use std::sync::Arc;
+use truffle_core::mesh::node::{MeshNode, MeshNodeConfig, MeshTimingConfig};
+use truffle_core::transport::connection::{ConnectionManager, TransportConfig};
+use truffle_core::protocol::envelope::MeshEnvelope;
 
 let config = MeshNodeConfig {
     device_id: "my-device".into(),
     device_name: "My Laptop".into(),
     device_type: "desktop".into(),
     hostname_prefix: "myapp".into(),
-    sidecar_path: "./sidecar-slim".into(),
-    state_dir: "./tailscale-state".into(),
-    ..Default::default()
+    prefer_primary: false,
+    capabilities: vec![],
+    metadata: None,
+    timing: MeshTimingConfig::default(),
 };
 
-let node = MeshNode::new(config);
-node.start().await?;
+let (conn_mgr, _transport_rx) = ConnectionManager::new(TransportConfig::default());
+let (node, mut event_rx) = MeshNode::new(config, Arc::new(conn_mgr));
+node.start().await;
 
 let devices = node.devices().await;
-node.broadcast_envelope("chat", "message", payload).await?;
+let envelope = MeshEnvelope::new("chat", "message", serde_json::json!({"text": "Hello!"}));
+node.broadcast_envelope(&envelope).await;
+
+// Multiple consumers can subscribe to events
+let mut rx2 = node.subscribe_events();
 ```
 
 ### React
@@ -144,6 +153,7 @@ function MeshStatus({ node }) {
 |---------|-------------|
 | [`@vibecook/truffle`](packages/core) | Main npm package -- install this |
 | [`@vibecook/truffle-native`](crates/truffle-napi) | NAPI-RS native addon (used internally) |
+| [`@vibecook/truffle-sidecar-*`](npm/) | Go sidecar binaries per platform (installed automatically) |
 | [`@vibecook/truffle-react`](packages/react) | React hooks (`useMesh`, `useSyncedStore`) |
 | [`@vibecook/truffle-cli`](packages/cli) | CLI tool for scaffolding and dev mode |
 | [`truffle-core`](crates/truffle-core) | Pure Rust library (crates.io) |
@@ -162,7 +172,7 @@ cd crates/truffle-napi && pnpm run build
 # Build TypeScript packages
 pnpm run build
 
-# Run Rust tests (186 tests)
+# Run Rust tests (188 tests)
 cargo test --workspace
 
 # Lint and format

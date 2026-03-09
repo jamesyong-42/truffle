@@ -11,7 +11,12 @@
       "@vibecook/truffle",
       "@vibecook/truffle-native",
       "@vibecook/truffle-react",
-      "@vibecook/truffle-cli"
+      "@vibecook/truffle-cli",
+      "@vibecook/truffle-sidecar-darwin-arm64",
+      "@vibecook/truffle-sidecar-darwin-x64",
+      "@vibecook/truffle-sidecar-linux-x64",
+      "@vibecook/truffle-sidecar-linux-arm64",
+      "@vibecook/truffle-sidecar-win32-x64"
     ]
   ],
   "access": "public",

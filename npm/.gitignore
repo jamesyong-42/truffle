@@ -1,0 +1,2 @@
+# Sidecar binaries are added by CI, not checked into git
+*/bin/

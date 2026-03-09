@@ -39,15 +39,25 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "bin",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
     "@vibecook/truffle-native": "file:../../crates/truffle-napi"
+  },
+  "optionalDependencies": {
+    "@vibecook/truffle-sidecar-darwin-arm64": "0.1.0",
+    "@vibecook/truffle-sidecar-darwin-x64": "0.1.0",
+    "@vibecook/truffle-sidecar-linux-x64": "0.1.0",
+    "@vibecook/truffle-sidecar-linux-arm64": "0.1.0",
+    "@vibecook/truffle-sidecar-win32-x64": "0.1.0"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

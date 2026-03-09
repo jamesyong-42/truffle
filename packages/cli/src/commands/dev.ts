@@ -2,7 +2,7 @@ import { defineCommand } from 'citty';
 import { consola } from 'consola';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { NapiMeshNode } from '@vibecook/truffle';
+import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
 import type { NapiBaseDevice as BaseDevice, NapiMeshEvent } from '@vibecook/truffle';
 
 function formatDevice(device: BaseDevice): string {
@@ -29,8 +29,7 @@ export const devCommand = defineCommand({
     },
     sidecar: {
       type: 'string',
-      description: 'Path to sidecar binary',
-      default: './sidecar',
+      description: 'Path to sidecar binary (auto-detected if omitted)',
     },
     'state-dir': {
       type: 'string',
@@ -57,7 +56,7 @@ export const devCommand = defineCommand({
       deviceName: args.name,
       deviceType: args.type,
       hostnamePrefix: args.prefix,
-      sidecarPath: args.sidecar,
+      sidecarPath: args.sidecar ?? resolveSidecarPath(),
       stateDir: args['state-dir'],
       authKey: args['auth-key'],
     });

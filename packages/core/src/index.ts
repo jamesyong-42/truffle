@@ -23,3 +23,6 @@ export type {
   NapiOutgoingSyncMessage,
   NapiDeviceSlice,
 } from '@vibecook/truffle-native'
+
+// Sidecar binary resolution
+export { resolveSidecarPath } from './sidecar.js'

@@ -6,7 +6,13 @@ Each example demonstrates a different Truffle capability. Run from the project r
 
 - Node.js 18+
 - Tailscale installed and running
-- Sidecar binary built: `cd packages/sidecar && make build`
+- NAPI addon built: `cd crates/truffle-napi && pnpm run build`
+
+The Go sidecar binary is resolved automatically via `resolveSidecarPath()`. For local development, build it manually:
+
+```bash
+cd packages/sidecar-slim && go build -o bin/sidecar-slim
+```
 
 ## Examples
 
@@ -20,7 +26,7 @@ npx tsx examples/discovery/index.ts
 
 ### Chat
 
-Simple cross-device chat using MessageBus pub/sub:
+Simple cross-device chat using broadcastEnvelope:
 
 ```bash
 npx tsx examples/chat/index.ts
@@ -30,7 +36,7 @@ Run on multiple devices on the same Tailscale network to chat.
 
 ### Shared State
 
-Todo list synced across devices using StoreSyncAdapter:
+Todo list synced across devices using NapiStoreSyncAdapter:
 
 ```bash
 npx tsx examples/shared-state/index.ts

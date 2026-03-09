@@ -1,0 +1,23 @@
+{
+  "name": "@vibecook/truffle-sidecar-win32-x64",
+  "version": "0.1.0",
+  "description": "Truffle sidecar binary for Windows x64",
+  "license": "MIT",
+  "author": "James Yong",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamesyong-42/truffle.git",
+    "directory": "npm/truffle-sidecar-win32-x64"
+  },
+  "homepage": "https://github.com/jamesyong-42/truffle#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "preferUnplugged": true,
+  "files": ["bin"],
+  "engines": {
+    "node": ">=18"
+  }
+}

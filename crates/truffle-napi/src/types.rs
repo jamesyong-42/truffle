@@ -27,8 +27,10 @@ pub struct NapiMeshNodeConfig {
     pub device_name: String,
     pub device_type: String,
     pub hostname_prefix: String,
-    pub sidecar_path: String,
-    pub state_dir: String,
+    /// Path to the Go sidecar binary. Optional — use `resolveSidecarPath()`
+    /// from `@vibecook/truffle` for automatic platform detection.
+    pub sidecar_path: Option<String>,
+    pub state_dir: Option<String>,
     pub auth_key: Option<String>,
     pub prefer_primary: Option<bool>,
     pub static_path: Option<String>,

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -16,22 +17,32 @@ jobs:
             goos: darwin
             goarch: arm64
             asset: tsnet-sidecar-darwin-arm64
+            npm_pkg: truffle-sidecar-darwin-arm64
+            bin_name: sidecar-slim
           - os: macos-13
             goos: darwin
             goarch: amd64
             asset: tsnet-sidecar-darwin-amd64
+            npm_pkg: truffle-sidecar-darwin-x64
+            bin_name: sidecar-slim
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
             asset: tsnet-sidecar-linux-amd64
+            npm_pkg: truffle-sidecar-linux-x64
+            bin_name: sidecar-slim
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
             asset: tsnet-sidecar-linux-arm64
+            npm_pkg: truffle-sidecar-linux-arm64
+            bin_name: sidecar-slim
           - os: ubuntu-latest
             goos: windows
             goarch: amd64
             asset: tsnet-sidecar-windows-amd64.exe
+            npm_pkg: truffle-sidecar-win32-x64
+            bin_name: sidecar-slim.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -41,17 +52,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          cache-dependency-path: packages/sidecar/go.sum
+          cache-dependency-path: packages/sidecar-slim/go.sum
 
       - name: Build sidecar
-        working-directory: packages/sidecar
+        working-directory: packages/sidecar-slim
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          SUFFIX=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then SUFFIX=".exe"; fi
           go build -ldflags "-s -w -X main.Version=${{ github.ref_name }}" \
             -o "${{ matrix.asset }}" .
 
@@ -60,5 +69,57 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.ref_name }}" \
-            "packages/sidecar/${{ matrix.asset }}" \
+            "packages/sidecar-slim/${{ matrix.asset }}" \
             --clobber
+
+      - name: Prepare npm package
+        run: |
+          mkdir -p npm/${{ matrix.npm_pkg }}/bin
+          cp packages/sidecar-slim/${{ matrix.asset }} npm/${{ matrix.npm_pkg }}/bin/${{ matrix.bin_name }}
+          chmod +x npm/${{ matrix.npm_pkg }}/bin/${{ matrix.bin_name }} || true
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.npm_pkg }}
+          path: npm/${{ matrix.npm_pkg }}
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish sidecar packages to npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in artifacts/truffle-sidecar-*; do
+            PKG_NAME=$(basename "$pkg")
+            # Merge built binary into package source
+            cp -r "$pkg/bin" "npm/$PKG_NAME/"
+            # Update version in package.json
+            cd "npm/$PKG_NAME"
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            npm publish --provenance --access public
+            cd ../..
+            echo "Published @vibecook/$PKG_NAME@$VERSION"
+          done
