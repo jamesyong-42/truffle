@@ -19,7 +19,7 @@ jobs:
             asset: tsnet-sidecar-darwin-arm64
             npm_pkg: truffle-sidecar-darwin-arm64
             bin_name: sidecar-slim
-          - os: macos-13
+          - os: macos-latest
             goos: darwin
             goarch: amd64
             asset: tsnet-sidecar-darwin-amd64

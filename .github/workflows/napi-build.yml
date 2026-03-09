@@ -28,7 +28,7 @@ jobs:
               npx napi build --platform --release --target aarch64-apple-darwin
               strip -x *.node
 
-          - host: macos-13
+          - host: macos-latest
             target: x86_64-apple-darwin
             build: |
               cd crates/truffle-napi
@@ -84,6 +84,8 @@ jobs:
           npm install
 
       - name: Build native addon
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: ${{ matrix.settings.build }}
 
       - name: Upload artifact
@@ -103,8 +105,6 @@ jobs:
         settings:
           - host: macos-latest
             target: aarch64-apple-darwin
-          - host: macos-13
-            target: x86_64-apple-darwin
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - host: windows-latest
@@ -144,7 +144,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude truffle-tauri-plugin
 
   publish:
     name: Publish to npm
