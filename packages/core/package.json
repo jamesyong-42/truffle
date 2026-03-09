@@ -50,7 +50,7 @@
     "postinstall": "node scripts/postinstall.cjs"
   },
   "dependencies": {
-    "@vibecook/truffle-native": "file:../../crates/truffle-napi"
+    "@vibecook/truffle-native": "workspace:*"
   },
   "optionalDependencies": {
     "@vibecook/truffle-sidecar-darwin-arm64": "0.1.0",

@@ -69,7 +69,7 @@ importers:
   packages/core:
     dependencies:
       '@vibecook/truffle-native':
-        specifier: file:../../crates/truffle-napi
+        specifier: workspace:*
         version: link:../../crates/truffle-napi
     devDependencies:
       typescript:
