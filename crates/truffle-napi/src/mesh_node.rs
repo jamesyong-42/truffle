@@ -1,16 +1,21 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
+use truffle_core::bridge::header::Direction;
+use truffle_core::bridge::manager::{BridgeManager, ChannelHandler};
+use truffle_core::bridge::shim::{GoShim, ShimConfig, ShimLifecycleEvent};
 use truffle_core::mesh::election::ElectionTimingConfig;
 use truffle_core::mesh::message_bus::MeshMessageBus;
 use truffle_core::mesh::node::{MeshNode as CoreMeshNode, MeshNodeConfig, MeshNodeEvent, MeshTimingConfig};
 use truffle_core::protocol::envelope::MeshEnvelope;
 use truffle_core::transport::connection::{ConnectionManager, TransportConfig};
+use truffle_core::types::TailnetPeer;
 
 use crate::types::{
     mesh_event_to_napi, napi_peer_to_core, NapiBaseDevice,
@@ -19,13 +24,25 @@ use crate::types::{
 
 /// NapiMeshNode - Node.js wrapper for truffle-core MeshNode.
 ///
-/// SAFETY: No panics in any method. All errors returned via napi::Result.
-/// Event delivery uses ThreadsafeFunction with Blocking mode.
+/// Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
+/// and MeshNode. The sidecar provides Tailscale connectivity; the bridge routes
+/// TCP streams; the connection manager upgrades them to WebSocket; and the mesh
+/// node handles device discovery, election, and messaging.
 #[napi]
 pub struct NapiMeshNode {
     inner: Arc<CoreMeshNode>,
+    connection_manager: Arc<ConnectionManager>,
     event_rx: tokio::sync::Mutex<Option<broadcast::Receiver<MeshNodeEvent>>>,
     pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiMeshEvent>>>,
+    /// Stored config fields needed at start() time for sidecar spawning.
+    sidecar_path: Option<String>,
+    state_dir: Option<String>,
+    auth_key: Option<String>,
+    hostname_prefix: String,
+    device_id: String,
+    device_type: String,
+    /// GoShim handle, kept alive for the node's lifetime.
+    shim: tokio::sync::Mutex<Option<GoShim>>,
 }
 
 #[napi]
@@ -57,39 +74,45 @@ impl NapiMeshNode {
         };
 
         let core_config = MeshNodeConfig {
-            device_id: config.device_id,
+            device_id: config.device_id.clone(),
             device_name: config.device_name,
-            device_type: config.device_type,
-            hostname_prefix: config.hostname_prefix,
+            device_type: config.device_type.clone(),
+            hostname_prefix: config.hostname_prefix.clone(),
             prefer_primary: config.prefer_primary.unwrap_or(false),
             capabilities: config.capabilities.unwrap_or_default(),
             metadata: None,
             timing: mesh_timing,
         };
 
-        // Create a ConnectionManager with default transport config.
-        // In production, this is wired to the BridgeManager which provides
-        // the actual TCP streams. The transport config can be customized
-        // before calling start().
         let transport_config = TransportConfig::default();
         let (connection_manager, _transport_event_rx) = ConnectionManager::new(transport_config);
+        let connection_manager = Arc::new(connection_manager);
 
-        let (inner, event_rx) = CoreMeshNode::new(core_config, Arc::new(connection_manager));
+        let (inner, event_rx) = CoreMeshNode::new(core_config, connection_manager.clone());
 
         Ok(Self {
             inner: Arc::new(inner),
+            connection_manager,
             event_rx: tokio::sync::Mutex::new(Some(event_rx)),
             pending_callback: std::sync::Mutex::new(None),
+            sidecar_path: config.sidecar_path,
+            state_dir: config.state_dir,
+            auth_key: config.auth_key,
+            hostname_prefix: config.hostname_prefix,
+            device_id: config.device_id,
+            device_type: config.device_type,
+            shim: tokio::sync::Mutex::new(None),
         })
     }
 
     /// Start the mesh node.
     ///
-    /// If `on_event` was called before `start`, the event loop is spawned here
-    /// inside the NAPI Tokio runtime context.
+    /// If `sidecarPath` was provided, this spawns the Go sidecar process,
+    /// creates a BridgeManager to route connections, and wires everything
+    /// together for full Tailscale mesh networking.
     #[napi]
     pub async fn start(&self) -> Result<()> {
-        // Spawn the event loop if a callback was registered before start
+        // Spawn the JS event loop if a callback was registered before start
         let callback = self
             .pending_callback
             .lock()
@@ -97,11 +120,7 @@ impl NapiMeshNode {
             .take();
 
         if let Some(cb) = callback {
-            let mut guard = self
-                .event_rx
-                .lock()
-                .await;
-
+            let mut guard = self.event_rx.lock().await;
             if let Some(rx) = guard.take() {
                 tokio::spawn(async move {
                     Self::event_loop(rx, cb).await;
@@ -109,13 +128,188 @@ impl NapiMeshNode {
             }
         }
 
+        // If sidecar_path is provided, wire up the full bridge + sidecar stack
+        if let Some(ref sidecar_path) = self.sidecar_path {
+            self.start_with_sidecar(sidecar_path.clone()).await?;
+        }
+
+        // Start the core mesh node (begins event processing loop)
         self.inner.start().await;
         Ok(())
     }
 
-    /// Stop the mesh node.
+    /// Wire up BridgeManager + GoShim + ConnectionManager for full connectivity.
+    async fn start_with_sidecar(&self, sidecar_path: String) -> Result<()> {
+        // 1. Generate a random session token
+        let mut session_token = [0u8; 32];
+        getrandom::getrandom(&mut session_token)
+            .map_err(|e| Error::from_reason(format!("failed to generate session token: {e}")))?;
+
+        let session_token_hex = hex::encode(session_token);
+
+        // 2. Bind the BridgeManager on an ephemeral port
+        let mut bridge_manager = BridgeManager::bind(session_token)
+            .await
+            .map_err(|e| Error::from_reason(format!("failed to bind bridge: {e}")))?;
+
+        let bridge_port = bridge_manager.local_port();
+        tracing::info!("Bridge listening on 127.0.0.1:{bridge_port}");
+
+        // 3. Register handlers for incoming WebSocket connections (port 443)
+        let (ws_tx, mut ws_rx) = mpsc::channel(64);
+        bridge_manager.add_handler(
+            443,
+            Direction::Incoming,
+            Arc::new(ChannelHandler::new(ws_tx)),
+        );
+
+        // 4. Spawn the bridge accept loop
+        tokio::spawn(async move {
+            bridge_manager.run().await;
+        });
+
+        // 5. Spawn task to feed incoming bridge connections to the ConnectionManager
+        let conn_mgr = self.connection_manager.clone();
+        tokio::spawn(async move {
+            while let Some(bridge_conn) = ws_rx.recv().await {
+                conn_mgr.handle_incoming(bridge_conn).await;
+            }
+            tracing::info!("Bridge incoming handler loop ended");
+        });
+
+        // 6. Build the hostname: prefix-type-id (matches protocol::hostname format)
+        let hostname = format!(
+            "{}-{}-{}",
+            self.hostname_prefix, self.device_type, self.device_id
+        );
+
+        // 7. Determine state directory
+        let state_dir = self
+            .state_dir
+            .clone()
+            .unwrap_or_else(|| format!(".truffle-state/{}", self.device_id));
+
+        // Ensure state directory exists
+        std::fs::create_dir_all(&state_dir).map_err(|e| {
+            Error::from_reason(format!("failed to create state dir '{}': {e}", state_dir))
+        })?;
+
+        // 8. Spawn the Go sidecar
+        let shim_config = ShimConfig {
+            binary_path: PathBuf::from(sidecar_path),
+            hostname,
+            state_dir,
+            auth_key: self.auth_key.clone(),
+            bridge_port,
+            session_token: session_token_hex,
+            auto_restart: true,
+        };
+
+        let (shim, mut lifecycle_rx) = GoShim::spawn(shim_config)
+            .await
+            .map_err(|e| Error::from_reason(format!("failed to spawn sidecar: {e}")))?;
+
+        tracing::info!("Go sidecar spawned");
+
+        // 9. Store shim handle so it stays alive
+        {
+            let mut shim_guard = self.shim.lock().await;
+            *shim_guard = Some(shim);
+        }
+
+        // 10. Spawn lifecycle event loop: maps sidecar events to mesh node actions
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            loop {
+                match lifecycle_rx.recv().await {
+                    Ok(event) => match event {
+                        ShimLifecycleEvent::Started => {
+                            tracing::info!("Sidecar started");
+                        }
+                        ShimLifecycleEvent::Status(status) => {
+                            tracing::info!(
+                                "Sidecar status: state={}, ip={}, dns={}",
+                                status.state,
+                                status.tailscale_ip,
+                                status.dns_name
+                            );
+                            if !status.tailscale_ip.is_empty() {
+                                let dns = if status.dns_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(status.dns_name.as_str())
+                                };
+                                inner.set_local_online(&status.tailscale_ip, dns).await;
+                            }
+                        }
+                        ShimLifecycleEvent::AuthRequired { auth_url } => {
+                            tracing::info!("Tailscale auth required: {auth_url}");
+                            // Emit as MeshNodeEvent so JS gets notified
+                            inner.emit_event(MeshNodeEvent::AuthRequired(auth_url));
+                        }
+                        ShimLifecycleEvent::Peers(peers_data) => {
+                            let core_peers: Vec<TailnetPeer> = peers_data
+                                .peers
+                                .iter()
+                                .map(|p| TailnetPeer {
+                                    id: p.id.clone(),
+                                    hostname: p.hostname.clone(),
+                                    dns_name: p.dns_name.clone(),
+                                    tailscale_ips: p.tailscale_ips.clone(),
+                                    online: p.online,
+                                    os: if p.os.is_empty() {
+                                        None
+                                    } else {
+                                        Some(p.os.clone())
+                                    },
+                                })
+                                .collect();
+                            inner.handle_tailnet_peers(&core_peers).await;
+                        }
+                        ShimLifecycleEvent::Crashed {
+                            exit_code,
+                            stderr_tail,
+                        } => {
+                            let msg = format!(
+                                "Sidecar crashed (exit_code={:?}): {}",
+                                exit_code,
+                                stderr_tail.chars().take(200).collect::<String>()
+                            );
+                            tracing::error!("{msg}");
+                            inner.emit_event(MeshNodeEvent::Error(msg));
+                        }
+                        ShimLifecycleEvent::Stopped => {
+                            tracing::info!("Sidecar stopped");
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Sidecar lifecycle receiver lagged by {n} events");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Sidecar lifecycle channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Stop the mesh node and sidecar.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
+        // Stop sidecar first
+        let shim = {
+            let mut guard = self.shim.lock().await;
+            guard.take()
+        };
+        if let Some(shim) = shim {
+            if let Err(e) = shim.stop().await {
+                tracing::warn!("Error stopping sidecar: {e}");
+            }
+        }
+
         self.inner.stop().await;
         Ok(())
     }

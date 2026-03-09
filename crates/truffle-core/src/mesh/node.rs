@@ -399,6 +399,14 @@ impl MeshNode {
         self.event_tx.subscribe()
     }
 
+    /// Emit an event to all subscribers.
+    ///
+    /// Used by the NAPI layer to forward sidecar lifecycle events (e.g.,
+    /// AuthRequired, Error) into the MeshNode event stream.
+    pub fn emit_event(&self, event: MeshNodeEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
     // ── Discovery ─────────────────────────────────────────────────────────
 
     /// Handle discovered tailnet peers. Creates connections to matching peers.
