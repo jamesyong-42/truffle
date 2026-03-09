@@ -304,7 +304,7 @@ impl NapiFileTransferAdapter {
     pub async fn handle_bus_message(
         &self,
         msg_type: String,
-        payload: String,
+        payload: serde_json::Value,
     ) -> Result<()> {
         self.inner.handle_bus_message(&msg_type, &payload).await;
         Ok(())

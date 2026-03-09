@@ -263,16 +263,16 @@ impl FileTransferAdapter {
     // --- MessageBus message handler ---
 
     /// Handle an incoming MessageBus message.
-    pub async fn handle_bus_message(&self, msg_type: &str, payload: &str) {
+    pub async fn handle_bus_message(&self, msg_type: &str, payload: &serde_json::Value) {
         match msg_type {
             message_types::OFFER => {
-                if let Ok(offer) = serde_json::from_str::<FileTransferOffer>(payload) {
+                if let Ok(offer) = serde_json::from_value::<FileTransferOffer>(payload.clone()) {
                     let _ = self.adapter_event_tx.send(AdapterEvent::Offer(offer));
                 }
             }
 
             message_types::ACCEPT => {
-                if let Ok(accept) = serde_json::from_str::<FileTransferAccept>(payload) {
+                if let Ok(accept) = serde_json::from_value::<FileTransferAccept>(payload.clone()) {
                     let file_paths = self.file_paths.read().await;
                     let transfers = self.transfers.read().await;
 
@@ -311,7 +311,7 @@ impl FileTransferAdapter {
             }
 
             message_types::REJECT => {
-                if let Ok(reject) = serde_json::from_str::<FileTransferReject>(payload) {
+                if let Ok(reject) = serde_json::from_value::<FileTransferReject>(payload.clone()) {
                     self.transfers.write().await.remove(&reject.transfer_id);
                     self.file_paths.write().await.remove(&reject.transfer_id);
                     let _ = self
@@ -329,7 +329,7 @@ impl FileTransferAdapter {
             }
 
             message_types::CANCEL => {
-                if let Ok(cancel) = serde_json::from_str::<FileTransferCancel>(payload) {
+                if let Ok(cancel) = serde_json::from_value::<FileTransferCancel>(payload.clone()) {
                     self.transfers.write().await.remove(&cancel.transfer_id);
                     self.file_paths.write().await.remove(&cancel.transfer_id);
                     let _ = self

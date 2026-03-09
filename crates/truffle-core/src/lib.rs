@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod file_transfer;
+pub mod integration;
 pub mod mesh;
 pub mod protocol;
 pub mod reverse_proxy;

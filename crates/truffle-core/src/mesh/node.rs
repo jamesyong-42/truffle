@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::protocol::envelope::{MeshEnvelope, MESH_NAMESPACE};
 use crate::protocol::message_types::{
@@ -95,8 +95,8 @@ pub struct MeshNode {
     running: Arc<RwLock<bool>>,
     started_at: Arc<RwLock<u64>>,
 
-    /// Channel for MeshNode events to the application.
-    event_tx: mpsc::Sender<MeshNodeEvent>,
+    /// Channel for MeshNode events to the application (broadcast supports multiple consumers).
+    event_tx: broadcast::Sender<MeshNodeEvent>,
 
     /// Event receivers from DeviceManager and PrimaryElection, stored here so
     /// `start_event_loop()` can take them. Wrapped in Mutex<Option<>> because
@@ -113,12 +113,13 @@ pub struct MeshNode {
 impl MeshNode {
     /// Create a new MeshNode.
     ///
-    /// Returns the MeshNode and the event receiver for application events.
+    /// Returns the MeshNode and a broadcast event receiver. Additional receivers
+    /// can be obtained via `subscribe_events()`.
     pub fn new(
         config: MeshNodeConfig,
         connection_manager: Arc<ConnectionManager>,
-    ) -> (Self, mpsc::Receiver<MeshNodeEvent>) {
-        let (event_tx, event_rx) = mpsc::channel(256);
+    ) -> (Self, broadcast::Receiver<MeshNodeEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(256);
         let (device_event_tx, device_event_rx) = mpsc::channel(256);
         let (election_event_tx, election_event_rx) = mpsc::channel(256);
         let (bus_event_tx, _bus_event_rx) = mpsc::channel(64);
@@ -206,7 +207,7 @@ impl MeshNode {
         // Start periodic announcements
         self.start_announce_interval().await;
 
-        let _ = self.event_tx.try_send(MeshNodeEvent::Started);
+        let _ = self.event_tx.send(MeshNodeEvent::Started);
     }
 
     /// Stop the mesh node.
@@ -245,7 +246,7 @@ impl MeshNode {
             election.reset();
         }
 
-        let _ = self.event_tx.try_send(MeshNodeEvent::Stopped);
+        let _ = self.event_tx.send(MeshNodeEvent::Stopped);
     }
 
     pub async fn is_running(&self) -> bool {
@@ -296,7 +297,7 @@ impl MeshNode {
 
         // Local delivery
         if device_id == local_id {
-            let _ = self.event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+            let _ = self.event_tx.send(MeshNodeEvent::Message(IncomingMeshMessage {
                 from: Some(local_id),
                 connection_id: "local".to_string(),
                 namespace: envelope.namespace.clone(),
@@ -339,7 +340,7 @@ impl MeshNode {
                 }
             }
             // Also deliver locally
-            let _ = self.event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+            let _ = self.event_tx.send(MeshNodeEvent::Message(IncomingMeshMessage {
                 from: Some(local_id),
                 connection_id: "local".to_string(),
                 namespace: envelope.namespace.clone(),
@@ -389,6 +390,15 @@ impl MeshNode {
         self.message_bus.clone()
     }
 
+    /// Subscribe to MeshNode events. Returns a new broadcast receiver.
+    ///
+    /// Multiple consumers can subscribe independently. Each receiver gets
+    /// all events. If a receiver falls behind by the channel capacity (256),
+    /// it will receive a `Lagged` error indicating how many events were missed.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<MeshNodeEvent> {
+        self.event_tx.subscribe()
+    }
+
     // ── Discovery ─────────────────────────────────────────────────────────
 
     /// Handle discovered tailnet peers. Creates connections to matching peers.
@@ -428,7 +438,7 @@ impl MeshNode {
             dm.set_local_role(DeviceRole::Primary);
             let mut election = self.election.write().await;
             election.set_primary(&identity.id);
-            let _ = self.event_tx.try_send(MeshNodeEvent::RoleChanged {
+            let _ = self.event_tx.send(MeshNodeEvent::RoleChanged {
                 role: DeviceRole::Primary,
                 is_primary: true,
             });
@@ -493,7 +503,7 @@ impl MeshNode {
         }
 
         // Application-level message
-        let _ = self.event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+        let _ = self.event_tx.send(MeshNodeEvent::Message(IncomingMeshMessage {
             from: from_device_id,
             connection_id: connection_id.to_string(),
             namespace: envelope.namespace,
@@ -545,7 +555,7 @@ impl MeshNode {
                         }
 
                         // Deliver locally too
-                        let _ = self.event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+                        let _ = self.event_tx.send(MeshNodeEvent::Message(IncomingMeshMessage {
                             from: from_device_id.map(|s| s.to_string()),
                             connection_id: connection_id.to_string(),
                             namespace: inner_envelope.namespace,
@@ -715,6 +725,7 @@ impl MeshNode {
         let device_manager = self.device_manager.clone();
         let election = self.election.clone();
         let config = self.config.clone();
+        let message_bus = self.message_bus.clone();
 
         // Spawn a task to process device events
         let event_tx_dev = event_tx.clone();
@@ -723,13 +734,13 @@ impl MeshNode {
             while let Some(event) = device_event_rx.recv().await {
                 match &event {
                     DeviceEvent::DeviceDiscovered(d) => {
-                        let _ = event_tx_dev.try_send(MeshNodeEvent::DeviceDiscovered(d.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceDiscovered(d.clone()));
                     }
                     DeviceEvent::DeviceUpdated(d) => {
-                        let _ = event_tx_dev.try_send(MeshNodeEvent::DeviceUpdated(d.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceUpdated(d.clone()));
                     }
                     DeviceEvent::DeviceOffline(id) => {
-                        let _ = event_tx_dev.try_send(MeshNodeEvent::DeviceOffline(id.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceOffline(id.clone()));
                         // Check if the primary went offline
                         let primary_id = election_dev.read().await.primary_id().map(|s| s.to_string());
                         if primary_id.as_deref() == Some(id.as_str()) {
@@ -738,10 +749,10 @@ impl MeshNode {
                         }
                     }
                     DeviceEvent::DevicesChanged(devs) => {
-                        let _ = event_tx_dev.try_send(MeshNodeEvent::DevicesChanged(devs.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::DevicesChanged(devs.clone()));
                     }
                     DeviceEvent::PrimaryChanged(pid) => {
-                        let _ = event_tx_dev.try_send(MeshNodeEvent::PrimaryChanged(pid.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::PrimaryChanged(pid.clone()));
                     }
                     DeviceEvent::LocalDeviceChanged(_) => {
                         // Could trigger a broadcast announce, but we handle that
@@ -777,7 +788,7 @@ impl MeshNode {
                             }
                         }
 
-                        let _ = event_tx_el.try_send(MeshNodeEvent::RoleChanged {
+                        let _ = event_tx_el.send(MeshNodeEvent::RoleChanged {
                             role,
                             is_primary: is_local,
                         });
@@ -820,6 +831,7 @@ impl MeshNode {
         let this_dm = device_manager.clone();
         let this_election = election.clone();
         let this_config = config.clone();
+        let this_message_bus = message_bus.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -1000,13 +1012,21 @@ impl MeshNode {
                                                         }
                                                     }
                                                     // Local delivery
-                                                    let _ = this_event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+                                                    let incoming = IncomingMeshMessage {
                                                         from: from_device_id,
                                                         connection_id: connection_id.clone(),
                                                         namespace: inner_envelope.namespace,
                                                         msg_type: inner_envelope.msg_type,
                                                         payload: inner_envelope.payload,
-                                                    }));
+                                                    };
+                                                    let _ = this_event_tx.send(MeshNodeEvent::Message(incoming.clone()));
+                                                    // Also dispatch to MessageBus for pub/sub subscribers
+                                                    this_message_bus.dispatch(&super::message_bus::BusMessage {
+                                                        from: incoming.from,
+                                                        namespace: incoming.namespace,
+                                                        msg_type: incoming.msg_type,
+                                                        payload: incoming.payload,
+                                                    }).await;
                                                 }
                                             }
                                         }
@@ -1019,13 +1039,21 @@ impl MeshNode {
                                 }
                             } else {
                                 // Application-level message
-                                let _ = this_event_tx.try_send(MeshNodeEvent::Message(IncomingMeshMessage {
+                                let incoming = IncomingMeshMessage {
                                     from: from_device_id,
                                     connection_id: connection_id.clone(),
                                     namespace: envelope.namespace,
                                     msg_type: envelope.msg_type,
                                     payload: envelope.payload,
-                                }));
+                                };
+                                let _ = this_event_tx.send(MeshNodeEvent::Message(incoming.clone()));
+                                // Also dispatch to MessageBus for pub/sub subscribers
+                                this_message_bus.dispatch(&super::message_bus::BusMessage {
+                                    from: incoming.from,
+                                    namespace: incoming.namespace,
+                                    msg_type: incoming.msg_type,
+                                    payload: incoming.payload,
+                                }).await;
                             }
                         }
                     }

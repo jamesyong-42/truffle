@@ -10,6 +10,17 @@ use super::types::*;
 ///
 /// Ports TS `ISyncableStore`. In Rust we use trait objects rather than
 /// EventEmitter, with explicit callback registration.
+///
+/// # Async Safety
+///
+/// All methods use `&self` and are called synchronously from within async
+/// contexts (inside `StoreSyncAdapter`). Implementations MUST use
+/// `std::sync::RwLock` or `std::sync::Mutex` for interior mutability,
+/// NOT `tokio::sync` variants. Using `tokio::sync::RwLock::blocking_read()`
+/// inside a tokio runtime context will panic or deadlock.
+///
+/// The `MockStore` in tests demonstrates the correct pattern using
+/// `std::sync::Mutex`.
 pub trait SyncableStore: Send + Sync {
     /// Unique store identifier.
     fn store_id(&self) -> &str;

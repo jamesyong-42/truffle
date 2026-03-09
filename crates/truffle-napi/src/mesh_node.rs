@@ -4,7 +4,7 @@ use std::time::Duration;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use truffle_core::mesh::election::ElectionTimingConfig;
 use truffle_core::mesh::message_bus::MeshMessageBus;
@@ -24,7 +24,7 @@ use crate::types::{
 #[napi]
 pub struct NapiMeshNode {
     inner: Arc<CoreMeshNode>,
-    event_rx: tokio::sync::Mutex<Option<mpsc::Receiver<MeshNodeEvent>>>,
+    event_rx: tokio::sync::Mutex<Option<broadcast::Receiver<MeshNodeEvent>>>,
 }
 
 #[napi]
@@ -237,23 +237,33 @@ impl NapiMeshNode {
     /// fallible operations. If a conversion fails, the event is logged
     /// and skipped rather than crashing the Node.js process.
     async fn event_loop(
-        mut rx: mpsc::Receiver<MeshNodeEvent>,
+        mut rx: broadcast::Receiver<MeshNodeEvent>,
         callback: ThreadsafeFunction<NapiMeshEvent>,
     ) {
-        while let Some(event) = rx.recv().await {
-            let napi_event = mesh_event_to_napi(&event);
-            // Blocking mode: waits if JS event queue is full.
-            // This ensures critical events are never dropped.
-            let status = callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::Blocking);
-            if status != Status::Ok {
-                tracing::warn!("Failed to deliver mesh event to JS: {:?}", status);
-                if status == Status::Closing || status == Status::InvalidArg {
-                    tracing::info!("Event callback closed, stopping event loop");
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let napi_event = mesh_event_to_napi(&event);
+                    // Blocking mode: waits if JS event queue is full.
+                    // This ensures critical events are never dropped.
+                    let status = callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::Blocking);
+                    if status != Status::Ok {
+                        tracing::warn!("Failed to deliver mesh event to JS: {:?}", status);
+                        if status == Status::Closing || status == Status::InvalidArg {
+                            tracing::info!("Event callback closed, stopping event loop");
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Mesh event receiver lagged by {n} messages");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::info!("Mesh event loop ended (channel closed)");
                     break;
                 }
             }
         }
-        tracing::info!("Mesh event loop ended (channel closed)");
     }
 }
 

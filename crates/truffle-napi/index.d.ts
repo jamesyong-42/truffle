@@ -30,7 +30,7 @@ export declare class NapiFileTransferAdapter {
    * Handle an incoming message from the mesh bus.
    * Call this when a file-transfer namespace message arrives.
    */
-  handleBusMessage(msgType: string, payload: string): Promise<void>
+  handleBusMessage(msgType: string, payload: any): Promise<void>
   /**
    * Subscribe to adapter events (offers, progress, completed, failed, cancelled).
    *
@@ -267,8 +267,12 @@ export interface NapiMeshNodeConfig {
   deviceName: string
   deviceType: string
   hostnamePrefix: string
-  sidecarPath: string
-  stateDir: string
+  /**
+   * Path to the Go sidecar binary. Optional — use `resolveSidecarPath()`
+   * from `@vibecook/truffle` for automatic platform detection.
+   */
+  sidecarPath?: string
+  stateDir?: string
   authKey?: string
   preferPrimary?: boolean
   staticPath?: string
