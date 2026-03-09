@@ -1,0 +1,11 @@
+{
+  "name": "@vibecook/example-chat",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vibecook/truffle": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0"
+  }
+}

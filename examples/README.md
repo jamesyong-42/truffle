@@ -14,16 +14,19 @@ For local development (cloning this repo), build from source instead:
 pnpm install
 cd crates/truffle-napi && pnpm run build
 cd packages/sidecar-slim && go build -o bin/sidecar-slim
+cp bin/sidecar-slim ../../packages/core/bin/sidecar-slim
 ```
 
 ## Examples
+
+Run from the project root:
 
 ### Discovery
 
 Find and list devices on the mesh network:
 
 ```bash
-npx tsx examples/discovery/index.ts
+pnpm --filter @vibecook/example-discovery exec tsx index.ts
 ```
 
 ### Chat
@@ -31,7 +34,7 @@ npx tsx examples/discovery/index.ts
 Simple cross-device chat using broadcastEnvelope:
 
 ```bash
-npx tsx examples/chat/index.ts
+pnpm --filter @vibecook/example-chat exec tsx index.ts
 ```
 
 Run on multiple devices on the same Tailscale network to chat.
@@ -41,7 +44,7 @@ Run on multiple devices on the same Tailscale network to chat.
 Todo list synced across devices using NapiStoreSyncAdapter:
 
 ```bash
-npx tsx examples/shared-state/index.ts
+pnpm --filter @vibecook/example-shared-state exec tsx index.ts
 ```
 
 Commands: `add <text>`, `toggle <n>`, `rm <n>`, `list`, `quit`

@@ -25,6 +25,7 @@ use crate::types::{
 pub struct NapiMeshNode {
     inner: Arc<CoreMeshNode>,
     event_rx: tokio::sync::Mutex<Option<broadcast::Receiver<MeshNodeEvent>>>,
+    pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiMeshEvent>>>,
 }
 
 #[napi]
@@ -78,12 +79,36 @@ impl NapiMeshNode {
         Ok(Self {
             inner: Arc::new(inner),
             event_rx: tokio::sync::Mutex::new(Some(event_rx)),
+            pending_callback: std::sync::Mutex::new(None),
         })
     }
 
     /// Start the mesh node.
+    ///
+    /// If `on_event` was called before `start`, the event loop is spawned here
+    /// inside the NAPI Tokio runtime context.
     #[napi]
     pub async fn start(&self) -> Result<()> {
+        // Spawn the event loop if a callback was registered before start
+        let callback = self
+            .pending_callback
+            .lock()
+            .map_err(|_| Error::from_reason("pending_callback lock poisoned"))?
+            .take();
+
+        if let Some(cb) = callback {
+            let mut guard = self
+                .event_rx
+                .lock()
+                .await;
+
+            if let Some(rx) = guard.take() {
+                tokio::spawn(async move {
+                    Self::event_loop(rx, cb).await;
+                });
+            }
+        }
+
         self.inner.start().await;
         Ok(())
     }
@@ -213,20 +238,47 @@ impl NapiMeshNode {
     /// - If the JS event queue is full, Rust waits rather than dropping events
     ///
     /// The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
+    ///
+    /// Can be called before or after `start()`. If called before `start()`, the
+    /// event loop is spawned when `start()` is called.
     #[napi(ts_args_type = "callback: (err: null | Error, event: NapiMeshEvent) => void")]
     pub fn on_event(&self, callback: ThreadsafeFunction<NapiMeshEvent>) -> Result<()> {
-        let mut guard = self
-            .event_rx
-            .try_lock()
-            .map_err(|_| Error::from_reason("event receiver lock contention"))?;
+        // Check if we already have a callback registered
+        {
+            let guard = self
+                .pending_callback
+                .lock()
+                .map_err(|_| Error::from_reason("pending_callback lock poisoned"))?;
+            if guard.is_some() {
+                return Err(Error::from_reason(
+                    "on_event already called - only one subscriber allowed",
+                ));
+            }
+        }
 
-        let rx = guard.take().ok_or_else(|| {
-            Error::from_reason("on_event already called - only one subscriber allowed")
-        })?;
+        // If a Tokio runtime is available (called after start or from async context),
+        // spawn the event loop immediately. Otherwise, store the callback for start().
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            let mut guard = self
+                .event_rx
+                .try_lock()
+                .map_err(|_| Error::from_reason("event receiver lock contention"))?;
 
-        tokio::spawn(async move {
-            Self::event_loop(rx, callback).await;
-        });
+            let rx = guard.take().ok_or_else(|| {
+                Error::from_reason("on_event already called - only one subscriber allowed")
+            })?;
+
+            tokio::spawn(async move {
+                Self::event_loop(rx, callback).await;
+            });
+        } else {
+            // No Tokio runtime — store callback for start() to spawn
+            let mut guard = self
+                .pending_callback
+                .lock()
+                .map_err(|_| Error::from_reason("pending_callback lock poisoned"))?;
+            *guard = Some(callback);
+        }
 
         Ok(())
     }

@@ -162,6 +162,8 @@ pub struct NapiFileTransferAdapter {
     bus_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, String, String)>>>,
     manager_event_rx:
         tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<FileTransferEvent>>>,
+    pending_event_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiFileTransferEvent>>>,
+    pending_bus_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiBusMessage>>>,
 }
 
 #[napi]
@@ -229,6 +231,8 @@ impl NapiFileTransferAdapter {
             event_rx: tokio::sync::Mutex::new(Some(adapter_event_rx)),
             bus_rx: tokio::sync::Mutex::new(Some(bus_rx)),
             manager_event_rx: tokio::sync::Mutex::new(Some(manager_event_rx)),
+            pending_event_cb: std::sync::Mutex::new(None),
+            pending_bus_cb: std::sync::Mutex::new(None),
         })
     }
 
@@ -312,25 +316,37 @@ impl NapiFileTransferAdapter {
 
     /// Subscribe to adapter events (offers, progress, completed, failed, cancelled).
     ///
-    /// Only one subscriber allowed. Progress events may be dropped if the JS
-    /// handler is slow (broadcast channel). Critical events are never dropped.
+    /// Only one subscriber allowed. Can be called before or after `start_manager_events`.
     #[napi(ts_args_type = "callback: (err: null | Error, event: NapiFileTransferEvent) => void")]
     pub fn on_event(
         &self,
         callback: ThreadsafeFunction<NapiFileTransferEvent>,
     ) -> Result<()> {
-        let mut guard = self
-            .event_rx
-            .try_lock()
-            .map_err(|_| Error::from_reason("event receiver lock contention"))?;
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            let mut guard = self
+                .event_rx
+                .try_lock()
+                .map_err(|_| Error::from_reason("event receiver lock contention"))?;
 
-        let rx = guard.take().ok_or_else(|| {
-            Error::from_reason("on_event already called - only one subscriber allowed")
-        })?;
+            let rx = guard.take().ok_or_else(|| {
+                Error::from_reason("on_event already called - only one subscriber allowed")
+            })?;
 
-        tokio::spawn(async move {
-            Self::event_loop(rx, callback).await;
-        });
+            tokio::spawn(async move {
+                Self::event_loop(rx, callback).await;
+            });
+        } else {
+            let mut guard = self
+                .pending_event_cb
+                .lock()
+                .map_err(|_| Error::from_reason("pending_event_cb lock poisoned"))?;
+            if guard.is_some() {
+                return Err(Error::from_reason(
+                    "on_event already called - only one subscriber allowed",
+                ));
+            }
+            *guard = Some(callback);
+        }
 
         Ok(())
     }
@@ -338,25 +354,38 @@ impl NapiFileTransferAdapter {
     /// Subscribe to outgoing bus messages.
     ///
     /// The adapter generates outgoing messages (OFFER, ACCEPT, REJECT, CANCEL)
-    /// that must be sent via the mesh message bus. This callback delivers them
-    /// so the JS layer can relay them.
+    /// that must be sent via the mesh message bus. Can be called before or after
+    /// `start_manager_events`.
     #[napi(ts_args_type = "callback: (err: null | Error, message: NapiBusMessage) => void")]
     pub fn on_bus_message(
         &self,
         callback: ThreadsafeFunction<NapiBusMessage>,
     ) -> Result<()> {
-        let mut guard = self
-            .bus_rx
-            .try_lock()
-            .map_err(|_| Error::from_reason("bus receiver lock contention"))?;
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            let mut guard = self
+                .bus_rx
+                .try_lock()
+                .map_err(|_| Error::from_reason("bus receiver lock contention"))?;
 
-        let rx = guard.take().ok_or_else(|| {
-            Error::from_reason("on_bus_message already called - only one subscriber allowed")
-        })?;
+            let rx = guard.take().ok_or_else(|| {
+                Error::from_reason("on_bus_message already called - only one subscriber allowed")
+            })?;
 
-        tokio::spawn(async move {
-            Self::bus_message_loop(rx, callback).await;
-        });
+            tokio::spawn(async move {
+                Self::bus_message_loop(rx, callback).await;
+            });
+        } else {
+            let mut guard = self
+                .pending_bus_cb
+                .lock()
+                .map_err(|_| Error::from_reason("pending_bus_cb lock poisoned"))?;
+            if guard.is_some() {
+                return Err(Error::from_reason(
+                    "on_bus_message already called - only one subscriber allowed",
+                ));
+            }
+            *guard = Some(callback);
+        }
 
         Ok(())
     }
@@ -365,8 +394,41 @@ impl NapiFileTransferAdapter {
     ///
     /// The FileTransferManager emits events (progress, complete, error) that
     /// the adapter needs to process. Call this once after construction.
+    /// Also spawns any pending event/bus callbacks registered before a Tokio
+    /// runtime was available.
     #[napi]
-    pub fn start_manager_events(&self) -> Result<()> {
+    pub async fn start_manager_events(&self) -> Result<()> {
+        // Spawn pending event callback if registered before runtime was available
+        let event_cb = self
+            .pending_event_cb
+            .lock()
+            .map_err(|_| Error::from_reason("pending_event_cb lock poisoned"))?
+            .take();
+        if let Some(cb) = event_cb {
+            let mut guard = self.event_rx.lock().await;
+            if let Some(rx) = guard.take() {
+                tokio::spawn(async move {
+                    Self::event_loop(rx, cb).await;
+                });
+            }
+        }
+
+        // Spawn pending bus callback if registered before runtime was available
+        let bus_cb = self
+            .pending_bus_cb
+            .lock()
+            .map_err(|_| Error::from_reason("pending_bus_cb lock poisoned"))?
+            .take();
+        if let Some(cb) = bus_cb {
+            let mut guard = self.bus_rx.lock().await;
+            if let Some(rx) = guard.take() {
+                tokio::spawn(async move {
+                    Self::bus_message_loop(rx, cb).await;
+                });
+            }
+        }
+
+        // Spawn manager event loop
         let mut guard = self
             .manager_event_rx
             .try_lock()

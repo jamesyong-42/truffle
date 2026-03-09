@@ -18,6 +18,9 @@
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": [
-    "@vibecook/truffle-docs"
+    "@vibecook/truffle-docs",
+    "@vibecook/example-discovery",
+    "@vibecook/example-chat",
+    "@vibecook/example-shared-state"
   ]
 }

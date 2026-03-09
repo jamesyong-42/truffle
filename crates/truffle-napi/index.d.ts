@@ -34,16 +34,15 @@ export declare class NapiFileTransferAdapter {
   /**
    * Subscribe to adapter events (offers, progress, completed, failed, cancelled).
    *
-   * Only one subscriber allowed. Progress events may be dropped if the JS
-   * handler is slow (broadcast channel). Critical events are never dropped.
+   * Only one subscriber allowed. Can be called before or after `start_manager_events`.
    */
   onEvent(callback: (err: null | Error, event: NapiFileTransferEvent) => void): void
   /**
    * Subscribe to outgoing bus messages.
    *
    * The adapter generates outgoing messages (OFFER, ACCEPT, REJECT, CANCEL)
-   * that must be sent via the mesh message bus. This callback delivers them
-   * so the JS layer can relay them.
+   * that must be sent via the mesh message bus. Can be called before or after
+   * `start_manager_events`.
    */
   onBusMessage(callback: (err: null | Error, message: NapiBusMessage) => void): void
   /**
@@ -51,8 +50,10 @@ export declare class NapiFileTransferAdapter {
    *
    * The FileTransferManager emits events (progress, complete, error) that
    * the adapter needs to process. Call this once after construction.
+   * Also spawns any pending event/bus callbacks registered before a Tokio
+   * runtime was available.
    */
-  startManagerEvents(): void
+  startManagerEvents(): Promise<void>
 }
 
 /**
@@ -68,7 +69,12 @@ export declare class NapiMeshNode {
    * The `config` parameter matches the TypeScript `MeshNodeConfig` interface.
    */
   constructor(config: NapiMeshNodeConfig)
-  /** Start the mesh node. */
+  /**
+   * Start the mesh node.
+   *
+   * If `on_event` was called before `start`, the event loop is spawned here
+   * inside the NAPI Tokio runtime context.
+   */
   start(): Promise<void>
   /** Stop the mesh node. */
   stop(): Promise<void>
@@ -109,6 +115,9 @@ export declare class NapiMeshNode {
    * - If the JS event queue is full, Rust waits rather than dropping events
    *
    * The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
+   *
+   * Can be called before or after `start()`. If called before `start()`, the
+   * event loop is spawned when `start()` is called.
    */
   onEvent(callback: (err: null | Error, event: NapiMeshEvent) => void): void
 }
@@ -139,7 +148,12 @@ export declare class NapiStoreSyncAdapter {
    * This constructor creates the adapter with an empty store list.
    */
   constructor(config: NapiStoreSyncConfig)
-  /** Start syncing. */
+  /**
+   * Start syncing.
+   *
+   * If `on_outgoing` was called before `start`, the outgoing loop is
+   * spawned here inside the NAPI Tokio runtime context.
+   */
   start(): Promise<void>
   /** Stop syncing. */
   stop(): Promise<void>
@@ -157,7 +171,7 @@ export declare class NapiStoreSyncAdapter {
    * Subscribe to outgoing sync messages.
    *
    * The callback receives messages that should be broadcast to all devices
-   * via the mesh message bus.
+   * via the mesh message bus. Can be called before or after `start()`.
    */
   onOutgoing(callback: (err: null | Error, message: NapiOutgoingSyncMessage) => void): void
 }

@@ -46,6 +46,7 @@ pub struct NapiDeviceSlice {
 pub struct NapiStoreSyncAdapter {
     inner: Arc<CoreAdapter>,
     outgoing_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<OutgoingSyncMessage>>>,
+    pending_outgoing_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiOutgoingSyncMessage>>>,
 }
 
 #[napi]
@@ -67,12 +68,31 @@ impl NapiStoreSyncAdapter {
         Ok(Self {
             inner,
             outgoing_rx: tokio::sync::Mutex::new(Some(outgoing_rx)),
+            pending_outgoing_cb: std::sync::Mutex::new(None),
         })
     }
 
     /// Start syncing.
+    ///
+    /// If `on_outgoing` was called before `start`, the outgoing loop is
+    /// spawned here inside the NAPI Tokio runtime context.
     #[napi]
     pub async fn start(&self) -> Result<()> {
+        let callback = self
+            .pending_outgoing_cb
+            .lock()
+            .map_err(|_| Error::from_reason("pending_outgoing_cb lock poisoned"))?
+            .take();
+
+        if let Some(cb) = callback {
+            let mut guard = self.outgoing_rx.lock().await;
+            if let Some(rx) = guard.take() {
+                tokio::spawn(async move {
+                    Self::outgoing_loop(rx, cb).await;
+                });
+            }
+        }
+
         self.inner.start().await;
         Ok(())
     }
@@ -138,24 +158,46 @@ impl NapiStoreSyncAdapter {
     /// Subscribe to outgoing sync messages.
     ///
     /// The callback receives messages that should be broadcast to all devices
-    /// via the mesh message bus.
+    /// via the mesh message bus. Can be called before or after `start()`.
     #[napi(ts_args_type = "callback: (err: null | Error, message: NapiOutgoingSyncMessage) => void")]
     pub fn on_outgoing(
         &self,
         callback: ThreadsafeFunction<NapiOutgoingSyncMessage>,
     ) -> Result<()> {
-        let mut guard = self
-            .outgoing_rx
-            .try_lock()
-            .map_err(|_| Error::from_reason("outgoing receiver lock contention"))?;
+        // Check if we already have a callback registered
+        {
+            let guard = self
+                .pending_outgoing_cb
+                .lock()
+                .map_err(|_| Error::from_reason("pending_outgoing_cb lock poisoned"))?;
+            if guard.is_some() {
+                return Err(Error::from_reason(
+                    "on_outgoing already called - only one subscriber allowed",
+                ));
+            }
+        }
 
-        let rx = guard.take().ok_or_else(|| {
-            Error::from_reason("on_outgoing already called - only one subscriber allowed")
-        })?;
+        // If a Tokio runtime is available, spawn immediately. Otherwise, defer to start().
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            let mut guard = self
+                .outgoing_rx
+                .try_lock()
+                .map_err(|_| Error::from_reason("outgoing receiver lock contention"))?;
 
-        tokio::spawn(async move {
-            Self::outgoing_loop(rx, callback).await;
-        });
+            let rx = guard.take().ok_or_else(|| {
+                Error::from_reason("on_outgoing already called - only one subscriber allowed")
+            })?;
+
+            tokio::spawn(async move {
+                Self::outgoing_loop(rx, callback).await;
+            });
+        } else {
+            let mut guard = self
+                .pending_outgoing_cb
+                .lock()
+                .map_err(|_| Error::from_reason("pending_outgoing_cb lock poisoned"))?;
+            *guard = Some(callback);
+        }
 
         Ok(())
     }

@@ -8,8 +8,9 @@ dist/
 # Rust build output
 target/
 
-# Sidecar binary
-packages/sidecar-bin/bin/
+# Sidecar binaries
+packages/sidecar-slim/bin/
+packages/core/bin/
 
 # VitePress
 docs/.vitepress/dist/
