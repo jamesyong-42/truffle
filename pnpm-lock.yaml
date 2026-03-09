@@ -75,6 +75,22 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+    optionalDependencies:
+      '@vibecook/truffle-sidecar-darwin-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@vibecook/truffle-sidecar-darwin-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@vibecook/truffle-sidecar-linux-arm64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@vibecook/truffle-sidecar-linux-x64':
+        specifier: 0.1.0
+        version: 0.1.0
+      '@vibecook/truffle-sidecar-win32-x64':
+        specifier: 0.1.0
+        version: 0.1.0
 
   packages/react:
     dependencies:
@@ -1439,6 +1455,36 @@ packages:
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
+
+  '@vibecook/truffle-sidecar-darwin-arm64@0.1.0':
+    resolution: {integrity: sha512-9ZiLW0/GxZKtELmfNxxIM9Oa+zkECHkqLlPcKmT3F94Ac8BHpbPYyWEGfZJG70dCt4xLwi4wJBJYFP4RlLaUXQ==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@vibecook/truffle-sidecar-darwin-x64@0.1.0':
+    resolution: {integrity: sha512-4iZQ1L2W9qhmFwqE4pq9tN3oXRZ1mEgm3r4lLFTB2WOA4H6aMp502ESzUEprRTuBu5X3OVZjProWQStZiS81TA==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@vibecook/truffle-sidecar-linux-arm64@0.1.0':
+    resolution: {integrity: sha512-Q1KADlkCHCALPjtKgsJcWyfJokMFAMkGaWJFY8hbdBx+230G+lqC9fnaSXFI+Ux+RKD6wg2BCBdswBuJhdpWTg==}
+    engines: {node: '>=18'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@vibecook/truffle-sidecar-linux-x64@0.1.0':
+    resolution: {integrity: sha512-rt+UXlFuKOh2Dlw4JePkeg2zMmJtbden1OhGX6edbkSavA7kdlHdyZINaGy2s5QbaBdZwBgGaIP0tv6cUgvLwg==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [linux]
+
+  '@vibecook/truffle-sidecar-win32-x64@0.1.0':
+    resolution: {integrity: sha512-uwoMbcEM+T0dABq3Dm8a6aeaRea/sHXLSlW8Xm/3HjZPwk6UkMrBCJWhDEcsa8iQYA4FfWBkywSGF7m7JgWJNQ==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [win32]
 
   '@vitejs/plugin-vue@5.2.4':
     resolution: {integrity: sha512-7Yx/SXSOcQq5HiiV3orevHUFn+pmMB4cgbEkDYgnkUWb0WfeQ/wa2yFv6D5ICiCQOVpjA7vYDXrC7AGO8yjDHA==}
@@ -3895,6 +3941,21 @@ snapshots:
       eslint-visitor-keys: 5.0.1
 
   '@ungap/structured-clone@1.3.0': {}
+
+  '@vibecook/truffle-sidecar-darwin-arm64@0.1.0':
+    optional: true
+
+  '@vibecook/truffle-sidecar-darwin-x64@0.1.0':
+    optional: true
+
+  '@vibecook/truffle-sidecar-linux-arm64@0.1.0':
+    optional: true
+
+  '@vibecook/truffle-sidecar-linux-x64@0.1.0':
+    optional: true
+
+  '@vibecook/truffle-sidecar-win32-x64@0.1.0':
+    optional: true
 
   '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@22.19.11))(vue@3.5.29(typescript@5.9.3))':
     dependencies:

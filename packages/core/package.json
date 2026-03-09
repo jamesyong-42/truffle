@@ -47,7 +47,7 @@
     "build": "tsc",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "postinstall": "node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.cjs"
   },
   "dependencies": {
     "@vibecook/truffle-native": "file:../../crates/truffle-napi"
