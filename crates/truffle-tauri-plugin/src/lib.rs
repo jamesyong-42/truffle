@@ -15,6 +15,10 @@ pub mod events;
 /// The MeshNode and ProxyManager are wrapped in RwLock<Option<>> because
 /// they are created lazily after the app starts (e.g., after reading config).
 /// The Tauri plugin manages their lifecycle.
+///
+/// For full-stack usage (sidecar + bridge + mesh), consider using
+/// `truffle_core::runtime::TruffleRuntime` which wires everything together.
+/// This plugin currently exposes MeshNode directly for maximum flexibility.
 pub struct TruffleState {
     pub mesh_node: RwLock<Option<Arc<MeshNode>>>,
     pub proxy_manager: RwLock<Option<Arc<ProxyManager>>>,

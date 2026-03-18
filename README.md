@@ -39,7 +39,7 @@ Truffle lets your devices discover each other, elect a primary, and exchange mes
 +---------------------------------------------------+
 ```
 
-The Rust core (`truffle-core`) implements all mesh logic: device discovery, primary election, message routing, store sync, file transfer, and reverse proxy. A thin Go shim (`sidecar-slim`) provides the Tailscale `tsnet` integration -- it manages the Tailscale node and bridges connections to the Rust core via WebSocket.
+The Rust core (`truffle-core`) implements all mesh logic: device discovery, primary election, message routing, store sync, file transfer, and reverse proxy. The `TruffleRuntime` (in `runtime.rs`) wires together the sidecar, bridge, connection manager, and mesh node into a single high-level API. A thin Go shim (`sidecar-slim`) provides the Tailscale `tsnet` integration -- it manages the Tailscale node and bridges connections to the Rust core via a binary-header TCP bridge protocol.
 
 ## Installation
 
@@ -96,7 +96,7 @@ console.log('Devices on mesh:', devices);
 await node.broadcastEnvelope('chat', 'message', { text: 'Hello mesh!' });
 ```
 
-### Rust
+### Rust (Low-Level -- MeshNode)
 
 ```rust
 use std::sync::Arc;
@@ -116,6 +116,7 @@ let config = MeshNodeConfig {
 };
 
 let (conn_mgr, _transport_rx) = ConnectionManager::new(TransportConfig::default());
+// MeshNode::new() returns a broadcast::Receiver (supports multiple consumers)
 let (node, mut event_rx) = MeshNode::new(config, Arc::new(conn_mgr));
 node.start().await;
 
@@ -123,8 +124,46 @@ let devices = node.devices().await;
 let envelope = MeshEnvelope::new("chat", "message", serde_json::json!({"text": "Hello!"}));
 node.broadcast_envelope(&envelope).await;
 
-// Multiple consumers can subscribe to events
+// Additional consumers subscribe independently
 let mut rx2 = node.subscribe_events();
+```
+
+### Rust (High-Level -- TruffleRuntime)
+
+For applications that need the full stack (sidecar, bridge, mesh), use `TruffleRuntime`:
+
+```rust
+use truffle_core::runtime::{TruffleRuntime, RuntimeConfig};
+use truffle_core::mesh::node::{MeshNodeConfig, MeshTimingConfig};
+use truffle_core::transport::connection::TransportConfig;
+
+let config = RuntimeConfig {
+    mesh: MeshNodeConfig {
+        device_id: "my-device".into(),
+        device_name: "My Laptop".into(),
+        device_type: "desktop".into(),
+        hostname_prefix: "myapp".into(),
+        prefer_primary: false,
+        capabilities: vec![],
+        metadata: None,
+        timing: MeshTimingConfig::default(),
+    },
+    transport: TransportConfig::default(),
+    sidecar_path: Some("/path/to/truffle-sidecar".into()),
+    state_dir: None,
+    auth_key: None,
+};
+
+let (runtime, mut event_rx) = TruffleRuntime::new(&config);
+runtime.start(&config).await.unwrap();
+
+// Access mesh node for device info, messaging, etc.
+let devices = runtime.mesh_node().devices().await;
+
+// Dial a peer through the full bridge pipeline
+runtime.dial_peer("peer.tailnet.ts.net", 443).await.unwrap();
+
+runtime.stop().await;
 ```
 
 ### React
@@ -172,7 +211,7 @@ cd crates/truffle-napi && pnpm run build
 # Build TypeScript packages
 pnpm run build
 
-# Run Rust tests (188 tests)
+# Run Rust tests (~250 tests)
 cargo test --workspace
 
 # Lint and format

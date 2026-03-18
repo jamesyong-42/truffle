@@ -1,8 +1,9 @@
 # RFC 005: truffle-core Refactor Plan
 
-**Status**: Implemented (Changes 1-3, 5-6; Change 4 skipped)
+**Status**: Superseded by RFC 007
 **Created**: 2026-03-08
 **Implemented**: 2026-03-08
+**Superseded**: 2026-03-17 -- RFC 007 (Comprehensive Refactor) encompasses and extends all changes from this RFC. See RFC 007 for the current API surface.
 **Motivation**: Real-world validation via Cheeseboard (RFC 004) exposed API gaps and dead code in truffle-core. This RFC captures all validated changes needed in the library itself.
 
 ---
@@ -450,8 +451,23 @@ All 186 existing tests must continue to pass after each change. New tests per ch
 
 ## Post-Refactor
 
+> **Note**: This section describes the intended outcomes. All of these have been achieved via RFC 007.
+
 Once this refactor is complete:
 - Cheeseboard (RFC 004) can be implemented against the improved APIs
 - The integration helpers eliminate ~100 lines of boilerplate per consumer app
 - MessageBus becomes actually functional (no longer dead code)
 - Multiple event consumers are natively supported via broadcast
+
+## Supersession Details
+
+RFC 007 (Comprehensive Refactor) subsumes this RFC entirely:
+
+| RFC 005 Change | RFC 007 Changeset | Status |
+|----------------|-------------------|--------|
+| Change 1: Document SyncableStore async-safety | CS-9 | Implemented |
+| Change 2: Fix handle_bus_message signature | CS-5 (part of event loop extraction) | Implemented |
+| Change 3: Auto-dispatch to MessageBus | CS-5 (TransportHandler dispatches to MessageBus) | Implemented |
+| Change 4: Change notification for StoreSyncAdapter | Deferred (not in RFC 007 scope) | Deferred |
+| Change 5: mpsc -> broadcast for event_tx | CS-6 (MeshNode state consolidation) | Implemented |
+| Change 6: Integration helpers module | CS-7 + integration.rs | Implemented |
