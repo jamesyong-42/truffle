@@ -660,4 +660,228 @@ mod tests {
             assert!(rx.await.is_err());
         }
     }
+
+    // ── Layer 5: Command serialization + lifecycle event mapping ─────────
+
+    #[test]
+    fn start_command_serializes_correctly() {
+        let data = super::super::protocol::StartCommandData {
+            hostname: "test-node".to_string(),
+            state_dir: "/tmp/tsnet-test".to_string(),
+            auth_key: None,
+            bridge_port: 54321,
+            session_token: "ab".repeat(32),
+        };
+        let cmd = super::super::protocol::ShimCommand {
+            command: super::super::protocol::command_type::START,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+
+        // The Go sidecar expects exactly these field names
+        assert!(json.contains(r#""command":"tsnet:start""#));
+        assert!(json.contains(r#""hostname":"test-node""#));
+        assert!(json.contains(r#""stateDir":"/tmp/tsnet-test""#));
+        assert!(json.contains(r#""bridgePort":54321"#));
+        assert!(json.contains(r#""sessionToken":"#));
+        // authKey should not be present when None
+        assert!(!json.contains("authKey"));
+    }
+
+    #[test]
+    fn stop_command_has_no_data() {
+        let cmd = super::super::protocol::ShimCommand {
+            command: super::super::protocol::command_type::STOP,
+            data: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"command":"tsnet:stop"}"#);
+    }
+
+    #[test]
+    fn get_peers_command_has_no_data() {
+        let cmd = super::super::protocol::ShimCommand {
+            command: super::super::protocol::command_type::GET_PEERS,
+            data: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"command":"tsnet:getPeers"}"#);
+    }
+
+    #[test]
+    fn dial_command_serializes_with_request_id() {
+        let data = super::super::protocol::DialCommandData {
+            request_id: "uuid-v4-here".to_string(),
+            target: "my-peer.tail.ts.net".to_string(),
+            port: 443,
+        };
+        let cmd = super::super::protocol::ShimCommand {
+            command: super::super::protocol::command_type::DIAL,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""command":"bridge:dial""#));
+        assert!(json.contains(r#""requestId":"uuid-v4-here""#));
+        assert!(json.contains(r#""target":"my-peer.tail.ts.net""#));
+        assert!(json.contains(r#""port":443"#));
+    }
+
+    #[test]
+    fn lifecycle_event_started_variant() {
+        let event = ShimLifecycleEvent::Started;
+        let debug = format!("{event:?}");
+        assert_eq!(debug, "Started");
+    }
+
+    #[test]
+    fn lifecycle_event_stopped_variant() {
+        let event = ShimLifecycleEvent::Stopped;
+        let debug = format!("{event:?}");
+        assert_eq!(debug, "Stopped");
+    }
+
+    #[test]
+    fn lifecycle_event_auth_required_variant() {
+        let event = ShimLifecycleEvent::AuthRequired {
+            auth_url: "https://login.tailscale.com/a/abc".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("AuthRequired"));
+        assert!(debug.contains("https://login.tailscale.com"));
+    }
+
+    #[test]
+    fn lifecycle_event_status_variant() {
+        let data = super::super::protocol::StatusEventData {
+            state: "running".to_string(),
+            hostname: "node1".to_string(),
+            dns_name: "node1.ts.net".to_string(),
+            tailscale_ip: "100.64.0.1".to_string(),
+            error: String::new(),
+        };
+        let event = ShimLifecycleEvent::Status(data);
+        let debug = format!("{event:?}");
+        assert!(debug.contains("Status"));
+        assert!(debug.contains("running"));
+    }
+
+    #[test]
+    fn lifecycle_event_peers_variant() {
+        let data = super::super::protocol::PeersEventData {
+            peers: vec![super::super::protocol::BridgeTailnetPeer {
+                id: "p1".to_string(),
+                hostname: "h1".to_string(),
+                dns_name: "h1.ts.net".to_string(),
+                tailscale_ips: vec!["100.64.0.2".to_string()],
+                online: true,
+                os: "linux".to_string(),
+            }],
+        };
+        let event = ShimLifecycleEvent::Peers(data);
+        let debug = format!("{event:?}");
+        assert!(debug.contains("Peers"));
+        assert!(debug.contains("h1"));
+    }
+
+    #[test]
+    fn lifecycle_event_dial_failed_variant() {
+        let event = ShimLifecycleEvent::DialFailed {
+            request_id: "dial-123".to_string(),
+            error: "connection refused".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("DialFailed"));
+        assert!(debug.contains("dial-123"));
+        assert!(debug.contains("connection refused"));
+    }
+
+    #[test]
+    fn lifecycle_event_crashed_with_none_exit_code() {
+        let event = ShimLifecycleEvent::Crashed {
+            exit_code: None,
+            stderr_tail: "spawn failed".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("Crashed"));
+        assert!(debug.contains("None"));
+        assert!(debug.contains("spawn failed"));
+    }
+
+    #[test]
+    fn shim_error_display() {
+        let e1 = ShimError::NotRunning;
+        assert_eq!(format!("{e1}"), "shim process not running");
+
+        let e2 = ShimError::DialCancelled;
+        assert!(format!("{e2}").contains("cancelled"));
+
+        let e3 = ShimError::DialTimeout(Duration::from_secs(30));
+        assert!(format!("{e3}").contains("30"));
+
+        let e4 = ShimError::DialFailed("connection refused".to_string());
+        assert!(format!("{e4}").contains("connection refused"));
+
+        let e5 = ShimError::SendFailed("channel closed".to_string());
+        assert!(format!("{e5}").contains("channel closed"));
+    }
+
+    #[test]
+    fn shim_config_defaults() {
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/usr/local/bin/sidecar-slim"),
+            hostname: "test".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: Some("tskey-xxx".to_string()),
+            bridge_port: 0,
+            session_token: "ff".repeat(32),
+            auto_restart: false,
+        };
+        assert_eq!(config.hostname, "test");
+        assert_eq!(config.auth_key, Some("tskey-xxx".to_string()));
+        assert!(!config.auto_restart);
+    }
+
+    #[tokio::test]
+    async fn pending_dials_multiple_ids_independent() {
+        let dials: Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, _rx_b) = oneshot::channel();
+        let (tx_c, rx_c) = oneshot::channel();
+
+        {
+            let mut map = dials.lock().await;
+            map.insert("a".to_string(), tx_a);
+            map.insert("b".to_string(), tx_b);
+            map.insert("c".to_string(), tx_c);
+            assert_eq!(map.len(), 3);
+        }
+
+        // Remove "b" (simulating crash cleanup of just one entry)
+        {
+            let mut map = dials.lock().await;
+            map.remove("b");
+            assert_eq!(map.len(), 2);
+            assert!(map.contains_key("a"));
+            assert!(map.contains_key("c"));
+        }
+
+        // Drop remaining senders to verify receivers detect it
+        {
+            let mut map = dials.lock().await;
+            map.clear();
+        }
+
+        assert!(rx_a.await.is_err());
+        assert!(rx_c.await.is_err());
+    }
+
+    #[test]
+    fn auto_restart_paused_flag() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
 }

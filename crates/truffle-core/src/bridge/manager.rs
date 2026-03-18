@@ -711,4 +711,317 @@ mod tests {
 
         manager_handle.abort();
     }
+
+    // ── Layer 3: Extended BridgeManager tests ────────────────────────────
+
+    /// Outgoing connection WITHOUT request_id is routed to handler (not pending_dials).
+    #[tokio::test]
+    async fn outgoing_without_request_id_routes_to_handler() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(
+            443,
+            Direction::Outgoing,
+            Arc::new(ChannelHandler::new(tx)),
+        );
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let header = BridgeHeader {
+            session_token: token,
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: String::new(), // empty request_id
+            remote_addr: "100.64.0.10:443".to_string(),
+            remote_dns_name: "peer.ts.net".to_string(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        assert_eq!(conn.header.direction, Direction::Outgoing);
+        assert_eq!(conn.header.service_port, 443);
+        assert!(conn.header.request_id.is_empty());
+
+        manager_handle.abort();
+    }
+
+    /// Separate handlers for different ports are routed correctly.
+    #[tokio::test]
+    async fn separate_handlers_for_different_ports() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx_443, mut rx_443) = mpsc::channel::<BridgeConnection>(1);
+        let (tx_9417, mut rx_9417) = mpsc::channel::<BridgeConnection>(1);
+
+        manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(tx_443)));
+        manager.add_handler(9417, Direction::Incoming, Arc::new(ChannelHandler::new(tx_9417)));
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Send to port 443
+        {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Incoming,
+                service_port: 443,
+                request_id: String::new(),
+                remote_addr: "100.64.0.2:443".to_string(),
+                remote_dns_name: "ws-peer.ts.net".to_string(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        // Send to port 9417
+        {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Incoming,
+                service_port: 9417,
+                request_id: String::new(),
+                remote_addr: "100.64.0.3:9417".to_string(),
+                remote_dns_name: "file-peer.ts.net".to_string(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        let conn_443 = tokio::time::timeout(Duration::from_secs(2), rx_443.recv())
+            .await.expect("timeout 443").expect("channel 443");
+        assert_eq!(conn_443.header.service_port, 443);
+        assert_eq!(conn_443.header.remote_dns_name, "ws-peer.ts.net");
+
+        let conn_9417 = tokio::time::timeout(Duration::from_secs(2), rx_9417.recv())
+            .await.expect("timeout 9417").expect("channel 9417");
+        assert_eq!(conn_9417.header.service_port, 9417);
+        assert_eq!(conn_9417.header.remote_dns_name, "file-peer.ts.net");
+
+        manager_handle.abort();
+    }
+
+    /// Multiple concurrent connections arrive and are all routed.
+    #[tokio::test]
+    async fn multiple_concurrent_incoming_connections() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(10);
+        manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(tx)));
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let count = 5;
+        // Spawn all connections concurrently
+        let mut handles = Vec::new();
+        for i in 0..count {
+            let token = token;
+            let port = port;
+            handles.push(tokio::spawn(async move {
+                let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+                let header = BridgeHeader {
+                    session_token: token,
+                    direction: Direction::Incoming,
+                    service_port: 443,
+                    request_id: String::new(),
+                    remote_addr: format!("100.64.0.{}:12345", i + 10),
+                    remote_dns_name: format!("peer-{i}.ts.net"),
+                };
+                header.write_to(&mut stream).await.unwrap();
+                // Keep stream alive until test completes
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }));
+        }
+
+        // Collect all routed connections
+        let mut received = Vec::new();
+        for _ in 0..count {
+            let conn = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .expect("timeout receiving connection")
+                .expect("channel closed");
+            received.push(conn);
+        }
+
+        assert_eq!(received.len(), count);
+
+        // All should be incoming on port 443
+        for conn in &received {
+            assert_eq!(conn.header.service_port, 443);
+            assert_eq!(conn.header.direction, Direction::Incoming);
+        }
+
+        for h in handles {
+            h.abort();
+        }
+        manager_handle.abort();
+    }
+
+    /// Session token validation: all-zero token is rejected.
+    #[tokio::test]
+    async fn reject_zero_token() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(tx)));
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        let header = BridgeHeader {
+            session_token: [0u8; 32], // all zeros
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: "1.2.3.4:80".to_string(),
+            remote_dns_name: String::new(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        // Should not be routed (token mismatch)
+        let result = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(result.is_err(), "connection with zero token should be rejected");
+
+        manager_handle.abort();
+    }
+
+    /// Malformed header data (garbage bytes) doesn't crash the manager.
+    #[tokio::test]
+    async fn malformed_header_doesnt_crash_manager() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Send garbage data
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        stream.write_all(b"this is not a valid header at all").await.unwrap();
+        drop(stream);
+
+        // Give time for manager to process
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Manager should still be alive
+        assert!(!manager_handle.is_finished(), "manager should survive malformed data");
+
+        manager_handle.abort();
+    }
+
+    /// Register a dial, then deliver the matching connection, verifying
+    /// that the BridgeConnection arrives via the oneshot channel.
+    #[tokio::test]
+    async fn register_dial_then_deliver_connection() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+        let pending_dials = manager.pending_dials().clone();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let request_id = "dial-uuid-001";
+
+        // 1. Register a pending dial
+        let (tx, rx) = oneshot::channel::<BridgeConnection>();
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.insert(request_id.to_string(), tx);
+        }
+
+        // 2. Simulate Go sidecar connecting back
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        let header = BridgeHeader {
+            session_token: token,
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: request_id.to_string(),
+            remote_addr: "100.64.0.50:443".to_string(),
+            remote_dns_name: "target-peer.ts.net".to_string(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        // Write some payload after the header
+        stream.write_all(b"payload data").await.unwrap();
+
+        // 3. Receive the BridgeConnection
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await.expect("timeout").expect("channel error");
+
+        assert_eq!(conn.header.request_id, request_id);
+        assert_eq!(conn.header.direction, Direction::Outgoing);
+        assert_eq!(conn.header.remote_dns_name, "target-peer.ts.net");
+
+        // 4. Pending dials map should be cleaned up
+        let dials = pending_dials.lock().await;
+        assert!(!dials.contains_key(request_id));
+
+        manager_handle.abort();
+    }
+
+    /// The port used by the manager is consistent and can be read before run().
+    #[tokio::test]
+    async fn local_port_is_stable() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port1 = manager.local_port();
+        let port2 = manager.local_port();
+        assert_eq!(port1, port2);
+        assert!(port1 > 0);
+    }
+
+    /// No handler and no fallback: connection is silently dropped but manager stays alive.
+    #[tokio::test]
+    async fn no_handler_no_fallback_drops_connection() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).await.unwrap();
+        let header = BridgeHeader {
+            session_token: token,
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: "100.64.0.2:443".to_string(),
+            remote_dns_name: "orphan.ts.net".to_string(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(!manager_handle.is_finished(), "manager should survive unhandled connection");
+
+        manager_handle.abort();
+    }
 }

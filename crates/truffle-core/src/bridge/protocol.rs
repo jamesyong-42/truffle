@@ -259,4 +259,277 @@ mod tests {
         assert!(!data.success);
         assert_eq!(data.error, "connection refused");
     }
+
+    // ── Layer 2: Extended event parsing tests ────────────────────────────
+
+    #[test]
+    fn deserialize_started_event() {
+        let json = r#"{"event":"tsnet:started","data":{"state":"running","hostname":"n1","dnsName":"n1.ts.net","tailscaleIP":"100.64.0.1"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::STARTED);
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "running");
+        assert_eq!(data.tailscale_ip, "100.64.0.1");
+    }
+
+    #[test]
+    fn deserialize_stopped_event() {
+        let json = r#"{"event":"tsnet:stopped","data":null}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::STOPPED);
+    }
+
+    #[test]
+    fn deserialize_stopped_event_no_data_field() {
+        // Go emits `{"event":"tsnet:stopped"}` with no data key at all
+        let json = r#"{"event":"tsnet:stopped"}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::STOPPED);
+        assert!(event.data.is_null());
+    }
+
+    #[test]
+    fn deserialize_error_event() {
+        let json = r#"{"event":"tsnet:error","data":{"code":"LISTEN_ERROR","message":"ListenTLS :443: bind failed"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::ERROR);
+        let data: ErrorEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.code, "LISTEN_ERROR");
+        assert!(data.message.contains("bind failed"));
+    }
+
+    #[test]
+    fn deserialize_status_starting() {
+        let json = r#"{"event":"tsnet:status","data":{"state":"starting","hostname":"test-node"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "starting");
+        assert_eq!(data.hostname, "test-node");
+        // Optional fields default to empty string
+        assert_eq!(data.dns_name, "");
+        assert_eq!(data.tailscale_ip, "");
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn deserialize_status_error_state() {
+        let json = r#"{"event":"tsnet:status","data":{"state":"error","error":"failed to bind"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "error");
+        assert_eq!(data.error, "failed to bind");
+    }
+
+    #[test]
+    fn status_event_tailscale_ip_alias() {
+        // Go sends "tailscaleIP" (camelCase with uppercase IP).
+        // StatusEventData uses #[serde(alias = "tailscaleIP")] on tailscale_ip.
+        let json = r#"{"state":"running","hostname":"n","dnsName":"n.ts","tailscaleIP":"100.64.0.5"}"#;
+        let data: StatusEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.tailscale_ip, "100.64.0.5");
+    }
+
+    #[test]
+    fn deserialize_peers_event_multiple_peers() {
+        let json = r#"{"event":"tsnet:peers","data":{"peers":[
+            {"id":"p1","hostname":"host1","dnsName":"host1.ts.net","tailscaleIPs":["100.64.0.2","fd7a::1"],"online":true,"os":"linux"},
+            {"id":"p2","hostname":"host2","dnsName":"host2.ts.net","tailscaleIPs":["100.64.0.3"],"online":false}
+        ]}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let data: PeersEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.peers.len(), 2);
+
+        assert_eq!(data.peers[0].id, "p1");
+        assert_eq!(data.peers[0].tailscale_ips, vec!["100.64.0.2", "fd7a::1"]);
+        assert!(data.peers[0].online);
+        assert_eq!(data.peers[0].os, "linux");
+
+        assert_eq!(data.peers[1].id, "p2");
+        assert!(!data.peers[1].online);
+        // os defaults to empty string when missing
+        assert_eq!(data.peers[1].os, "");
+    }
+
+    #[test]
+    fn deserialize_peers_event_empty_list() {
+        let json = r#"{"event":"tsnet:peers","data":{"peers":[]}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let data: PeersEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.peers.len(), 0);
+    }
+
+    #[test]
+    fn bridge_peer_to_canonical_with_os() {
+        let peer = BridgeTailnetPeer {
+            id: "abc".to_string(),
+            hostname: "my-host".to_string(),
+            dns_name: "my-host.tail.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.1".to_string(), "fd7a::2".to_string()],
+            online: true,
+            os: "darwin".to_string(),
+        };
+        let c = peer.to_canonical();
+        assert_eq!(c.id, "abc");
+        assert_eq!(c.hostname, "my-host");
+        assert_eq!(c.dns_name, "my-host.tail.ts.net");
+        assert_eq!(c.tailscale_ips.len(), 2);
+        assert!(c.online);
+        assert_eq!(c.os, Some("darwin".to_string()));
+    }
+
+    #[test]
+    fn bridge_peer_to_canonical_without_os() {
+        let peer = BridgeTailnetPeer {
+            id: "xyz".to_string(),
+            hostname: "h".to_string(),
+            dns_name: "h.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.9".to_string()],
+            online: false,
+            os: String::new(),
+        };
+        let c = peer.to_canonical();
+        assert!(!c.online);
+        assert_eq!(c.os, None);
+    }
+
+    #[test]
+    fn bridge_peer_to_canonical_empty_ips() {
+        let peer = BridgeTailnetPeer {
+            id: "e".to_string(),
+            hostname: "e".to_string(),
+            dns_name: "e.ts.net".to_string(),
+            tailscale_ips: vec![],
+            online: false,
+            os: String::new(),
+        };
+        let c = peer.to_canonical();
+        assert!(c.tailscale_ips.is_empty());
+    }
+
+    #[test]
+    fn unknown_event_type_parses_as_shim_event() {
+        // The ShimEvent envelope should parse fine even for events we don't know about.
+        let json = r#"{"event":"tsnet:unknown_future_event","data":{"foo":"bar"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:unknown_future_event");
+        assert_eq!(event.data["foo"], "bar");
+    }
+
+    #[test]
+    fn malformed_json_fails_gracefully() {
+        let bad = r#"{"event": "tsnet:status", "data": }"#;
+        let result = serde_json::from_str::<ShimEvent>(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_json_object_missing_event() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<ShimEvent>(json);
+        // "event" is required (no default), so this should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serialize_get_peers_command() {
+        let cmd = ShimCommand {
+            command: command_type::GET_PEERS,
+            data: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"command":"tsnet:getPeers"}"#);
+    }
+
+    #[test]
+    fn serialize_start_command_with_auth_key() {
+        let data = StartCommandData {
+            hostname: "node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: Some("tskey-auth-xxxxx".to_string()),
+            bridge_port: 9999,
+            session_token: "bb".repeat(32),
+        };
+        let cmd = ShimCommand {
+            command: command_type::START,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"authKey\":\"tskey-auth-xxxxx\""));
+    }
+
+    #[test]
+    fn serialize_start_command_without_auth_key_omits_field() {
+        let data = StartCommandData {
+            hostname: "node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 9999,
+            session_token: "cc".repeat(32),
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        // authKey should not appear at all when None
+        assert!(!value.as_object().unwrap().contains_key("authKey"));
+    }
+
+    #[test]
+    fn serialize_dial_command_fields() {
+        let data = DialCommandData {
+            request_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            target: "peer.tail.ts.net".to_string(),
+            port: 9417,
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(value["requestId"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(value["target"], "peer.tail.ts.net");
+        assert_eq!(value["port"], 9417);
+    }
+
+    #[test]
+    fn dial_result_success_default_error_is_empty() {
+        // When success=true, the "error" field may be absent. It should default to "".
+        let json = r#"{"requestId":"r1","success":true}"#;
+        let data: DialResultEventData = serde_json::from_str(json).unwrap();
+        assert!(data.success);
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn error_event_data_fields() {
+        let json = r#"{"code":"PARSE_ERROR","message":"failed to parse command"}"#;
+        let data: ErrorEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.code, "PARSE_ERROR");
+        assert_eq!(data.message, "failed to parse command");
+    }
+
+    #[test]
+    fn status_event_missing_optional_fields_defaults() {
+        // Only "state" is present; all optional fields should default to "".
+        let json = r#"{"state":"starting"}"#;
+        let data: StatusEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.state, "starting");
+        assert_eq!(data.hostname, "");
+        assert_eq!(data.dns_name, "");
+        assert_eq!(data.tailscale_ip, "");
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn event_type_constants_match_go_sidecar() {
+        // Verify the string constants match what the Go sidecar sends.
+        assert_eq!(event_type::STARTED, "tsnet:started");
+        assert_eq!(event_type::STOPPED, "tsnet:stopped");
+        assert_eq!(event_type::STATUS, "tsnet:status");
+        assert_eq!(event_type::AUTH_REQUIRED, "tsnet:authRequired");
+        assert_eq!(event_type::PEERS, "tsnet:peers");
+        assert_eq!(event_type::DIAL_RESULT, "bridge:dialResult");
+        assert_eq!(event_type::ERROR, "tsnet:error");
+    }
+
+    #[test]
+    fn command_type_constants_match_go_sidecar() {
+        assert_eq!(command_type::START, "tsnet:start");
+        assert_eq!(command_type::STOP, "tsnet:stop");
+        assert_eq!(command_type::GET_PEERS, "tsnet:getPeers");
+        assert_eq!(command_type::DIAL, "bridge:dial");
+    }
 }
