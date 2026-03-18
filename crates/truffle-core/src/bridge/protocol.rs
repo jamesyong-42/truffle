@@ -78,7 +78,7 @@ pub struct StatusEventData {
     pub hostname: String,
     #[serde(default)]
     pub dns_name: String,
-    #[serde(default)]
+    #[serde(default, alias = "tailscaleIP")]
     pub tailscale_ip: String,
     #[serde(default)]
     pub error: String,

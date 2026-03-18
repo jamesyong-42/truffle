@@ -175,7 +175,7 @@ func (s *shim) handleStart(data json.RawMessage) {
 	s.sessionToken = token
 	s.bridgePort = d.BridgePort
 
-	s.sendStatus("starting", d.Hostname, "", "")
+	s.sendStatus("starting", d.Hostname, "", "", "")
 
 	s.server = &tsnet.Server{
 		Hostname: d.Hostname,
@@ -187,7 +187,7 @@ func (s *shim) handleStart(data json.RawMessage) {
 	}
 
 	if err := s.server.Start(); err != nil {
-		s.sendStatus("error", "", "", err.Error())
+		s.sendStatus("error", "", "", "", err.Error())
 		return
 	}
 
@@ -199,7 +199,7 @@ func (s *shim) waitForRunning(hostname string) {
 	lc, err := s.server.LocalClient()
 	if err != nil {
 		log.Printf("failed to get local client: %v", err)
-		s.sendStatus("error", "", "", err.Error())
+		s.sendStatus("error", "", "", "", err.Error())
 		return
 	}
 
@@ -233,7 +233,7 @@ func (s *shim) waitForRunning(hostname string) {
 			}
 			dnsName := strings.TrimSuffix(status.Self.DNSName, ".")
 
-			s.sendStatus("running", hostname, dnsName, "")
+			s.sendStatus("running", hostname, dnsName, ip, "")
 			s.sendEvent("tsnet:started", statusData{
 				State:       "running",
 				Hostname:    hostname,
@@ -542,12 +542,13 @@ func (s *shim) sendEvent(eventType string, data interface{}) {
 }
 
 // sendStatus is a convenience for sending tsnet:status events.
-func (s *shim) sendStatus(state, hostname, dnsName, errMsg string) {
+func (s *shim) sendStatus(state, hostname, dnsName, tailscaleIP, errMsg string) {
 	s.sendEvent("tsnet:status", statusData{
-		State:    state,
-		Hostname: hostname,
-		DNSName:  dnsName,
-		Error:    errMsg,
+		State:       state,
+		Hostname:    hostname,
+		DNSName:     dnsName,
+		TailscaleIP: tailscaleIP,
+		Error:       errMsg,
 	})
 }
 

@@ -32,7 +32,6 @@ use crate::types::{
 pub struct NapiMeshNode {
     inner: Arc<CoreMeshNode>,
     connection_manager: Arc<ConnectionManager>,
-    event_rx: tokio::sync::Mutex<Option<broadcast::Receiver<MeshNodeEvent>>>,
     pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiMeshEvent>>>,
     /// Stored config fields needed at start() time for sidecar spawning.
     sidecar_path: Option<String>,
@@ -42,7 +41,7 @@ pub struct NapiMeshNode {
     device_id: String,
     device_type: String,
     /// GoShim handle, kept alive for the node's lifetime.
-    shim: tokio::sync::Mutex<Option<GoShim>>,
+    shim: Arc<tokio::sync::Mutex<Option<GoShim>>>,
 }
 
 #[napi]
@@ -88,12 +87,11 @@ impl NapiMeshNode {
         let (connection_manager, _transport_event_rx) = ConnectionManager::new(transport_config);
         let connection_manager = Arc::new(connection_manager);
 
-        let (inner, event_rx) = CoreMeshNode::new(core_config, connection_manager.clone());
+        let (inner, _event_rx) = CoreMeshNode::new(core_config, connection_manager.clone());
 
         Ok(Self {
             inner: Arc::new(inner),
             connection_manager,
-            event_rx: tokio::sync::Mutex::new(Some(event_rx)),
             pending_callback: std::sync::Mutex::new(None),
             sidecar_path: config.sidecar_path,
             state_dir: config.state_dir,
@@ -101,7 +99,7 @@ impl NapiMeshNode {
             hostname_prefix: config.hostname_prefix,
             device_id: config.device_id,
             device_type: config.device_type,
-            shim: tokio::sync::Mutex::new(None),
+            shim: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -120,12 +118,10 @@ impl NapiMeshNode {
             .take();
 
         if let Some(cb) = callback {
-            let mut guard = self.event_rx.lock().await;
-            if let Some(rx) = guard.take() {
-                tokio::spawn(async move {
-                    Self::event_loop(rx, cb).await;
-                });
-            }
+            let rx = self.inner.subscribe_events();
+            tokio::spawn(async move {
+                Self::event_loop(rx, cb).await;
+            });
         }
 
         // If sidecar_path is provided, wire up the full bridge + sidecar stack
@@ -219,6 +215,7 @@ impl NapiMeshNode {
 
         // 10. Spawn lifecycle event loop: maps sidecar events to mesh node actions
         let inner = self.inner.clone();
+        let shim_handle = self.shim.clone();
         tokio::spawn(async move {
             loop {
                 match lifecycle_rx.recv().await {
@@ -240,12 +237,22 @@ impl NapiMeshNode {
                                     Some(status.dns_name.as_str())
                                 };
                                 inner.set_local_online(&status.tailscale_ip, dns).await;
+                                inner.set_auth_authenticated().await;
+
+                                // Auto-request peer list now that we're online
+                                let shim_guard = shim_handle.lock().await;
+                                if let Some(ref shim) = *shim_guard {
+                                    tracing::info!("Requesting peer list after auth");
+                                    if let Err(e) = shim.get_peers().await {
+                                        tracing::warn!("Failed to request peers after auth: {e}");
+                                    }
+                                }
                             }
                         }
                         ShimLifecycleEvent::AuthRequired { auth_url } => {
                             tracing::info!("Tailscale auth required: {auth_url}");
-                            // Emit as MeshNodeEvent so JS gets notified
-                            inner.emit_event(MeshNodeEvent::AuthRequired(auth_url));
+                            // Delegate to core: sets state + emits event
+                            inner.set_auth_required(&auth_url).await;
                         }
                         ShimLifecycleEvent::Peers(peers_data) => {
                             let core_peers: Vec<TailnetPeer> = peers_data
@@ -396,6 +403,23 @@ impl NapiMeshNode {
         Ok(())
     }
 
+    /// Get the current auth status ("unknown", "required", "authenticated").
+    #[napi]
+    pub async fn auth_status(&self) -> Result<String> {
+        let status = self.inner.auth_status().await;
+        Ok(match status {
+            truffle_core::types::AuthStatus::Unknown => "unknown".to_string(),
+            truffle_core::types::AuthStatus::Required => "required".to_string(),
+            truffle_core::types::AuthStatus::Authenticated => "authenticated".to_string(),
+        })
+    }
+
+    /// Get the current auth URL, if auth is required.
+    #[napi]
+    pub async fn auth_url(&self) -> Result<Option<String>> {
+        Ok(self.inner.auth_url().await)
+    }
+
     /// Get the message bus for namespace-based pub/sub.
     #[napi]
     pub fn message_bus(&self) -> NapiMessageBus {
@@ -433,44 +457,30 @@ impl NapiMeshNode {
     ///
     /// The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
     ///
+    /// Can be called multiple times to add multiple subscribers.
     /// Can be called before or after `start()`. If called before `start()`, the
     /// event loop is spawned when `start()` is called.
     #[napi(ts_args_type = "callback: (err: null | Error, event: NapiMeshEvent) => void")]
     pub fn on_event(&self, callback: ThreadsafeFunction<NapiMeshEvent>) -> Result<()> {
-        // Check if we already have a callback registered
-        {
-            let guard = self
+        // If a Tokio runtime is available (called after start or from async context),
+        // spawn the event loop immediately with a new subscriber.
+        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
+            let rx = self.inner.subscribe_events();
+            tokio::spawn(async move {
+                Self::event_loop(rx, callback).await;
+            });
+        } else {
+            // No Tokio runtime — store callback for start() to spawn.
+            // If one is already pending, we need to handle both.
+            let mut guard = self
                 .pending_callback
                 .lock()
                 .map_err(|_| Error::from_reason("pending_callback lock poisoned"))?;
             if guard.is_some() {
                 return Err(Error::from_reason(
-                    "on_event already called - only one subscriber allowed",
+                    "on_event called twice before start() - call start() first, then add more subscribers",
                 ));
             }
-        }
-
-        // If a Tokio runtime is available (called after start or from async context),
-        // spawn the event loop immediately. Otherwise, store the callback for start().
-        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-            let mut guard = self
-                .event_rx
-                .try_lock()
-                .map_err(|_| Error::from_reason("event receiver lock contention"))?;
-
-            let rx = guard.take().ok_or_else(|| {
-                Error::from_reason("on_event already called - only one subscriber allowed")
-            })?;
-
-            tokio::spawn(async move {
-                Self::event_loop(rx, callback).await;
-            });
-        } else {
-            // No Tokio runtime — store callback for start() to spawn
-            let mut guard = self
-                .pending_callback
-                .lock()
-                .map_err(|_| Error::from_reason("pending_callback lock poisoned"))?;
             *guard = Some(callback);
         }
 
