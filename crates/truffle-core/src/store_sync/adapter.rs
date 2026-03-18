@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
@@ -62,8 +63,8 @@ pub struct StoreSyncAdapter {
     /// Format: (msg_type, payload_json)
     outgoing_tx: mpsc::UnboundedSender<OutgoingSyncMessage>,
 
-    disposed: RwLock<bool>,
-    started: RwLock<bool>,
+    disposed: AtomicBool,
+    started: AtomicBool,
 }
 
 impl StoreSyncAdapter {
@@ -81,8 +82,8 @@ impl StoreSyncAdapter {
             local_device_id: config.local_device_id,
             stores: RwLock::new(store_map),
             outgoing_tx,
-            disposed: RwLock::new(false),
-            started: RwLock::new(false),
+            disposed: AtomicBool::new(false),
+            started: AtomicBool::new(false),
         })
     }
 
@@ -90,12 +91,12 @@ impl StoreSyncAdapter {
 
     /// Start syncing. Requests sync from existing devices and broadcasts current state.
     pub async fn start(&self) {
-        if *self.disposed.read().await {
+        if self.disposed.load(Ordering::Relaxed) {
             warn!("[StoreSyncAdapter] start: SKIPPED - disposed");
             return;
         }
 
-        *self.started.write().await = true;
+        self.started.store(true, Ordering::Relaxed);
 
         // Request sync from existing devices
         self.request_sync_from_devices().await;
@@ -109,7 +110,7 @@ impl StoreSyncAdapter {
 
     /// Stop syncing. Clears remote slices from all stores.
     pub async fn stop(&self) {
-        *self.started.write().await = false;
+        self.started.store(false, Ordering::Relaxed);
 
         let stores = self.stores.read().await;
         for store in stores.values() {
@@ -121,13 +122,9 @@ impl StoreSyncAdapter {
 
     /// Dispose the adapter. Stops and prevents restart.
     pub async fn dispose(&self) {
-        {
-            let is_disposed = *self.disposed.read().await;
-            if is_disposed {
-                return;
-            }
+        if self.disposed.swap(true, Ordering::Relaxed) {
+            return; // already disposed
         }
-        *self.disposed.write().await = true;
         self.stop().await;
         info!("[StoreSyncAdapter] Disposed");
     }
@@ -174,7 +171,7 @@ impl StoreSyncAdapter {
 
     /// Handle an incoming sync message from the MessageBus.
     pub async fn handle_sync_message(&self, message: &SyncMessage) {
-        if !*self.started.read().await {
+        if !self.started.load(Ordering::Relaxed) {
             return;
         }
 
@@ -213,7 +210,7 @@ impl StoreSyncAdapter {
 
     /// Handle a local store change. Broadcasts SYNC_UPDATE.
     pub async fn handle_local_changed(&self, store_id: &str, slice: &DeviceSlice) {
-        if !*self.started.read().await {
+        if !self.started.load(Ordering::Relaxed) {
             return;
         }
 
@@ -882,5 +879,92 @@ mod tests {
                 .unwrap(),
             "dev-3"
         );
+    }
+
+    // ── ARCH-12: AtomicBool flag tests ────────────────────────────────────
+
+    /// ARCH-12: disposed flag uses AtomicBool, not RwLock.
+    /// Verify that concurrent dispose calls are safe.
+    #[tokio::test]
+    async fn concurrent_dispose_is_safe() {
+        let store1 = MockStore::new("tasks");
+        let (adapter, _rx) = create_adapter(vec![store1]);
+
+        // Dispose from multiple "concurrent" calls
+        let adapter1 = adapter.clone();
+        let adapter2 = adapter.clone();
+
+        let h1 = tokio::spawn(async move { adapter1.dispose().await });
+        let h2 = tokio::spawn(async move { adapter2.dispose().await });
+
+        h1.await.unwrap();
+        h2.await.unwrap();
+
+        // Should not panic, and start should be blocked
+        let mut rx2 = {
+            let (adapter3, rx) = create_adapter(vec![MockStore::new("tasks")]);
+            adapter3.dispose().await;
+            adapter3.start().await;
+            rx
+        };
+        let msgs = drain_messages(&mut rx2);
+        assert!(msgs.is_empty(), "Should not send messages after dispose");
+    }
+
+    /// ARCH-12: started flag uses AtomicBool, not RwLock.
+    #[tokio::test]
+    async fn started_flag_blocks_incoming_messages() {
+        let store1 = MockStore::new("tasks");
+        let s1 = Arc::clone(&store1);
+
+        let (adapter, _rx) = create_adapter(vec![store1]);
+
+        // Don't call start() -- started=false
+
+        adapter
+            .handle_sync_message(&SyncMessage {
+                from: Some("dev-2".to_string()),
+                msg_type: message_types::SYNC_FULL.to_string(),
+                payload: serde_json::json!({
+                    "storeId": "tasks",
+                    "deviceId": "dev-2",
+                    "data": {},
+                    "version": 1,
+                    "updatedAt": 1000,
+                }),
+            })
+            .await;
+
+        assert_eq!(s1.applied_count(), 0,
+            "Messages should be ignored when not started");
+    }
+
+    /// stop() then start() cycle works correctly.
+    #[tokio::test]
+    async fn stop_start_cycle_works() {
+        let store1 = MockStore::new("tasks");
+        store1.set_local_slice(DeviceSlice {
+            device_id: "dev-1".to_string(),
+            data: serde_json::json!({"items": []}),
+            updated_at: 1000,
+            version: 1,
+        });
+
+        let (adapter, mut rx) = create_adapter(vec![store1]);
+        adapter.start().await;
+        drain_messages(&mut rx);
+
+        adapter.stop().await;
+        drain_messages(&mut rx);
+
+        // Start again -- should broadcast
+        adapter.start().await;
+
+        let msgs = drain_messages(&mut rx);
+        let full_msgs: Vec<_> = msgs
+            .iter()
+            .filter(|m| m.msg_type == message_types::SYNC_FULL)
+            .collect();
+        assert!(!full_msgs.is_empty(), "Restart should broadcast stores again");
     }
 }

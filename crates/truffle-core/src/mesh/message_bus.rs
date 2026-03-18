@@ -59,22 +59,18 @@ impl MeshMessageBus {
     }
 
     /// Subscribe to messages in a namespace.
-    /// Returns a subscription ID that can be used to unsubscribe.
+    ///
+    /// TODO: Implement `unsubscribe()` with UUID-keyed subscriptions when needed (M-7).
     pub async fn subscribe(
         &self,
         namespace: &str,
         handler: BusMessageHandler,
-    ) -> SubscriptionId {
+    ) {
         let mut handlers = self.handlers.write().await;
         let entry = handlers.entry(namespace.to_string()).or_default();
-        let id = SubscriptionId {
-            namespace: namespace.to_string(),
-            index: entry.len(),
-        };
         entry.push(handler);
 
         let _ = self.event_tx.try_send(MessageBusEvent::Subscribed(namespace.to_string()));
-        id
     }
 
     /// Dispatch an incoming message to all handlers for its namespace.
@@ -111,12 +107,8 @@ impl MeshMessageBus {
     }
 }
 
-/// Identifies a subscription for potential unsubscription.
-#[derive(Debug, Clone)]
-pub struct SubscriptionId {
-    pub namespace: String,
-    pub index: usize,
-}
+// SubscriptionId was removed per RFC 007 CS-9b (ARCH-7).
+// Unsubscribe support will be added as needed (M-7).
 
 #[cfg(test)]
 mod tests {
@@ -214,5 +206,101 @@ mod tests {
 
         // Should not panic
         bus.dispatch(&message).await;
+    }
+
+    /// Multiple handlers in the same namespace all receive messages.
+    #[tokio::test]
+    async fn multiple_handlers_same_namespace() {
+        let (tx, _rx) = mpsc::channel(64);
+        let bus = MeshMessageBus::new(tx);
+
+        let count1 = Arc::new(AtomicUsize::new(0));
+        let count2 = Arc::new(AtomicUsize::new(0));
+        let c1 = count1.clone();
+        let c2 = count2.clone();
+
+        bus.subscribe("ns", Arc::new(move |_| { c1.fetch_add(1, Ordering::SeqCst); })).await;
+        bus.subscribe("ns", Arc::new(move |_| { c2.fetch_add(1, Ordering::SeqCst); })).await;
+
+        let message = BusMessage {
+            from: None,
+            namespace: "ns".to_string(),
+            msg_type: "test".to_string(),
+            payload: serde_json::json!(null),
+        };
+
+        bus.dispatch(&message).await;
+
+        assert_eq!(count1.load(Ordering::SeqCst), 1);
+        assert_eq!(count2.load(Ordering::SeqCst), 1);
+    }
+
+    /// Handler receives correct payload data.
+    #[tokio::test]
+    async fn handler_receives_full_message() {
+        let (tx, _rx) = mpsc::channel(64);
+        let bus = MeshMessageBus::new(tx);
+
+        let received = Arc::new(std::sync::Mutex::new(None::<BusMessage>));
+        let r = received.clone();
+
+        bus.subscribe("sync", Arc::new(move |msg: &BusMessage| {
+            *r.lock().unwrap() = Some(msg.clone());
+        })).await;
+
+        let message = BusMessage {
+            from: Some("device-42".to_string()),
+            namespace: "sync".to_string(),
+            msg_type: "update".to_string(),
+            payload: serde_json::json!({"key": "value", "count": 42}),
+        };
+
+        bus.dispatch(&message).await;
+
+        let received = received.lock().unwrap().clone().unwrap();
+        assert_eq!(received.from, Some("device-42".to_string()));
+        assert_eq!(received.namespace, "sync");
+        assert_eq!(received.msg_type, "update");
+        assert_eq!(received.payload["key"], "value");
+        assert_eq!(received.payload["count"], 42);
+    }
+
+    /// Dispose then dispatch does nothing (no handlers left).
+    #[tokio::test]
+    async fn dispatch_after_dispose_is_noop() {
+        let (tx, _rx) = mpsc::channel(64);
+        let bus = MeshMessageBus::new(tx);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        bus.subscribe("ns", Arc::new(move |_| { c.fetch_add(1, Ordering::SeqCst); })).await;
+
+        bus.dispose().await;
+
+        let message = BusMessage {
+            from: None,
+            namespace: "ns".to_string(),
+            msg_type: "test".to_string(),
+            payload: serde_json::json!(null),
+        };
+        bus.dispatch(&message).await;
+
+        assert_eq!(count.load(Ordering::SeqCst), 0,
+            "No handlers should fire after dispose");
+    }
+
+    /// Subscribe emits Subscribed event.
+    #[tokio::test]
+    async fn subscribe_emits_event() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let bus = MeshMessageBus::new(tx);
+
+        bus.subscribe("my-ns", Arc::new(|_| {})).await;
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            MessageBusEvent::Subscribed(ns) => assert_eq!(ns, "my-ns"),
+            other => panic!("Expected Subscribed event, got: {other:?}"),
+        }
     }
 }

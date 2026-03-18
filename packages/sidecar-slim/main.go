@@ -408,6 +408,14 @@ func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, req
 	if err != nil {
 		log.Printf("bridge connect failed: %v", err)
 		tsnetConn.Close()
+		// BUG-8: Report failure if this was an outgoing dial
+		if direction == dirOutgoing && requestID != "" {
+			s.sendEvent("bridge:dialResult", dialResultData{
+				RequestID: requestID,
+				Success:   false,
+				Error:     fmt.Sprintf("bridge connect failed: %v", err),
+			})
+		}
 		return
 	}
 
@@ -416,6 +424,14 @@ func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, req
 		log.Printf("header write failed: %v", err)
 		localConn.Close()
 		tsnetConn.Close()
+		// BUG-8: Report failure if this was an outgoing dial
+		if direction == dirOutgoing && requestID != "" {
+			s.sendEvent("bridge:dialResult", dialResultData{
+				RequestID: requestID,
+				Success:   false,
+				Error:     fmt.Sprintf("header write failed: %v", err),
+			})
+		}
 		return
 	}
 

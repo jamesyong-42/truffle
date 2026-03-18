@@ -52,6 +52,10 @@ pub enum ElectionEvent {
     PrimaryLost { previous_primary_id: String },
     /// Mesh messages to broadcast to all peers.
     Broadcast(MeshMessage),
+    /// LOCAL ONLY: Grace period expired, MeshNode should call start_election().
+    GracePeriodExpired,
+    /// LOCAL ONLY: Election timeout expired, MeshNode should call decide_election().
+    DecideNow,
 }
 
 /// PrimaryElection - Handles primary device election for STAR topology.
@@ -131,7 +135,7 @@ impl PrimaryElection {
     /// Handle the primary going offline.
     /// Starts a grace period before triggering a new election.
     pub fn handle_primary_lost(&mut self, previous_primary_id: &str) {
-        let config = match self.config.clone() {
+        let _config = match self.config.clone() {
             Some(c) => c,
             None => return,
         };
@@ -146,42 +150,12 @@ impl PrimaryElection {
         self.phase = ElectionPhase::Waiting;
 
         let grace_duration = self.timing.primary_loss_grace;
-        let device_id = config.device_id.clone();
-        let started_at = config.started_at;
-        let prefer_primary = config.prefer_primary;
-        let timeout = self.timing.election_timeout;
         let event_tx = self.event_tx.clone();
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(grace_duration).await;
             tracing::info!("Grace period expired, requesting election start");
-            // We send a special event that the MeshNode will handle
-            // by calling start_election on the election instance.
-            // Since we can't call &mut self from a spawned task,
-            // we use a broadcast event pattern.
-            let _ = event_tx.send(ElectionEvent::Broadcast(
-                MeshMessage::new("election:start", &device_id, serde_json::json!({})),
-            )).await;
-            // Also broadcast candidacy
-            let candidate = ElectionCandidatePayload {
-                device_id: device_id.clone(),
-                uptime: current_timestamp_ms() - started_at,
-                user_designated: prefer_primary,
-            };
-            let _ = event_tx.send(ElectionEvent::Broadcast(
-                MeshMessage::new("election:candidate", &device_id, serde_json::to_value(&candidate).unwrap_or_default()),
-            )).await;
-            let _ = event_tx.send(ElectionEvent::ElectionStarted).await;
-
-            // Set a timeout to decide, then send election:timeout to trigger decide_election()
-            tokio::time::sleep(timeout).await;
-            let _ = event_tx.send(ElectionEvent::Broadcast(
-                MeshMessage::new(
-                    "election:timeout",
-                    &device_id,
-                    serde_json::json!({}),
-                ),
-            )).await;
+            let _ = event_tx.send(ElectionEvent::GracePeriodExpired).await;
         });
 
         self.grace_period_handle = Some(handle.abort_handle());
@@ -242,21 +216,10 @@ impl PrimaryElection {
         // Set timeout to decide
         let timeout_duration = self.timing.election_timeout;
         let event_tx = self.event_tx.clone();
-        let candidates = self.candidates.clone();
-        let device_id = config.device_id.clone();
 
         let handle = tokio::spawn(async move {
             tokio::time::sleep(timeout_duration).await;
-            // Decide election based on candidates collected so far.
-            // The MeshNode's event loop will call decide_election().
-            // We send a sentinel event.
-            let _ = event_tx.send(ElectionEvent::Broadcast(
-                MeshMessage::new(
-                    "election:timeout",
-                    &device_id,
-                    serde_json::to_value(&candidates).unwrap_or_default(),
-                ),
-            )).await;
+            let _ = event_tx.send(ElectionEvent::DecideNow).await;
         });
 
         self.election_timeout_handle = Some(handle.abort_handle());
@@ -389,18 +352,10 @@ impl PrimaryElection {
             // Set timeout
             let timeout_duration = self.timing.election_timeout;
             let event_tx = self.event_tx.clone();
-            let device_id = config.device_id.clone();
-            let candidates = self.candidates.clone();
 
             let handle = tokio::spawn(async move {
                 tokio::time::sleep(timeout_duration).await;
-                let _ = event_tx.send(ElectionEvent::Broadcast(
-                    MeshMessage::new(
-                        "election:timeout",
-                        &device_id,
-                        serde_json::to_value(&candidates).unwrap_or_default(),
-                    ),
-                )).await;
+                let _ = event_tx.send(ElectionEvent::DecideNow).await;
             });
 
             self.election_timeout_handle = Some(handle.abort_handle());
@@ -470,15 +425,17 @@ impl PrimaryElection {
     // ── Internal ──────────────────────────────────────────────────────────
 
     fn emit(&self, event: ElectionEvent) {
-        let _ = self.event_tx.try_send(event);
+        if let Err(mpsc::error::TrySendError::Full(event)) = self.event_tx.try_send(event) {
+            tracing::warn!(
+                "ElectionEvent channel full, dropping {:?}",
+                std::mem::discriminant(&event)
+            );
+        }
     }
 }
 
 fn current_timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    crate::util::current_timestamp_ms()
 }
 
 #[cfg(test)]
@@ -698,5 +655,269 @@ mod tests {
         assert!(election.primary_id().is_none());
         assert_eq!(election.phase(), ElectionPhase::Idle);
         assert!(election.candidates.is_empty());
+    }
+
+    // ── BUG-3/BUG-4 regression tests ──────────────────────────────────────
+
+    /// handle_primary_lost() must emit PrimaryLost and set phase to Waiting.
+    #[tokio::test]
+    async fn handle_primary_lost_emits_primary_lost_event() {
+        let (mut election, mut rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+        election.set_primary("dev-2");
+
+        election.handle_primary_lost("dev-2");
+
+        assert_eq!(election.phase(), ElectionPhase::Waiting);
+        assert!(election.primary_id().is_none());
+
+        let event = rx.try_recv().unwrap();
+        match event {
+            ElectionEvent::PrimaryLost { previous_primary_id } => {
+                assert_eq!(previous_primary_id, "dev-2");
+            }
+            other => panic!("Expected PrimaryLost, got: {other:?}"),
+        }
+    }
+
+    /// BUG-3: NO event with msg_type "election:timeout" should be broadcast.
+    /// After the fix, the timeout should use a local-only event variant.
+    #[tokio::test]
+    async fn no_election_timeout_broadcast_on_wire() {
+        let timing = ElectionTimingConfig {
+            election_timeout: Duration::from_millis(50),
+            primary_loss_grace: Duration::from_millis(50),
+        };
+        let (tx, mut rx) = mpsc::channel(256);
+        let mut election = PrimaryElection::new(timing, tx);
+        election.configure(config("dev-1", 1000, false));
+        election.set_primary("old-primary");
+
+        election.handle_primary_lost("old-primary");
+
+        // Wait for grace period + election timeout + margin
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut events = vec![];
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        for event in &events {
+            if let ElectionEvent::Broadcast(msg) = event {
+                assert_ne!(
+                    msg.msg_type, "election:timeout",
+                    "BUG-3: 'election:timeout' must NOT be broadcast to peers"
+                );
+            }
+        }
+    }
+
+    /// start_election() sets phase to Collecting and adds self as candidate.
+    #[tokio::test]
+    async fn start_election_transitions_to_collecting() {
+        let (mut election, mut rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+        election.phase = ElectionPhase::Waiting;
+
+        election.start_election();
+
+        assert_eq!(election.phase(), ElectionPhase::Collecting);
+        assert!(election.candidates.contains_key("dev-1"),
+            "start_election() must add self as candidate");
+
+        let mut found_start = false;
+        let mut found_candidate = false;
+        let mut found_started = false;
+
+        while let Ok(event) = rx.try_recv() {
+            match &event {
+                ElectionEvent::Broadcast(msg) if msg.msg_type == "election:start" => {
+                    found_start = true;
+                }
+                ElectionEvent::Broadcast(msg) if msg.msg_type == "election:candidate" => {
+                    found_candidate = true;
+                }
+                ElectionEvent::ElectionStarted => {
+                    found_started = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(found_start, "Must broadcast election:start");
+        assert!(found_candidate, "Must broadcast election:candidate");
+        assert!(found_started, "Must emit ElectionStarted");
+    }
+
+    /// decide_election() picks winner with highest uptime from candidates.
+    #[tokio::test]
+    async fn decide_election_picks_correct_winner() {
+        let (mut election, mut rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+        election.phase = ElectionPhase::Collecting;
+
+        election.candidates.insert("dev-1".to_string(), ElectionCandidatePayload {
+            device_id: "dev-1".to_string(),
+            uptime: 60000,
+            user_designated: false,
+        });
+        election.candidates.insert("dev-2".to_string(), ElectionCandidatePayload {
+            device_id: "dev-2".to_string(),
+            uptime: 120000,
+            user_designated: false,
+        });
+        election.candidates.insert("dev-3".to_string(), ElectionCandidatePayload {
+            device_id: "dev-3".to_string(),
+            uptime: 90000,
+            user_designated: false,
+        });
+
+        election.decide_election();
+
+        assert_eq!(election.primary_id(), Some("dev-2"));
+        assert_eq!(election.phase(), ElectionPhase::Decided);
+
+        let mut found = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ElectionEvent::PrimaryElected { device_id, is_local } = event {
+                assert_eq!(device_id, "dev-2");
+                assert!(!is_local);
+                found = true;
+            }
+        }
+        assert!(found);
+    }
+
+    /// handle_election_start from remote sets phase to Collecting.
+    #[tokio::test]
+    async fn handle_election_start_sets_collecting() {
+        let (mut election, mut rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+
+        election.handle_election_start("dev-2");
+
+        assert_eq!(election.phase(), ElectionPhase::Collecting);
+        assert!(election.candidates.contains_key("dev-1"));
+
+        let mut found_candidate = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ElectionEvent::Broadcast(msg) = &event {
+                if msg.msg_type == "election:candidate" {
+                    found_candidate = true;
+                }
+            }
+        }
+        assert!(found_candidate);
+    }
+
+    /// start_election() is idempotent when already Collecting.
+    #[tokio::test]
+    async fn start_election_idempotent_when_collecting() {
+        let (mut election, _rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+        election.phase = ElectionPhase::Collecting;
+
+        election.start_election();
+        assert_eq!(election.phase(), ElectionPhase::Collecting);
+    }
+
+    /// decide_election with no candidates becomes primary by default.
+    #[tokio::test]
+    async fn decide_election_no_candidates_becomes_primary() {
+        let (mut election, mut rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+        election.phase = ElectionPhase::Collecting;
+
+        election.decide_election();
+
+        assert!(election.is_primary());
+        assert_eq!(election.phase(), ElectionPhase::Decided);
+
+        let mut found = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ElectionEvent::PrimaryElected { device_id, is_local } = event {
+                assert_eq!(device_id, "dev-1");
+                assert!(is_local);
+                found = true;
+            }
+        }
+        assert!(found);
+    }
+
+    /// handle_election_result cancels pending election timeout.
+    #[tokio::test]
+    async fn handle_election_result_cancels_timeout() {
+        let (mut election, _rx) = make_election();
+        election.configure(config("dev-1", 1000, false));
+
+        election.start_election();
+        assert!(election.election_timeout_handle.is_some());
+
+        let result = ElectionResultPayload {
+            new_primary_id: "dev-2".to_string(),
+            previous_primary_id: None,
+            reason: "election".to_string(),
+        };
+        election.handle_election_result("dev-2", &result);
+
+        assert!(election.election_timeout_handle.is_none());
+        assert_eq!(election.phase(), ElectionPhase::Decided);
+        assert!(election.candidates.is_empty());
+    }
+
+    /// ARCH-6: emit() on full channel does not panic.
+    #[tokio::test]
+    async fn emit_on_full_channel_does_not_panic() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut election = PrimaryElection::new(ElectionTimingConfig::default(), tx);
+        election.configure(config("dev-1", 0, false));
+
+        election.emit(ElectionEvent::ElectionStarted);
+        // Should not panic when channel full
+        election.emit(ElectionEvent::ElectionStarted);
+    }
+
+    /// replace_event_tx works for stop/start cycle.
+    #[tokio::test]
+    async fn replace_event_tx_works() {
+        let (mut election, _rx1) = make_election();
+        election.configure(config("dev-1", 0, false));
+
+        let (tx2, mut rx2) = mpsc::channel(256);
+        election.replace_event_tx(tx2);
+
+        election.emit(ElectionEvent::ElectionStarted);
+
+        let event = rx2.try_recv().unwrap();
+        assert!(matches!(event, ElectionEvent::ElectionStarted));
+    }
+
+    /// Full failover: primary lost -> grace -> events emitted.
+    #[tokio::test]
+    async fn full_failover_emits_events() {
+        let timing = ElectionTimingConfig {
+            election_timeout: Duration::from_millis(50),
+            primary_loss_grace: Duration::from_millis(50),
+        };
+        let (tx, mut rx) = mpsc::channel(256);
+        let mut election = PrimaryElection::new(timing, tx);
+        election.configure(config("dev-1", 1000, false));
+        election.set_primary("old-primary");
+
+        election.handle_primary_lost("old-primary");
+        assert_eq!(election.phase(), ElectionPhase::Waiting);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut events = vec![];
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(e, ElectionEvent::PrimaryLost { .. })),
+            "Must emit PrimaryLost"
+        );
     }
 }

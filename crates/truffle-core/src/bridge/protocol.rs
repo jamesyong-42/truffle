@@ -91,10 +91,12 @@ pub struct AuthRequiredEventData {
     pub auth_url: String,
 }
 
-/// A peer on the Tailscale network.
+use crate::types::TailnetPeer as CanonicalTailnetPeer;
+
+/// Wire-format peer from Go sidecar. Converted to canonical TailnetPeer by the shim.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TailnetPeer {
+pub struct BridgeTailnetPeer {
     pub id: String,
     pub hostname: String,
     pub dns_name: String,
@@ -105,11 +107,24 @@ pub struct TailnetPeer {
     pub os: String,
 }
 
+impl BridgeTailnetPeer {
+    pub fn to_canonical(&self) -> CanonicalTailnetPeer {
+        CanonicalTailnetPeer {
+            id: self.id.clone(),
+            hostname: self.hostname.clone(),
+            dns_name: self.dns_name.clone(),
+            tailscale_ips: self.tailscale_ips.clone(),
+            online: self.online,
+            os: if self.os.is_empty() { None } else { Some(self.os.clone()) },
+        }
+    }
+}
+
 /// Data from `tsnet:peers` event.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeersEventData {
-    pub peers: Vec<TailnetPeer>,
+    pub peers: Vec<BridgeTailnetPeer>,
 }
 
 /// Data from `bridge:dialResult` event.
@@ -217,6 +232,23 @@ mod tests {
         let data: DialResultEventData = serde_json::from_value(event.data).unwrap();
         assert!(data.success);
         assert_eq!(data.request_id, "uuid-123");
+    }
+
+    #[test]
+    fn deserialize_bridge_peer_to_canonical() {
+        let json = r#"{"id":"1","hostname":"h","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true,"os":"linux"}"#;
+        let peer: BridgeTailnetPeer = serde_json::from_str(json).unwrap();
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.os, Some("linux".into()));
+        assert_eq!(canonical.tailscale_ips, vec!["100.64.0.2"]);
+    }
+
+    #[test]
+    fn deserialize_bridge_peer_empty_os() {
+        let json = r#"{"id":"1","hostname":"h","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true}"#;
+        let peer: BridgeTailnetPeer = serde_json::from_str(json).unwrap();
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.os, None);
     }
 
     #[test]

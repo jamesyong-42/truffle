@@ -62,6 +62,8 @@ pub enum ShimLifecycleEvent {
     Peers(super::protocol::PeersEventData),
     /// Shim stopped gracefully.
     Stopped,
+    /// A dial request failed. Caller should remove from BridgeManager::pending_dials.
+    DialFailed { request_id: String, error: String },
 }
 
 /// Configuration for spawning the Go shim.
@@ -98,6 +100,8 @@ pub struct GoShim {
     lifecycle_tx: broadcast::Sender<ShimLifecycleEvent>,
     /// Signal to stop the shim.
     shutdown: Arc<Notify>,
+    /// Separate signal for resuming auto-restart (not overloaded on shutdown).
+    resume_signal: Arc<Notify>,
     /// Whether auto-restart is paused (e.g., due to auth storm).
     auto_restart_paused: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -112,6 +116,7 @@ impl GoShim {
         let pending_dials: Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let shutdown = Arc::new(Notify::new());
+        let resume_signal = Arc::new(Notify::new());
         let auto_restart_paused =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -121,6 +126,7 @@ impl GoShim {
             pending_dials: pending_dials.clone(),
             lifecycle_tx: lifecycle_tx.clone(),
             shutdown: shutdown.clone(),
+            resume_signal: resume_signal.clone(),
             auto_restart_paused: auto_restart_paused.clone(),
         };
 
@@ -131,6 +137,7 @@ impl GoShim {
             pending_dials,
             lifecycle_tx.clone(),
             shutdown,
+            resume_signal,
             auto_restart_paused,
         );
 
@@ -143,6 +150,7 @@ impl GoShim {
         pending_dials: Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>>,
         lifecycle_tx: broadcast::Sender<ShimLifecycleEvent>,
         shutdown: Arc<Notify>,
+        resume_signal: Arc<Notify>,
         auto_restart_paused: Arc<std::sync::atomic::AtomicBool>,
     ) {
         tokio::spawn(async move {
@@ -178,7 +186,6 @@ impl GoShim {
                     child,
                     &config,
                     &stdin_rx,
-                    &pending_dials,
                     &lifecycle_tx,
                     &shutdown,
                     &mut last_event_was_auth,
@@ -217,9 +224,15 @@ impl GoShim {
                                 true,
                                 std::sync::atomic::Ordering::Relaxed,
                             );
-                            // Wait for shutdown or resume
-                            shutdown.notified().await;
-                            break;
+                            // Wait for resume OR shutdown (separate signals)
+                            tokio::select! {
+                                _ = resume_signal.notified() => {
+                                    auto_restart_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    restart_delay = INITIAL_RESTART_DELAY;
+                                    continue;
+                                }
+                                _ = shutdown.notified() => break,
+                            }
                         }
 
                         tokio::select! {
@@ -250,7 +263,6 @@ impl GoShim {
         mut child: Child,
         config: &ShimConfig,
         stdin_rx: &Arc<Mutex<mpsc::Receiver<String>>>,
-        pending_dials: &Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>>,
         lifecycle_tx: &broadcast::Sender<ShimLifecycleEvent>,
         shutdown: &Arc<Notify>,
         last_event_was_auth: &mut bool,
@@ -293,7 +305,6 @@ impl GoShim {
         // Read stdout lines in a task
         let mut stdout_reader = BufReader::new(child_stdout).lines();
         let lifecycle_tx2 = lifecycle_tx.clone();
-        let pending_dials2 = pending_dials.clone();
 
         // Capture stderr in a task
         let stderr_buf = Arc::new(Mutex::new(String::new()));
@@ -343,7 +354,6 @@ impl GoShim {
                                     Self::handle_event(
                                         event,
                                         &lifecycle_tx2,
-                                        &pending_dials2,
                                     ).await;
                                 }
                                 Err(e) => {
@@ -435,7 +445,6 @@ impl GoShim {
     async fn handle_event(
         event: ShimEvent,
         lifecycle_tx: &broadcast::Sender<ShimLifecycleEvent>,
-        pending_dials: &Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>>,
     ) {
         match event.event.as_str() {
             event_type::STARTED => {
@@ -464,15 +473,12 @@ impl GoShim {
             event_type::DIAL_RESULT => {
                 if let Ok(data) = serde_json::from_value::<DialResultEventData>(event.data) {
                     if !data.success {
-                        // Remove pending dial and drop sender to signal error
-                        let mut dials = pending_dials.lock().await;
-                        if dials.remove(&data.request_id).is_some() {
-                            tracing::debug!(
-                                "dial failed for request_id={}: {}",
-                                data.request_id,
-                                data.error
-                            );
-                        }
+                        // Report dial failure via lifecycle event.
+                        // The caller (runtime/NAPI) handles BridgeManager cleanup.
+                        let _ = lifecycle_tx.send(ShimLifecycleEvent::DialFailed {
+                            request_id: data.request_id,
+                            error: data.error,
+                        });
                     }
                     // On success, the bridge connection arrives via TCP accept loop,
                     // which correlates by request_id in the header.
@@ -500,25 +506,16 @@ impl GoShim {
 
     /// Request the Go shim to dial a remote peer.
     ///
-    /// Returns a oneshot receiver that will receive the bridged TcpStream
-    /// once the Go shim connects back to our local bridge port.
-    pub async fn dial(
+    /// Returns the request_id. The caller must insert into BridgeManager::pending_dials
+    /// BEFORE calling this, using the returned request_id.
+    pub async fn dial_raw(
         &self,
         target: String,
         port: u16,
-    ) -> Result<oneshot::Receiver<TcpStream>, ShimError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-
-        // Step 1: Insert BEFORE sending command (prevents race)
-        {
-            let mut dials = self.pending_dials.lock().await;
-            dials.insert(request_id.clone(), tx);
-        }
-
-        // Step 2: Send command to Go
+        request_id: String,
+    ) -> Result<(), ShimError> {
         let data = DialCommandData {
-            request_id: request_id.clone(),
+            request_id,
             target,
             port,
         };
@@ -526,15 +523,7 @@ impl GoShim {
             command: command_type::DIAL,
             data: Some(serde_json::to_value(&data)?),
         };
-
-        if let Err(e) = self.send_command(cmd).await {
-            // Clean up on send failure
-            let mut dials = self.pending_dials.lock().await;
-            dials.remove(&request_id);
-            return Err(e);
-        }
-
-        Ok(rx)
+        self.send_command(cmd).await
     }
 
     /// Request peers list from the Go shim.
@@ -580,8 +569,8 @@ impl GoShim {
     pub fn resume_auto_restart(&self) {
         self.auto_restart_paused
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        // Notify to trigger a restart attempt
-        self.shutdown.notify_one();
+        // Notify the resume signal (separate from shutdown)
+        self.resume_signal.notify_one();
     }
 }
 

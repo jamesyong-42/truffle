@@ -328,8 +328,12 @@ impl DeviceManager {
     // ── Internal ──────────────────────────────────────────────────────────
 
     fn emit(&self, event: DeviceEvent) {
-        // Best-effort: if the receiver is full or closed, drop the event.
-        let _ = self.event_tx.try_send(event);
+        if let Err(mpsc::error::TrySendError::Full(event)) = self.event_tx.try_send(event) {
+            tracing::warn!(
+                "DeviceEvent channel full, dropping {:?}",
+                std::mem::discriminant(&event)
+            );
+        }
     }
 }
 
@@ -533,5 +537,212 @@ mod tests {
         mgr.clear();
         assert!(mgr.devices().is_empty());
         assert!(mgr.primary_id().is_none());
+    }
+
+    // ── CS-4/CS-8 additional tests ────────────────────────────────────────
+
+    /// handle_device_goodbye marks the device offline.
+    #[test]
+    fn handle_device_goodbye_marks_offline() {
+        let (mut mgr, mut rx) = make_manager();
+
+        let peer = TailnetPeer {
+            id: "p".to_string(),
+            hostname: "app-desktop-dev2".to_string(),
+            dns_name: "app-desktop-dev2.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.2".to_string()],
+            online: true,
+            os: None,
+        };
+        mgr.add_discovered_peer(&peer);
+
+        // Drain discovery events
+        while rx.try_recv().is_ok() {}
+
+        mgr.handle_device_goodbye("dev2");
+
+        let device = mgr.device_by_id("dev2").unwrap();
+        assert_eq!(device.status, DeviceStatus::Offline,
+            "handle_device_goodbye must mark device offline");
+
+        // Should emit DeviceOffline event
+        let mut found_offline = false;
+        while let Ok(event) = rx.try_recv() {
+            if let DeviceEvent::DeviceOffline(id) = event {
+                assert_eq!(id, "dev2");
+                found_offline = true;
+            }
+        }
+        assert!(found_offline, "Must emit DeviceOffline event on goodbye");
+    }
+
+    /// set_local_offline emits LocalDeviceChanged.
+    #[test]
+    fn set_local_offline_emits_event() {
+        let (mut mgr, mut rx) = make_manager();
+        mgr.set_local_online("100.64.0.1", 1000, None);
+        while rx.try_recv().is_ok() {} // drain
+
+        mgr.set_local_offline();
+
+        assert_eq!(mgr.local_device().status, DeviceStatus::Offline);
+        assert!(mgr.local_device().tailscale_ip.is_none());
+
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
+    }
+
+    /// set_local_role only emits event when role actually changes.
+    #[test]
+    fn set_local_role_emits_on_change() {
+        let (mut mgr, mut rx) = make_manager();
+
+        mgr.set_local_role(DeviceRole::Primary);
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
+        assert_eq!(mgr.local_device().role, Some(DeviceRole::Primary));
+        assert_eq!(mgr.primary_id(), Some("local-1"));
+
+        // Setting same role again should not emit
+        mgr.set_local_role(DeviceRole::Primary);
+        assert!(rx.try_recv().is_err(), "Should not emit when role unchanged");
+    }
+
+    /// replace_event_tx redirects events to new channel.
+    #[test]
+    fn replace_event_tx_works() {
+        let (mut mgr, _rx1) = make_manager();
+
+        let (tx2, mut rx2) = mpsc::channel(256);
+        mgr.replace_event_tx(tx2);
+
+        mgr.set_local_online("100.64.0.1", 1000, None);
+
+        let event = rx2.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
+    }
+
+    /// ARCH-6: emit() does not panic when channel is full.
+    #[test]
+    fn emit_does_not_panic_on_full_channel() {
+        let (tx, _rx) = mpsc::channel(1);
+        let mut mgr = DeviceManager::new(
+            test_identity(),
+            "app".to_string(),
+            vec![],
+            None,
+            tx,
+        );
+
+        // Fill the channel
+        mgr.set_local_online("100.64.0.1", 1000, None);
+
+        // Should not panic even with full channel
+        mgr.set_local_online("100.64.0.2", 2000, None);
+    }
+
+    /// update_metadata merges new keys into existing metadata.
+    #[test]
+    fn update_metadata_merges() {
+        let (mut mgr, _rx) = make_manager();
+
+        let mut meta1 = HashMap::new();
+        meta1.insert("key1".to_string(), serde_json::json!("val1"));
+        mgr.update_metadata(meta1);
+
+        let mut meta2 = HashMap::new();
+        meta2.insert("key2".to_string(), serde_json::json!("val2"));
+        mgr.update_metadata(meta2);
+
+        let metadata = mgr.local_device().metadata.clone().unwrap();
+        assert_eq!(metadata.get("key1").unwrap(), &serde_json::json!("val1"));
+        assert_eq!(metadata.get("key2").unwrap(), &serde_json::json!("val2"));
+    }
+
+    /// update_device_name updates the name and emits event.
+    #[test]
+    fn update_device_name_works() {
+        let (mut mgr, mut rx) = make_manager();
+
+        mgr.update_device_name("New Name");
+        assert_eq!(mgr.local_device().name, "New Name");
+
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
+    }
+
+    /// set_local_dns_name only emits when DNS name changes.
+    #[test]
+    fn set_local_dns_name_emits_on_change() {
+        let (mut mgr, mut rx) = make_manager();
+
+        mgr.set_local_dns_name("app.ts.net");
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
+
+        // Same name: no event
+        mgr.set_local_dns_name("app.ts.net");
+        assert!(rx.try_recv().is_err(), "Should not emit when DNS name unchanged");
+    }
+
+    /// online_devices returns only devices with Online status.
+    #[test]
+    fn online_devices_filters_correctly() {
+        let (mut mgr, _rx) = make_manager();
+
+        let online_peer = TailnetPeer {
+            id: "p1".to_string(),
+            hostname: "app-desktop-on1".to_string(),
+            dns_name: "app-desktop-on1.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.2".to_string()],
+            online: true,
+            os: None,
+        };
+        let offline_peer = TailnetPeer {
+            id: "p2".to_string(),
+            hostname: "app-desktop-off1".to_string(),
+            dns_name: "app-desktop-off1.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.3".to_string()],
+            online: false,
+            os: None,
+        };
+
+        mgr.add_discovered_peer(&online_peer);
+        mgr.add_discovered_peer(&offline_peer);
+
+        let online = mgr.online_devices();
+        assert_eq!(online.len(), 1);
+        assert_eq!(online[0].id, "on1");
+    }
+
+    /// mark_device_offline on primary clears primary_id and emits PrimaryChanged(None).
+    #[test]
+    fn mark_primary_offline_emits_primary_changed_none() {
+        let (mut mgr, mut rx) = make_manager();
+
+        let peer = TailnetPeer {
+            id: "p".to_string(),
+            hostname: "app-desktop-dev2".to_string(),
+            dns_name: "app-desktop-dev2.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.2".to_string()],
+            online: true,
+            os: None,
+        };
+        mgr.add_discovered_peer(&peer);
+        mgr.set_device_role("dev2", DeviceRole::Primary);
+        while rx.try_recv().is_ok() {} // drain
+
+        mgr.mark_device_offline("dev2");
+
+        assert!(mgr.primary_id().is_none());
+
+        // Should have emitted PrimaryChanged(None)
+        let mut found = false;
+        while let Ok(event) = rx.try_recv() {
+            if let DeviceEvent::PrimaryChanged(None) = event {
+                found = true;
+            }
+        }
+        assert!(found, "mark_device_offline on primary must emit PrimaryChanged(None)");
     }
 }

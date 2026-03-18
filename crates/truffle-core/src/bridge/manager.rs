@@ -122,8 +122,11 @@ impl BridgeManager {
         &self.pending_dials
     }
 
-    /// Run the accept loop. This runs until the listener is closed or an error occurs.
-    pub async fn run(self) {
+    /// Run the accept loop.
+    ///
+    /// Runs until the listener is closed, an error occurs, or the `cancel` token is cancelled.
+    /// Pass `CancellationToken::new()` if you don't need external shutdown control.
+    pub async fn run(self, cancel: tokio_util::sync::CancellationToken) {
         let session_token = self.session_token;
         let handlers = Arc::new(self.handlers);
         let fallback = self.fallback_handler.map(Arc::new);
@@ -131,10 +134,18 @@ impl BridgeManager {
         let semaphore = self.semaphore;
 
         loop {
-            let (stream, addr) = match self.listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    tracing::error!("bridge accept error: {e}");
+            let (stream, addr) = tokio::select! {
+                result = self.listener.accept() => {
+                    match result {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            tracing::error!("bridge accept error: {e}");
+                            break;
+                        }
+                    }
+                }
+                _ = cancel.cancelled() => {
+                    tracing::info!("BridgeManager shutting down via cancellation token");
                     break;
                 }
             };
@@ -263,7 +274,7 @@ mod tests {
         );
 
         // Run manager in background
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Connect and send a valid header
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -305,7 +316,7 @@ mod tests {
         let (_tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
         // No handler registered — we just want to see that it doesn't crash
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Connect with wrong token
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -337,7 +348,7 @@ mod tests {
         let port = manager.local_port();
         let pending_dials = manager.pending_dials().clone();
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Insert a pending dial
         let (tx, rx) = oneshot::channel::<BridgeConnection>();
@@ -384,7 +395,7 @@ mod tests {
         let manager = BridgeManager::bind(token).await.unwrap();
         let port = manager.local_port();
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Connect but don't send anything — should timeout after 2s
         let _stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -409,7 +420,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
         manager.set_fallback_handler(Arc::new(ChannelHandler::new(tx)));
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Connect with an unusual port (reverse proxy scenario)
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -442,7 +453,7 @@ mod tests {
         let manager = BridgeManager::bind(token).await.unwrap();
         let port = manager.local_port();
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         // Connect with an outgoing header whose request_id isn't in pending_dials
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -481,7 +492,7 @@ mod tests {
             Arc::new(ChannelHandler::new(tx)),
         );
 
-        let manager_handle = tokio::spawn(async move { manager.run().await });
+        let manager_handle = tokio::spawn(async move { manager.run(tokio_util::sync::CancellationToken::new()).await });
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
@@ -504,6 +515,199 @@ mod tests {
 
         assert_eq!(conn.header.service_port, 9417);
         assert_eq!(conn.header.remote_dns_name, "file-peer.ts.net");
+
+        manager_handle.abort();
+    }
+
+    // ── CS-3: Dial pipeline tests (BUG-1) ─────────────────────────────────
+
+    /// BUG-1: register_dial() stores a pending dial that will be matched
+    /// when an outgoing bridge connection arrives with the same request_id.
+    #[tokio::test]
+    async fn register_dial_stores_pending() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let pending_dials = manager.pending_dials().clone();
+
+        let (tx, _rx) = oneshot::channel::<BridgeConnection>();
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.insert("dial-abc".to_string(), tx);
+            assert!(dials.contains_key("dial-abc"),
+                "Pending dial must be stored");
+        }
+    }
+
+    /// BUG-1: When a pending dial's receiver is dropped, sending to the
+    /// oneshot should result in an error (not a panic).
+    #[tokio::test]
+    async fn pending_dial_receiver_dropped_is_safe() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+        let pending_dials = manager.pending_dials().clone();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Insert a pending dial then drop the receiver
+        let (tx, rx) = oneshot::channel::<BridgeConnection>();
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.insert("dropped-rx".to_string(), tx);
+        }
+        drop(rx); // Drop receiver before connection arrives
+
+        // Simulate Go connecting back with matching request_id
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let header = BridgeHeader {
+            session_token: token,
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: "dropped-rx".to_string(),
+            remote_addr: "100.64.0.3:443".to_string(),
+            remote_dns_name: "target.ts.net".to_string(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        // Give it a moment to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Manager should still be running (not crashed)
+        assert!(!manager_handle.is_finished(),
+            "Manager must not crash when dial receiver is dropped");
+
+        // Pending dial entry should have been removed
+        let dials = pending_dials.lock().await;
+        assert!(!dials.contains_key("dropped-rx"),
+            "Pending dial must be removed even when receiver was dropped");
+
+        manager_handle.abort();
+    }
+
+    /// CS-3: Multiple concurrent dials should all be matched correctly.
+    #[tokio::test]
+    async fn multiple_concurrent_dials() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+        let pending_dials = manager.pending_dials().clone();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Insert three pending dials
+        let mut receivers = Vec::new();
+        for i in 0..3 {
+            let (tx, rx) = oneshot::channel::<BridgeConnection>();
+            let id = format!("dial-{i}");
+            pending_dials.lock().await.insert(id.clone(), tx);
+            receivers.push((id, rx));
+        }
+
+        // Deliver them in reverse order
+        for i in (0..3).rev() {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Outgoing,
+                service_port: 443,
+                request_id: format!("dial-{i}"),
+                remote_addr: format!("100.64.0.{}:443", i + 10),
+                remote_dns_name: format!("peer-{i}.ts.net"),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        // All dials should be matched
+        for (id, rx) in receivers {
+            let conn = tokio::time::timeout(Duration::from_secs(2), rx)
+                .await
+                .unwrap_or_else(|_| panic!("Timeout waiting for dial {id}"))
+                .unwrap_or_else(|_| panic!("Channel error for dial {id}"));
+
+            assert_eq!(conn.header.request_id, id);
+        }
+
+        // Pending dials should be empty
+        let dials = pending_dials.lock().await;
+        assert!(dials.is_empty(), "All pending dials should be consumed");
+
+        manager_handle.abort();
+    }
+
+    /// ARCH-9: CancellationToken graceful shutdown.
+    #[tokio::test]
+    async fn cancellation_token_stops_accept_loop() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(cancel_clone).await;
+        });
+
+        // Cancel after a brief moment
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+
+        // Manager should finish gracefully
+        let result = tokio::time::timeout(Duration::from_secs(2), manager_handle).await;
+        assert!(result.is_ok(), "Manager should stop when cancel token is cancelled");
+    }
+
+    /// Incoming connection with handler: verify full field propagation.
+    #[tokio::test]
+    async fn incoming_connection_propagates_all_header_fields() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(
+            443,
+            Direction::Incoming,
+            Arc::new(ChannelHandler::new(tx)),
+        );
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let header = BridgeHeader {
+            session_token: token,
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: "".to_string(),
+            remote_addr: "100.64.0.99:12345".to_string(),
+            remote_dns_name: "my-peer.tailnet.ts.net".to_string(),
+        };
+        header.write_to(&mut stream).await.unwrap();
+
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        // Verify all header fields propagated
+        assert_eq!(conn.header.direction, Direction::Incoming);
+        assert_eq!(conn.header.service_port, 443);
+        assert_eq!(conn.header.remote_addr, "100.64.0.99:12345");
+        assert_eq!(conn.header.remote_dns_name, "my-peer.tailnet.ts.net");
+        assert!(conn.header.request_id.is_empty());
 
         manager_handle.abort();
     }
