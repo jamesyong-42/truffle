@@ -173,8 +173,15 @@ impl PrimaryElection {
             )).await;
             let _ = event_tx.send(ElectionEvent::ElectionStarted).await;
 
-            // Set a timeout to decide
+            // Set a timeout to decide, then send election:timeout to trigger decide_election()
             tokio::time::sleep(timeout).await;
+            let _ = event_tx.send(ElectionEvent::Broadcast(
+                MeshMessage::new(
+                    "election:timeout",
+                    &device_id,
+                    serde_json::json!({}),
+                ),
+            )).await;
         });
 
         self.grace_period_handle = Some(handle.abort_handle());
