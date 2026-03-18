@@ -1,20 +1,57 @@
-//! Integration tests for the Go sidecar lifecycle.
+//! # Sidecar + Bridge Layer Integration Tests
 //!
-//! These tests spawn the actual Go sidecar binary and validate the full
-//! Tailscale node lifecycle: spawn → status events → auth → peers → dial → stop.
+//! These tests validate the lowest-level networking primitive in truffle:
+//! **two machines establishing a raw TCP bridge through Tailscale**.
 //!
-//! Tests that require Tailscale authentication are marked with `#[ignore]`.
-//! Run them manually with: `cargo test --test sidecar_lifecycle -- --ignored`
+//! ## What's proven at this layer
+//!
+//! 1. **Binary bridge protocol** — The 32-byte session token + direction + port +
+//!    request ID header format is byte-perfect between Go and Rust. Malformed
+//!    headers, invalid tokens, and oversized fields are all rejected correctly.
+//!
+//! 2. **Go sidecar lifecycle** — Spawn → start → auth → running → peers → stop.
+//!    Crash detection, auto-restart with exponential backoff, and auth storm
+//!    prevention all work.
+//!
+//! 3. **Serde field mapping** — The `tailscaleIP`/`tailscaleDNSName`/`tailscaleIPs`
+//!    acronym casing between Go JSON and Rust deserialization is verified correct
+//!    (the bug that silently dropped device IPs for weeks).
+//!
+//! 4. **Two-node dial pipeline** — Node A dials Node B through Tailscale's encrypted
+//!    tunnel. The Go sidecar bridges the raw TCP stream back to Rust's BridgeManager.
+//!    The `request_id` correlation correctly delivers the outgoing `BridgeConnection`
+//!    to the caller. Node B's incoming handler receives the connection with correct
+//!    remote address metadata.
+//!
+//! 5. **Bidirectional bridge verification** — Both sides of a dial (outgoing on A,
+//!    incoming on B) are verified in the same test. This proves the full path:
+//!    `GoShim::dial_raw()` → Go TLS dial → `bridgeToRust()` → BridgeManager accept
+//!    → pending_dials delivery (A) + handler dispatch (B).
+//!
+//! ## What's NOT tested at this layer
+//!
+//! - **WebSocket upgrade** — Bridge connections are raw TCP. The transport layer
+//!   upgrades them to WebSocket.
+//! - **Mesh protocol** — No device:announce, election messages, or STAR routing.
+//! - **Application features** — No store sync, file transfer, or message bus.
+//! - **Reconnection** — Single dial only, no retry or reconnect logic.
+//!
+//! ## Running the tests
 //!
 //! Prerequisites:
 //!   - Go sidecar binary built at `packages/sidecar-slim/bin/sidecar-slim`
-//!   - For ignored tests: a valid Tailscale auth state or interactive auth
+//!   - For ignored tests: Tailscale network access
 //!
-//! IMPORTANT: Auth-requiring tests share a state dir and must run sequentially:
-//!   cargo test --test sidecar_lifecycle -- --ignored --test-threads=1 --nocapture
+//! ```bash
+//! # Non-auth tests (always run in CI):
+//! cargo test --test sidecar_lifecycle
 //!
-//! First run: `sidecar_auth_flow_completes` will prompt you to auth in browser.
-//! After that, the cached state at /tmp/truffle-test-authed/shared-node/ is reused.
+//! # Auth-requiring tests (run sequentially, may prompt for browser auth):
+//! cargo test --test sidecar_lifecycle -- --ignored --test-threads=1 --nocapture
+//!
+//! # First run establishes auth at /tmp/truffle-test-authed/{node-a,node-b}/
+//! # Subsequent runs reuse cached auth.
+//! ```
 
 use std::path::PathBuf;
 use std::sync::Once;
