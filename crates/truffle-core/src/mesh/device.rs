@@ -74,6 +74,11 @@ impl DeviceManager {
         }
     }
 
+    /// Replace the event channel sender (used when resetting for restart).
+    pub fn replace_event_tx(&mut self, tx: mpsc::Sender<DeviceEvent>) {
+        self.event_tx = tx;
+    }
+
     // ── Identity ──────────────────────────────────────────────────────────
 
     pub fn device_id(&self) -> &str {

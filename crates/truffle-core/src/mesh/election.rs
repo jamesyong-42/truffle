@@ -90,6 +90,11 @@ impl PrimaryElection {
         }
     }
 
+    /// Replace the event channel sender (used when resetting for restart).
+    pub fn replace_event_tx(&mut self, tx: mpsc::Sender<ElectionEvent>) {
+        self.event_tx = tx;
+    }
+
     // ── Configuration ─────────────────────────────────────────────────────
 
     pub fn configure(&mut self, config: ElectionConfig) {

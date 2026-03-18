@@ -10,7 +10,7 @@ use crate::protocol::message_types::{
     ElectionCandidatePayload, ElectionResultPayload, MeshMessage,
 };
 use crate::transport::connection::{ConnectionManager, ConnectionStatus, TransportEvent};
-use crate::types::{BaseDevice, DeviceRole, TailnetPeer};
+use crate::types::{AuthStatus, BaseDevice, DeviceRole, TailnetPeer};
 
 use super::device::{DeviceEvent, DeviceIdentity, DeviceManager};
 use super::election::{ElectionConfig, ElectionEvent, ElectionTimingConfig, PrimaryElection};
@@ -60,6 +60,8 @@ pub enum MeshNodeEvent {
     Started,
     Stopped,
     AuthRequired(String),
+    /// Tailscale authentication completed successfully.
+    AuthComplete,
     DeviceDiscovered(BaseDevice),
     DeviceUpdated(BaseDevice),
     DeviceOffline(String),
@@ -94,6 +96,11 @@ pub struct MeshNode {
 
     running: Arc<RwLock<bool>>,
     started_at: Arc<RwLock<u64>>,
+
+    /// Tailscale auth status, tracked from sidecar lifecycle events.
+    auth_status: Arc<RwLock<AuthStatus>>,
+    /// Tailscale auth URL, set when auth is required.
+    auth_url: Arc<RwLock<Option<String>>>,
 
     /// Channel for MeshNode events to the application (broadcast supports multiple consumers).
     event_tx: broadcast::Sender<MeshNodeEvent>,
@@ -158,6 +165,8 @@ impl MeshNode {
             message_bus: Arc::new(message_bus),
             running: Arc::new(RwLock::new(false)),
             started_at: Arc::new(RwLock::new(0)),
+            auth_status: Arc::new(RwLock::new(AuthStatus::Unknown)),
+            auth_url: Arc::new(RwLock::new(None)),
             event_tx,
             device_event_rx: tokio::sync::Mutex::new(Some(device_event_rx)),
             election_event_rx: tokio::sync::Mutex::new(Some(election_event_rx)),
@@ -244,6 +253,20 @@ impl MeshNode {
         {
             let mut election = self.election.write().await;
             election.reset();
+        }
+        *self.auth_status.write().await = AuthStatus::Unknown;
+        *self.auth_url.write().await = None;
+
+        // Recreate internal event channels so start() can be called again.
+        // The senders are swapped into DeviceManager and PrimaryElection;
+        // the receivers are stored for the next start_event_loop() call.
+        {
+            let (device_event_tx, device_event_rx) = mpsc::channel(256);
+            let (election_event_tx, election_event_rx) = mpsc::channel(256);
+            self.device_manager.write().await.replace_event_tx(device_event_tx);
+            self.election.write().await.replace_event_tx(election_event_tx);
+            *self.device_event_rx.lock().await = Some(device_event_rx);
+            *self.election_event_rx.lock().await = Some(election_event_rx);
         }
 
         let _ = self.event_tx.send(MeshNodeEvent::Stopped);
@@ -405,6 +428,39 @@ impl MeshNode {
     /// AuthRequired, Error) into the MeshNode event stream.
     pub fn emit_event(&self, event: MeshNodeEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    // ── Auth state ────────────────────────────────────────────────────────
+
+    /// Get the current Tailscale auth status.
+    pub async fn auth_status(&self) -> AuthStatus {
+        self.auth_status.read().await.clone()
+    }
+
+    /// Get the current Tailscale auth URL (if auth is required).
+    pub async fn auth_url(&self) -> Option<String> {
+        self.auth_url.read().await.clone()
+    }
+
+    /// Set auth status to Required and store the auth URL.
+    /// Called when the sidecar emits an AuthRequired event.
+    pub async fn set_auth_required(&self, url: &str) {
+        *self.auth_status.write().await = AuthStatus::Required;
+        *self.auth_url.write().await = Some(url.to_string());
+        self.emit_event(MeshNodeEvent::AuthRequired(url.to_string()));
+    }
+
+    /// Set auth status to Authenticated and clear the URL.
+    /// Called when the sidecar reports a Tailscale IP (auth completed).
+    /// Idempotent — only emits AuthComplete once.
+    pub async fn set_auth_authenticated(&self) {
+        let current = self.auth_status.read().await.clone();
+        if current == AuthStatus::Authenticated {
+            return;
+        }
+        *self.auth_status.write().await = AuthStatus::Authenticated;
+        *self.auth_url.write().await = None;
+        self.emit_event(MeshNodeEvent::AuthComplete);
     }
 
     // ── Discovery ─────────────────────────────────────────────────────────
