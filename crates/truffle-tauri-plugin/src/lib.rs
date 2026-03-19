@@ -36,7 +36,7 @@ impl Default for TruffleState {
 /// Initialize the Truffle Tauri v2 plugin.
 ///
 /// Usage in Tauri app:
-/// ```ignore
+/// ```text
 /// fn main() {
 ///     tauri::Builder::default()
 ///         .plugin(truffle_tauri_plugin::init())
