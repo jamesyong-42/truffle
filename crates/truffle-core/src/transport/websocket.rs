@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
     protocol::{CloseFrame, WebSocketConfig},
@@ -126,10 +125,16 @@ pub enum ReadPumpExit {
 /// Reads messages from the WS stream and forwards decoded messages to `msg_tx`.
 /// Ping/pong is handled at the protocol level by tokio-tungstenite automatically.
 /// Returns when the connection closes or errors.
-pub async fn read_pump(
-    mut read_half: futures_util::stream::SplitStream<WebSocketStream<TcpStream>>,
+///
+/// Generic over the underlying stream type `S` (e.g., `TcpStream`,
+/// `TokioIo<Upgraded>`, etc.).
+pub async fn read_pump<S>(
+    mut read_half: futures_util::stream::SplitStream<WebSocketStream<S>>,
     msg_tx: mpsc::Sender<WireMessage>,
-) -> ReadPumpExit {
+) -> ReadPumpExit
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         match read_half.next().await {
             Some(Ok(Message::Binary(data))) => {
@@ -189,10 +194,16 @@ pub async fn read_pump(
 ///
 /// Reads encoded messages from `msg_rx` and writes them as WS binary frames.
 /// Returns when the channel closes or a write error occurs.
-pub async fn write_pump(
-    mut write_half: futures_util::stream::SplitSink<WebSocketStream<TcpStream>, Message>,
+///
+/// Generic over the underlying stream type `S` (e.g., `TcpStream`,
+/// `TokioIo<Upgraded>`, etc.).
+pub async fn write_pump<S>(
+    mut write_half: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut msg_rx: mpsc::Receiver<Vec<u8>>,
-) -> Result<(), WsError> {
+) -> Result<(), WsError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     while let Some(data) = msg_rx.recv().await {
         write_half
             .send(Message::Binary(Bytes::from(data)))

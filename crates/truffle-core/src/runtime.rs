@@ -19,6 +19,10 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use crate::bridge::header::Direction;
 use crate::bridge::manager::{BridgeConnection, BridgeManager, ChannelHandler};
 use crate::bridge::shim::{GoShim, ShimConfig, ShimLifecycleEvent};
+use crate::http::proxy::{ProxyTarget, ReverseProxyHandler};
+use crate::http::router::{HttpHandler, HttpRouter, HttpRouterBridgeHandler, RouterError};
+use crate::http::static_site::{StaticFile, StaticHandler};
+use crate::http::ws_handler::WsUpgradeHandler;
 use crate::mesh::election::ElectionTimingConfig;
 use crate::mesh::message_bus::MeshMessageBus;
 use crate::mesh::node::{IncomingMeshMessage, MeshNode, MeshNodeConfig, MeshNodeEvent, MeshTimingConfig};
@@ -332,6 +336,7 @@ impl TruffleRuntimeBuilder {
             shim: Arc::new(Mutex::new(None)),
             bridge_pending_dials: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
+            http_router: Arc::new(Mutex::new(None)),
             config: runtime_config,
             ephemeral: self.ephemeral,
             tags: self.tags,
@@ -359,6 +364,8 @@ pub struct TruffleRuntime {
     bridge_pending_dials: Arc<Mutex<HashMap<String, oneshot::Sender<BridgeConnection>>>>,
     /// Unified event broadcast channel.
     event_tx: broadcast::Sender<TruffleEvent>,
+    /// HTTP router for path-based routing on port 443 (RFC 008 Phase 4).
+    http_router: Arc<Mutex<Option<Arc<HttpRouter>>>>,
     /// Stored config for sidecar bootstrap at start() time.
     config: RuntimeConfig,
     /// Whether the tsnet node is ephemeral.
@@ -390,6 +397,7 @@ impl TruffleRuntime {
             shim: Arc::new(Mutex::new(None)),
             bridge_pending_dials: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
+            http_router: Arc::new(Mutex::new(None)),
             config: RuntimeConfig {
                 mesh: config.mesh.clone(),
                 transport: config.transport.clone(),
@@ -506,6 +514,17 @@ impl TruffleRuntime {
         self.mesh_node.broadcast_envelope(envelope).await;
     }
 
+    /// Get a handle to the HTTP router for managing routes.
+    ///
+    /// Returns `None` if the sidecar hasn't been bootstrapped yet
+    /// (the router is created during `bootstrap_sidecar`).
+    pub async fn http(&self) -> Option<HttpHandle> {
+        let guard = self.http_router.lock().await;
+        guard.as_ref().map(|router| HttpHandle {
+            router: router.clone(),
+        })
+    }
+
     // ── Event forwarding ───────────────────────────────────────────────
 
     /// Spawns a task that maps `MeshNodeEvent` to `TruffleEvent` and
@@ -590,10 +609,29 @@ impl TruffleRuntime {
             .map_err(|e| RuntimeError::Bootstrap(format!("bridge bind failed: {e}")))?;
         let bridge_port = bridge_manager.local_port();
 
-        // Register WS handlers
-        let (ws_in_tx, mut ws_in_rx) = mpsc::channel(64);
+        // Create the HTTP router for port 443 incoming connections
+        let http_router = Arc::new(HttpRouter::new());
+
+        // Register the /ws WebSocket handler on the router
+        let ws_handler = Arc::new(WsUpgradeHandler::new(self.connection_manager.clone()));
+        http_router
+            .add_route("/ws", "WebSocket", "websocket", ws_handler)
+            .await
+            .map_err(|e| RuntimeError::Bootstrap(format!("ws route: {e}")))?;
+
+        // Store the router for runtime use
+        {
+            let mut guard = self.http_router.lock().await;
+            *guard = Some(http_router.clone());
+        }
+
+        // Register the HTTP router as the bridge handler for port 443 incoming
+        let router_handler = Arc::new(HttpRouterBridgeHandler::new(http_router));
+        bridge_manager.add_handler(443, Direction::Incoming, router_handler);
+
+        // Register outgoing WS handler (outgoing dials still go through
+        // the connection manager directly, not the HTTP router)
         let (ws_out_tx, mut ws_out_rx) = mpsc::channel(64);
-        bridge_manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(ws_in_tx)));
         bridge_manager.add_handler(443, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx)));
 
         // Use the bridge manager's pending_dials Arc directly
@@ -604,13 +642,7 @@ impl TruffleRuntime {
             bridge_manager.run(tokio_util::sync::CancellationToken::new()).await;
         });
 
-        // Spawn WS connection handlers
-        let conn_mgr = self.connection_manager.clone();
-        tokio::spawn(async move {
-            while let Some(bc) = ws_in_rx.recv().await {
-                conn_mgr.handle_incoming(bc).await;
-            }
-        });
+        // Spawn outgoing WS connection handler
         let conn_mgr2 = self.connection_manager.clone();
         tokio::spawn(async move {
             while let Some(bc) = ws_out_rx.recv().await {
@@ -797,6 +829,99 @@ pub fn mesh_event_to_truffle(event: MeshNodeEvent) -> TruffleEvent {
         MeshNodeEvent::PrimaryChanged(id) => TruffleEvent::PrimaryChanged { primary_id: id },
         MeshNodeEvent::Message(msg) => TruffleEvent::Message(msg),
         MeshNodeEvent::Error(err) => TruffleEvent::Error(err),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HttpHandle -- convenience API for the HTTP router
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Handle for managing HTTP routes at runtime.
+///
+/// Obtained via `runtime.http().await`. Provides a convenient API for
+/// registering reverse proxies, static file handlers, and SPA routes.
+pub struct HttpHandle {
+    router: Arc<HttpRouter>,
+}
+
+impl HttpHandle {
+    /// Register a reverse proxy route.
+    ///
+    /// Requests matching `prefix` are forwarded to `target_addr` (e.g., "127.0.0.1:3000").
+    /// The prefix is stripped before forwarding by default.
+    pub async fn proxy(
+        &self,
+        prefix: &str,
+        target_addr: &str,
+    ) -> Result<(), RouterError> {
+        let target = ProxyTarget::http(target_addr);
+        let handler: Arc<dyn HttpHandler> = Arc::new(ReverseProxyHandler::new(prefix, target));
+        self.router
+            .add_route(prefix, &format!("proxy -> {target_addr}"), "proxy", handler)
+            .await
+    }
+
+    /// Register a static file serving route from disk.
+    pub async fn serve_static(
+        &self,
+        prefix: &str,
+        root_dir: impl Into<PathBuf>,
+    ) -> Result<(), RouterError> {
+        let handler: Arc<dyn HttpHandler> = Arc::new(StaticHandler::from_dir(root_dir));
+        self.router
+            .add_route(prefix, "static files", "static", handler)
+            .await
+    }
+
+    /// Register a SPA (Single Page Application) handler.
+    ///
+    /// Serves static files from `root_dir`, falling back to `index.html`
+    /// for unknown paths (client-side routing).
+    pub async fn serve_spa(
+        &self,
+        prefix: &str,
+        root_dir: impl Into<PathBuf>,
+    ) -> Result<(), RouterError> {
+        let handler: Arc<dyn HttpHandler> = Arc::new(
+            StaticHandler::from_dir(root_dir).with_spa_fallback(true),
+        );
+        self.router
+            .add_route(prefix, "SPA", "spa", handler)
+            .await
+    }
+
+    /// Register a static file serving route from in-memory files.
+    pub async fn serve_memory(
+        &self,
+        prefix: &str,
+        files: Vec<StaticFile>,
+    ) -> Result<(), RouterError> {
+        let handler: Arc<dyn HttpHandler> = Arc::new(StaticHandler::from_memory(files));
+        self.router
+            .add_route(prefix, "static (memory)", "static-memory", handler)
+            .await
+    }
+
+    /// Register a custom HTTP handler.
+    pub async fn add_route(
+        &self,
+        prefix: &str,
+        name: &str,
+        handler: Arc<dyn HttpHandler>,
+    ) -> Result<(), RouterError> {
+        self.router
+            .add_route(prefix, name, "custom", handler)
+            .await
+    }
+
+    /// Remove a route by prefix.
+    pub async fn remove_route(&self, prefix: &str) -> Result<(), RouterError> {
+        self.router.remove_route(prefix).await
+    }
+
+    /// List all registered routes.
+    pub async fn routes(&self) -> Vec<crate::http::router::Route> {
+        self.router.list_routes().await
     }
 }
 

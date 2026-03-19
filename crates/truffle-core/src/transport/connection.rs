@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
@@ -217,13 +216,61 @@ impl ConnectionManager {
             .await;
     }
 
+    /// Handle an already-upgraded WebSocket stream (e.g., from the HTTP router).
+    ///
+    /// Takes a `WebSocketStream` over any `S: AsyncRead + AsyncWrite + Unpin + Send`,
+    /// so it works with `TokioIo<hyper::upgrade::Upgraded>` as well as `TcpStream`.
+    pub async fn handle_ws_stream<S>(
+        &self,
+        ws_stream: WebSocketStream<S>,
+        remote_addr: String,
+        remote_dns_name: String,
+        direction: Direction,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let connection_id = format!(
+            "{}:{}",
+            match direction {
+                Direction::Incoming => "incoming",
+                Direction::Outgoing => "dial",
+            },
+            &remote_addr
+        );
+
+        tracing::info!(
+            "{} WS connection (upgraded) from {remote_addr} ({remote_dns_name})",
+            match direction {
+                Direction::Incoming => "incoming",
+                Direction::Outgoing => "outgoing",
+            }
+        );
+
+        let ws_conn = WSConnection {
+            id: connection_id.clone(),
+            device_id: None,
+            direction,
+            remote_addr,
+            remote_dns_name,
+            status: ConnectionStatus::Connected,
+        };
+
+        self.setup_connection(connection_id, ws_stream, ws_conn)
+            .await;
+    }
+
     /// Set up read/write pumps and heartbeat for a connected WebSocket.
-    async fn setup_connection(
+    ///
+    /// Generic over the underlying stream type `S` so this works with both
+    /// `TcpStream` (direct bridge) and `TokioIo<Upgraded>` (HTTP router).
+    async fn setup_connection<S>(
         &self,
         connection_id: String,
-        ws_stream: WebSocketStream<TcpStream>,
+        ws_stream: WebSocketStream<S>,
         ws_conn: WSConnection,
-    ) {
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (write_half, read_half) = ws_stream.split();
 
         // Channels
@@ -504,6 +551,7 @@ mod tests {
     #[tokio::test]
     async fn ws_echo_over_tcp() {
         use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpStream;
         use tokio_tungstenite::tungstenite::Message;
 
         // Create a TCP pair to simulate a bridge connection

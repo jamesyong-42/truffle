@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use hyper::body::Incoming;
@@ -12,6 +14,8 @@ use tokio::io;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
+
+use super::router::{HttpHandler, PeerInfo};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -471,6 +475,295 @@ fn bad_gateway() -> Response<Full<Bytes>> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Path-prefix proxy types (RFC 008 Phase 4)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Target configuration for a path-prefix-based reverse proxy.
+///
+/// Used by the HTTP router to forward requests matching a path prefix
+/// to a local backend service.
+#[derive(Debug, Clone)]
+pub struct ProxyTarget {
+    /// Target address (e.g., "127.0.0.1:3000").
+    pub addr: String,
+    /// Target scheme ("http" or "https").
+    pub scheme: String,
+    /// Whether to strip the prefix before forwarding.
+    pub strip_prefix: bool,
+    /// Optional extra headers to add to forwarded requests.
+    pub headers: HashMap<String, String>,
+}
+
+impl ProxyTarget {
+    /// Create a new HTTP proxy target with prefix stripping enabled.
+    pub fn http(addr: impl Into<String>) -> Self {
+        Self {
+            addr: addr.into(),
+            scheme: "http".to_string(),
+            strip_prefix: true,
+            headers: HashMap::new(),
+        }
+    }
+
+    /// Create a new HTTPS proxy target with prefix stripping enabled.
+    pub fn https(addr: impl Into<String>) -> Self {
+        Self {
+            addr: addr.into(),
+            scheme: "https".to_string(),
+            strip_prefix: true,
+            headers: HashMap::new(),
+        }
+    }
+
+    /// Set whether to strip the matched prefix from the forwarded path.
+    pub fn with_strip_prefix(mut self, strip: bool) -> Self {
+        self.strip_prefix = strip;
+        self
+    }
+
+    /// Add a header to forwarded requests.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
+}
+
+/// Strip a path prefix from a request path.
+///
+/// Given prefix `/api` and path `/api/users`, returns `/users`.
+/// If the path equals the prefix exactly, returns `/`.
+pub fn strip_path_prefix(prefix: &str, path: &str) -> String {
+    if path == prefix {
+        return "/".to_string();
+    }
+
+    if path.starts_with(prefix) {
+        let rest = &path[prefix.len()..];
+        if rest.starts_with('/') {
+            return rest.to_string();
+        }
+    }
+
+    // No match -- return original path
+    path.to_string()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ReverseProxyHandler (HttpHandler implementation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// HTTP handler that forwards requests to a local backend service.
+///
+/// Implements `HttpHandler` for use with the `HttpRouter`.
+/// Optionally strips the matched prefix before forwarding.
+pub struct ReverseProxyHandler {
+    /// The target to forward to.
+    target: ProxyTarget,
+    /// The prefix this handler is registered under (for stripping).
+    prefix: String,
+}
+
+impl ReverseProxyHandler {
+    /// Create a new reverse proxy handler.
+    ///
+    /// `prefix` is the path prefix this handler is registered under,
+    /// used for prefix stripping when `target.strip_prefix` is true.
+    pub fn new(prefix: impl Into<String>, target: ProxyTarget) -> Self {
+        Self {
+            target,
+            prefix: super::router::normalize_prefix(&prefix.into()),
+        }
+    }
+}
+
+impl HttpHandler for ReverseProxyHandler {
+    fn handle(
+        &self,
+        req: Request<Incoming>,
+        _peer: PeerInfo,
+    ) -> Pin<Box<dyn Future<Output = Response<Full<Bytes>>> + Send + '_>> {
+        Box::pin(async move {
+            let target_addr = &self.target.addr;
+
+            // Determine the forwarded path
+            let original_path = req.uri().path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+
+            let forwarded_path = if self.target.strip_prefix {
+                strip_path_prefix(&self.prefix, original_path)
+            } else {
+                original_path.to_string()
+            };
+
+            // Check if this is a WebSocket upgrade
+            if is_websocket_upgrade(&req) {
+                tracing::debug!(
+                    "[ReverseProxy] WebSocket upgrade: {} -> {}{}",
+                    original_path, target_addr, forwarded_path
+                );
+                match handle_ws_upgrade_to_target(req, target_addr, &forwarded_path).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::warn!("[ReverseProxy] WebSocket error: {e}");
+                        bad_gateway()
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "[ReverseProxy] HTTP {} {} -> {}{}",
+                    req.method(), original_path, target_addr, forwarded_path
+                );
+                match forward_http_to_target(req, target_addr, &forwarded_path, &self.target.headers).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::warn!("[ReverseProxy] HTTP error: {e}");
+                        bad_gateway()
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// Forward an HTTP request to a specific target address with a rewritten path.
+async fn forward_http_to_target(
+    mut req: Request<Incoming>,
+    target_addr: &str,
+    path: &str,
+    extra_headers: &HashMap<String, String>,
+) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
+    let target_stream = TcpStream::connect(target_addr).await?;
+    let target_io = TokioIo::new(target_stream);
+
+    // Rewrite Host header
+    let host_val = target_addr.to_string();
+    if let Ok(hv) = host_val.parse() {
+        req.headers_mut().insert("host", hv);
+    }
+
+    // Add extra headers
+    for (name, value) in extra_headers {
+        if let (Ok(n), Ok(v)) = (name.parse::<hyper::header::HeaderName>(), value.parse::<hyper::header::HeaderValue>()) {
+            req.headers_mut().insert(n, v);
+        }
+    }
+
+    // Build the URI with the target
+    let uri: hyper::Uri = format!("http://{target_addr}{path}").parse()?;
+    *req.uri_mut() = uri;
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(target_io).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::debug!("Forward connection ended: {e}");
+        }
+    });
+
+    let resp = sender.send_request(req).await?;
+
+    let (parts, body) = resp.into_parts();
+    let body_bytes = body.collect().await?.to_bytes();
+    Ok(Response::from_parts(parts, Full::new(body_bytes)))
+}
+
+/// Handle a WebSocket upgrade, forwarding to a specific target with rewritten path.
+async fn handle_ws_upgrade_to_target(
+    req: Request<Incoming>,
+    target_addr: &str,
+    path: &str,
+) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut target_stream = TcpStream::connect(target_addr).await?;
+
+    // Build raw HTTP request for the target
+    let mut raw_request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\n",
+        req.method(),
+        path,
+        target_addr,
+    );
+    for (name, value) in req.headers() {
+        if name.as_str().eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            raw_request.push_str(&format!("{}: {}\r\n", name, v));
+        }
+    }
+    raw_request.push_str("\r\n");
+
+    use tokio::io::AsyncWriteExt;
+    target_stream.write_all(raw_request.as_bytes()).await?;
+
+    // Read the target's response
+    use tokio::io::AsyncBufReadExt;
+    let mut target_reader = tokio::io::BufReader::new(&mut target_stream);
+    let mut response_headers = String::new();
+    loop {
+        let mut line = String::new();
+        let n = target_reader.read_line(&mut line).await?;
+        if n == 0 {
+            return Err("target closed connection before completing upgrade".into());
+        }
+        response_headers.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    drop(target_reader);
+
+    let status_line = response_headers.lines().next().unwrap_or("");
+    if !status_line.contains("101") {
+        return Err(format!("target did not upgrade: {status_line}").into());
+    }
+
+    let on_upgrade = hyper::upgrade::on(req);
+
+    let mut resp_builder = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
+
+    for line in response_headers.lines().skip(1) {
+        if line.is_empty() || line == "\r" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim();
+            let value = value.trim();
+            if let (Ok(n), Ok(v)) = (
+                name.parse::<hyper::header::HeaderName>(),
+                value.parse::<hyper::header::HeaderValue>(),
+            ) {
+                resp_builder = resp_builder.header(n, v);
+            }
+        }
+    }
+
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                let mut client_stream = TokioIo::new(upgraded);
+                match io::copy_bidirectional(&mut client_stream, &mut target_stream).await {
+                    Ok((c2t, t2c)) => {
+                        tracing::debug!(
+                            "WS proxy ended: client->target={c2t}B, target->client={t2c}B"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!("WS proxy copy error: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("WS upgrade failed: {e}");
+            }
+        }
+    });
+
+    let resp = resp_builder.body(Full::new(Bytes::new()))?;
+    Ok(resp)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -678,5 +971,81 @@ mod tests {
             }
             _ => panic!("expected Started event"),
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RFC 008 Phase 4: Path-prefix proxy tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_prefix_stripping() {
+        // /api/users with prefix /api -> /users
+        assert_eq!(strip_path_prefix("/api", "/api/users"), "/users");
+
+        // /api/v2/items with prefix /api -> /v2/items
+        assert_eq!(strip_path_prefix("/api", "/api/v2/items"), "/v2/items");
+
+        // Exact match on prefix -> "/"
+        assert_eq!(strip_path_prefix("/api", "/api"), "/");
+
+        // Deeply nested
+        assert_eq!(
+            strip_path_prefix("/app/backend", "/app/backend/health"),
+            "/health"
+        );
+    }
+
+    #[test]
+    fn test_no_prefix_stripping() {
+        // When the path doesn't match the prefix, it's returned as-is
+        assert_eq!(strip_path_prefix("/api", "/other/path"), "/other/path");
+
+        // Partial match (prefix is substring but not a path segment boundary)
+        assert_eq!(strip_path_prefix("/api", "/api2/data"), "/api2/data");
+    }
+
+    #[test]
+    fn test_proxy_target_http_default() {
+        let target = ProxyTarget::http("127.0.0.1:3000");
+
+        assert_eq!(target.scheme, "http");
+        assert_eq!(target.addr, "127.0.0.1:3000");
+        assert!(target.strip_prefix);
+        assert!(target.headers.is_empty());
+    }
+
+    #[test]
+    fn test_proxy_target_https() {
+        let target = ProxyTarget::https("127.0.0.1:8443");
+
+        assert_eq!(target.scheme, "https");
+        assert_eq!(target.addr, "127.0.0.1:8443");
+        assert!(target.strip_prefix);
+    }
+
+    #[test]
+    fn test_proxy_target_builder_methods() {
+        let target = ProxyTarget::http("localhost:3000")
+            .with_strip_prefix(false)
+            .with_header("X-Forwarded-For", "10.0.0.1");
+
+        assert!(!target.strip_prefix);
+        assert_eq!(target.headers.get("X-Forwarded-For").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn test_reverse_proxy_handler_creation() {
+        let target = ProxyTarget::http("127.0.0.1:3000");
+        let handler = ReverseProxyHandler::new("/api", target);
+        assert_eq!(handler.prefix, "/api");
+        assert_eq!(handler.target.addr, "127.0.0.1:3000");
+        assert!(handler.target.strip_prefix);
+    }
+
+    #[test]
+    fn test_reverse_proxy_handler_normalizes_prefix() {
+        let target = ProxyTarget::http("127.0.0.1:3000");
+        let handler = ReverseProxyHandler::new("api/", target);
+        assert_eq!(handler.prefix, "/api");
     }
 }
