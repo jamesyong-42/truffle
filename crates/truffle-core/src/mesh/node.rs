@@ -448,6 +448,11 @@ impl MeshNode {
         self.message_bus.clone()
     }
 
+    /// Get a snapshot of all WebSocket connections (for diagnostics).
+    pub async fn connections(&self) -> Vec<crate::transport::connection::WSConnection> {
+        self.connection_manager.get_connections().await
+    }
+
     /// Subscribe to MeshNode events. Returns a new broadcast receiver.
     ///
     /// Multiple consumers can subscribe independently. Each receiver gets
@@ -538,14 +543,10 @@ impl MeshNode {
 
         if !has_primary && online_devices.is_empty() {
             tracing::info!("No other devices found, becoming primary");
-            let mut dm = self.device_manager.write().await;
-            dm.set_local_role(DeviceRole::Primary);
             let mut election = self.election.write().await;
+            // set_primary emits PrimaryElected which the election event loop
+            // converts into RoleChanged, so we don't emit RoleChanged manually.
             election.set_primary(&identity.id);
-            let _ = self.event_tx.send(MeshNodeEvent::RoleChanged {
-                role: DeviceRole::Primary,
-                is_primary: true,
-            });
         } else if !has_primary && !online_devices.is_empty() {
             // Wait for discovery timeout then start election if still no primary
             let discovery_timeout = self.config.timing.discovery_timeout;

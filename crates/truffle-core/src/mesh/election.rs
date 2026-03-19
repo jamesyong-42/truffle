@@ -124,10 +124,30 @@ impl PrimaryElection {
     }
 
     /// Set primary directly (e.g., from a device:list message from existing primary).
+    ///
+    /// Emits `PrimaryElected` so that MeshNode updates roles and fires
+    /// `RoleChanged`.  Without this, a secondary that learns the primary
+    /// via device:list would never emit `RoleChanged`, causing consumers
+    /// (including tests) that wait for that event to time out.
     pub fn set_primary(&mut self, device_id: &str) {
+        let already_set = self.primary_id.as_deref() == Some(device_id);
         self.primary_id = Some(device_id.to_string());
         self.phase = ElectionPhase::Idle;
         tracing::info!("Primary set to {device_id}");
+
+        // Only emit when the primary actually changes (avoid duplicate events
+        // on repeated device:list messages from the same primary).
+        if !already_set {
+            let is_local = self
+                .config
+                .as_ref()
+                .map(|c| c.device_id == device_id)
+                .unwrap_or(false);
+            self.emit(ElectionEvent::PrimaryElected {
+                device_id: device_id.to_string(),
+                is_local,
+            });
+        }
     }
 
     // ── Election triggers ─────────────────────────────────────────────────
@@ -680,13 +700,14 @@ mod tests {
         assert_eq!(election.phase(), ElectionPhase::Waiting);
         assert!(election.primary_id().is_none());
 
-        let event = rx.try_recv().unwrap();
-        match event {
-            ElectionEvent::PrimaryLost { previous_primary_id } => {
+        let mut found_primary_lost = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ElectionEvent::PrimaryLost { previous_primary_id } = event {
                 assert_eq!(previous_primary_id, "dev-2");
+                found_primary_lost = true;
             }
-            other => panic!("Expected PrimaryLost, got: {other:?}"),
         }
+        assert!(found_primary_lost, "Expected PrimaryLost event");
     }
 
     /// BUG-3: NO event with msg_type "election:timeout" should be broadcast.

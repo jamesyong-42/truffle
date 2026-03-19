@@ -523,6 +523,11 @@ impl TruffleRuntime {
         self.mesh_node.broadcast_envelope(envelope).await;
     }
 
+    /// Get a snapshot of all WebSocket connections (for diagnostics).
+    pub async fn connections(&self) -> Vec<crate::transport::connection::WSConnection> {
+        self.mesh_node.connections().await
+    }
+
     /// Get a handle to the HTTP router for managing routes.
     ///
     /// Returns `None` if the sidecar hasn't been bootstrapped yet

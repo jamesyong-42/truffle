@@ -885,7 +885,7 @@ async fn test_broadcast_message_reaches_all_nodes() {
 
     if let TruffleEvent::Message(msg) = &event {
         assert_eq!(msg.namespace, "test-ns");
-        assert_eq!(msg.msg_type, "ping");
+        assert_eq!(msg.msg_type, "broadcast-test");
         assert_eq!(msg.payload["msg"], "hello from primary");
         eprintln!("Broadcast message received: {:?}", msg.payload);
     }
