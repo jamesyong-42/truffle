@@ -225,10 +225,24 @@ impl TransportHandler {
                     .await
                     .handle_device_list(&msg.from, &payload);
                 if !payload.primary_id.is_empty() {
-                    self.election
-                        .write()
-                        .await
-                        .set_primary(&payload.primary_id);
+                    // Split-brain detection: if we think we're primary but the
+                    // incoming device:list claims a DIFFERENT node is primary,
+                    // trigger a re-election to resolve the conflict.
+                    let we_are_primary = self.election.read().await.is_primary();
+                    if we_are_primary && payload.primary_id != self.config.device_id {
+                        tracing::warn!(
+                            our_id = %self.config.device_id,
+                            their_primary = %payload.primary_id,
+                            "Split-brain detected: both nodes claim primary. Triggering re-election."
+                        );
+                        let mut election = self.election.write().await;
+                        election.start_election();
+                    } else {
+                        self.election
+                            .write()
+                            .await
+                            .set_primary(&payload.primary_id);
+                    }
                 }
             }
             Ok(MeshPayload::DeviceGoodbye(_payload)) => {
