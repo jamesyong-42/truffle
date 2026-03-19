@@ -163,6 +163,8 @@ impl MeshNode {
 
 **Relationship to Tailscale:** Uses Tailscale's peer list for device discovery. Filters peers by hostname prefix to identify truffle nodes belonging to the same application. MagicDNS names are used for connection targets.
 
+**Direct P2P delivery:** Targeted messages (sent to a specific `device_id` via `send_envelope`) should use direct connections when available, bypassing the primary. If the sender has a direct WebSocket connection to the target device, the message is delivered directly over that connection. Only when no direct connection exists should the message route through the primary for relay. Broadcast and fanout messages still go through the primary, which is correct at small scale (<10 nodes). This reduces primary bottleneck for the most common case (device-to-device communication) while keeping the simple STAR topology for coordination.
+
 **Current state:** Fully implemented. `mesh/node.rs`, `mesh/device.rs`, `mesh/election.rs`, `mesh/routing.rs`, `mesh/handler.rs`, `mesh/message_bus.rs`.
 
 ### Layer 4: Application Services
@@ -310,6 +312,20 @@ pub struct PeerInfo {
     pub user_profile: Option<String>,
 }
 ```
+
+**Route precedence and conflict detection:**
+
+Routes are matched using longest-prefix-first ordering. When multiple prefixes could match a request, the longest (most specific) prefix wins. For example, `/api/v2` takes priority over `/api`.
+
+Duplicate prefix registration returns an error:
+
+```rust
+runtime.http().proxy("/api", "localhost:3000").await?;       // OK
+runtime.http().proxy("/api/v2", "localhost:3001").await?;     // OK (more specific, wins for /api/v2/*)
+runtime.http().proxy("/api", "localhost:4000").await?;        // ERROR: prefix "/api" already registered
+```
+
+This prevents silent route shadowing. To change a route's target, explicitly remove the existing route first with `runtime.http().remove_route("/api")`.
 
 ### 3.3 Reverse Proxy
 
@@ -459,7 +475,33 @@ pub struct PwaHandler {
 
 **Primary discovery:** Since PWA browsers connect to a specific node's DNS name, they need to find the primary. The existing `primary:redirect` mechanism handles this: when a PWA connects to a secondary, the secondary sends a redirect message with the primary's DNS name, and the PWA reconnects.
 
-### 3.6 Web Push API
+### 3.6 Browser Entrypoint: Primary Redirect vs Tailscale Services
+
+Two approaches exist for providing a stable browser entrypoint to the truffle mesh. The current design uses the first; the second is a future evolution.
+
+**Current (v1): Primary redirect**
+
+Secondary nodes redirect browsers to the primary node's DNS name. This is simple, requires zero configuration, and works on any personal tailnet immediately.
+
+- Browser visits `https://node-b.tailnet.ts.net/` (a secondary)
+- Secondary responds with a redirect to `https://node-a.tailnet.ts.net/` (the primary)
+- Browser follows the redirect and connects to the primary
+
+Downsides: redirect churn during primary failover (browsers must re-discover the new primary), leaks mesh topology to the browser, and couples browser UX to leadership semantics.
+
+**Future (v2+): Tailscale Services**
+
+Tailscale Services (`tsnet.Server.ListenService`) provide a stable DNS name for a logical service, regardless of which physical node currently serves it. The DNS name resolves to whichever tagged node is currently hosting the service.
+
+- Browser visits `https://my-app.tailnet.ts.net/` (stable service name)
+- Tailscale routes to whichever node is currently the active service host
+- No redirects, no topology leakage
+
+Requirements: tagged devices (`tag:my-app`), ACL configuration granting the service, and Tailscale plan support for Services. This is a better UX but requires explicit Tailscale admin setup, so it is planned for Phase 5+ after the zero-config path is proven.
+
+The two approaches are not mutually exclusive. Primary redirect serves as the default for personal tailnets, while Tailscale Services can be opted into for shared/enterprise tailnets that need stable entrypoints.
+
+### 3.7 Web Push API
 
 Push notifications to connected browser clients using the Web Push protocol (RFC 8030 + RFC 8291 + RFC 8292).
 
@@ -538,7 +580,7 @@ impl PushManager {
 
 **VAPID key management:** On first run, truffle generates an ECDSA P-256 key pair and stores it at the configured path. The public key is served to browsers so they can subscribe. The private key is used to sign push messages.
 
-### 3.7 HTTP Layer: Sidecar Changes Required
+### 3.8 HTTP Layer: Sidecar Changes Required
 
 The current sidecar needs one change for the HTTP layer: port 443 connections must be routed based on HTTP path, not always assumed to be WebSocket.
 
@@ -640,24 +682,53 @@ pub enum ShimLifecycleEvent {
 }
 ```
 
-### 4.2 Critical: Replace resolvePeerDNS with WhoIs
+### 4.2 Critical: WhoIs as the Identity Primitive
 
-**Problem:** `resolvePeerDNS()` calls `lc.Status(ctx)` with full peer enumeration on every incoming connection. This is O(n) in peer count per connection.
+WhoIs is the **identity foundation** for truffle. Every incoming connection, HTTP request, bus message, and file transfer should carry a `PeerIdentity` derived from WhoIs. This is not just a performance fix (replacing O(n) `Status()` calls with O(1) lookups) -- it is a security and design primitive that makes Tailscale's identity data available throughout the entire stack.
 
-**Solution:** Replace with `lc.WhoIs(ctx, remoteAddr)`, a purpose-built O(1) lookup.
+**Problem:** `resolvePeerDNS()` calls `lc.Status(ctx)` with full peer enumeration on every incoming connection. This is O(n) in peer count per connection, and it discards the rich identity data that Tailscale provides.
+
+**Solution:** Replace with `lc.WhoIs(ctx, remoteAddr)` and propagate the full identity through bridge headers into Rust.
 
 ```go
-func (s *shim) resolvePeerDNS(lc *tailscale.LocalClient, remoteAddr string) string {
+func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) (*PeerIdentity, error) {
     whois, err := lc.WhoIs(s.ctx, remoteAddr)
     if err != nil {
-        log.Printf("WhoIs failed for %s: %v", remoteAddr, err)
-        return ""
+        return nil, fmt.Errorf("WhoIs failed for %s: %w", remoteAddr, err)
     }
-    return strings.TrimSuffix(whois.Node.Name, ".")
+    return &PeerIdentity{
+        NodeID:       string(whois.Node.ID),
+        UserID:       string(whois.UserProfile.ID),
+        UserLogin:    whois.UserProfile.LoginName,
+        DisplayName:  whois.UserProfile.DisplayName,
+        TailscaleIPs: whois.Node.Addresses, // []netip.Prefix
+        DNSName:      strings.TrimSuffix(whois.Node.Name, "."),
+        OS:           whois.Node.Hostinfo.OS(),
+        Tags:         whois.Node.Tags,
+        IsTagged:     len(whois.Node.Tags) > 0, // tagged nodes have no user
+    }, nil
 }
 ```
 
-**Bonus:** `WhoIs` also returns `UserProfile` and `Node` info, which could be included in the bridge header for Rust-side authorization in the future.
+**Rust-side identity struct (derived from bridge headers):**
+
+```rust
+pub struct PeerIdentity {
+    pub node_id: String,
+    pub user_id: String,
+    pub user_login: String,
+    pub display_name: String,
+    pub tailscale_ips: Vec<String>,
+    pub dns_name: String,
+    pub os: Option<String>,
+    pub tags: Vec<String>,
+    pub is_tagged: bool,  // tagged nodes have no user
+}
+```
+
+This identity flows through bridge headers to Rust for **all connection types**: WebSocket mesh connections, HTTP requests, file transfer data channels, and bus messages. Every handler in the stack receives a `PeerIdentity` alongside the request data.
+
+**Authorization hooks:** A full authorization hook framework (per-route `authorize_http(peer, route)`, per-namespace `authorize_bus(peer, namespace, msg_type)`, per-transfer `authorize_file_transfer(peer, file_meta)`) is deferred to a future RFC. However, the identity data is available immediately for apps to implement their own authorization checks in handlers.
 
 ### 4.3 Critical: Graceful Shutdown with Listener Cleanup
 
@@ -738,6 +809,60 @@ if d.Ephemeral {
 Replace the polling loop in `monitorState()` with `WatchIPNBus()` for real-time state change notifications. This eliminates the 60-second polling window and gives instant detection of key expiry, peer changes, and network events.
 
 This is a Priority 3 improvement -- the polling approach works correctly, `WatchIPNBus` is an optimization.
+
+### 4.7 Should Have: AdvertiseTags Support
+
+Apps can optionally declare Tailscale tags to enable tag-based peer discovery and policy:
+
+```rust
+let runtime = TruffleRuntime::builder()
+    .hostname("my-app")
+    .tags(vec!["tag:truffle", "tag:my-app"])
+    // ...
+    .build()?;
+```
+
+This sets `s.server.AdvertiseTags` in the Go sidecar before calling `s.server.Start()`:
+
+```go
+if len(d.Tags) > 0 {
+    s.server.AdvertiseTags = d.Tags
+}
+```
+
+**Why tags matter:**
+
+- On shared or enterprise tailnets, hostname-prefix discovery may collide with other apps or users. Tag-based peer filtering (`tag:my-app`) provides a stronger grouping boundary.
+- Tags enable Tailscale ACL rules that restrict which nodes can communicate with truffle instances (e.g., `"src": ["tag:my-app"], "dst": ["tag:my-app:*"]`).
+- Tagged devices can use pre-approved auth keys with key expiry disabled, which is ideal for service-like truffle nodes.
+- Tags are required for Tailscale Services (see Section 3.6).
+
+**Important caveats:**
+
+- Tags require corresponding ACL rules in the Tailscale admin console. Without ACL entries, tagged nodes cannot communicate.
+- Default behavior (hostname-prefix discovery) remains unchanged for zero-config single-user tailnets where tags are unnecessary.
+- Tags are set at node startup and cannot be changed at runtime (Tailscale limitation).
+
+### 4.8 Hostname Privacy and Certificate Transparency
+
+Tailscale HTTPS certificates are issued by Let's Encrypt, which logs all certificates to public **Certificate Transparency (CT) logs**. This means node hostnames like `james-macbook-vibe-ctl.tail12345.ts.net` become publicly discoverable via CT log search tools (e.g., crt.sh), even though the services themselves are not accessible outside the tailnet.
+
+**Recommendation:** Use neutral, non-identifying hostnames that do not reveal usernames, device names, or application purpose to external observers.
+
+| Avoid | Prefer |
+|-------|--------|
+| `james-laptop-vibe-ctl` | `vctl-a1b2c3d4` |
+| `macbook-pro-truffle` | `trf-node-7f3e` |
+| `home-server-fondue` | `fnd-x9k2m` |
+
+The `TruffleRuntime::builder().hostname()` documentation should warn about CT log exposure and recommend generated or opaque hostnames. A helper function could generate suitable hostnames:
+
+```rust
+// Generates a hostname like "myapp-a1b2c3d4" from app prefix + random suffix
+let hostname = truffle_core::util::generate_hostname("myapp");
+```
+
+This is especially important because truffle is designed around HTTPS entrypoints on port 443, meaning every truffle node will have a publicly logged certificate.
 
 ---
 
@@ -852,10 +977,14 @@ let runtime = TruffleRuntime::builder()
     // Optional
     .auth_key("tskey-auth-xxx")
     .ephemeral(false)
-    .prefer_primary(true)
+    /// Marks this node as a preferred candidate for primary election.
+    /// Affects election priority, not routing behavior.
+    .primary_candidate(true)
     .device_name("My Laptop")
     .device_type("desktop")
-    .capabilities(vec!["pty", "file-transfer"])
+    /// App-level feature advertisements, NOT Tailscale capabilities.
+    /// Peers use these to discover what this node supports.
+    .features(vec!["pty", "file-transfer"])
 
     // Timing (all optional with sane defaults)
     .heartbeat_interval(Duration::from_secs(2))
@@ -1104,7 +1233,7 @@ if runtime.is_primary() {
 }
 
 // Get DNS name (for constructing URLs)
-if let Some(dns) = runtime.dns_name() {
+if let Some(dns) = runtime.node_dns_name() {
     println!("Access me at https://{dns}");
 }
 ```
@@ -1395,13 +1524,15 @@ Truffle's design ensures it serves vibe-ctl (terminal monitoring, session sharin
 | `Listen ":9417"` | File transfer data plane |
 | `Dial(ctx, "tcp", addr)` | Outgoing connections to peers |
 | `LocalClient.Status()` | Peer discovery |
-| `LocalClient.WhoIs()` | Incoming connection identification (planned) |
+| `LocalClient.WhoIs()` | Identity primitive for all incoming connections (Section 4.2) |
 | `LocalClient.StatusWithoutPeers()` | Health monitoring (planned) |
 | MagicDNS | Addressing (`hostname.tailnet.ts.net`) |
 | WireGuard tunnels | All traffic encrypted, zero config |
 | DERP relays | Fallback when direct connections fail |
-| Auto-certs (Let's Encrypt) | HTTPS on port 443 |
-| ACLs + Tags | Node-level access control (planned) |
+| Auto-certs (Let's Encrypt) | HTTPS on port 443 (see Section 4.8 re: CT log privacy) |
+| ACLs + Tags | Node-level access control, peer filtering (Section 4.7) |
+| `AdvertiseTags` | Optional tag-based discovery and policy (Section 4.7) |
+| Services (`ListenService`) | Stable browser entrypoint, future (Section 3.6) |
 
 ## Appendix C: Wire Protocol Summary
 
