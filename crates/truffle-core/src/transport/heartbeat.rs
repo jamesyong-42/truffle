@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
+use crate::protocol::frame::ControlMessage;
+
 /// Default ping interval (2 seconds, matching TypeScript DEFAULT_HEARTBEAT_PING_INTERVAL_MS).
 pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -26,7 +28,7 @@ impl Default for HeartbeatConfig {
     }
 }
 
-/// A ping message to send over the WebSocket.
+/// A ping message to send over the WebSocket (v2 legacy format).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PingMessage {
     #[serde(rename = "type")]
@@ -34,7 +36,7 @@ pub struct PingMessage {
     pub timestamp: u64,
 }
 
-/// A pong message sent in response to a ping.
+/// A pong message sent in response to a ping (v2 legacy format).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PongMessage {
     #[serde(rename = "type")]
@@ -47,9 +49,14 @@ pub struct PongMessage {
 /// Check if a JSON value is a heartbeat message (ping or pong).
 /// Returns true if the message was handled as a heartbeat.
 ///
-/// Heartbeat messages are bare `{"type":"ping","timestamp":…}` or
-/// `{"type":"pong","timestamp":…,"echoTimestamp":…}` objects.  They never
-/// have a `"namespace"` field, which every `MeshEnvelope` does — so we
+/// This is used for **v2 legacy** heartbeat detection. In v3, heartbeats are
+/// structurally identified by the `FrameType::Control` byte and do not need
+/// content inspection. This function is still needed to handle Legacy frames
+/// from old v2 nodes during the migration period.
+///
+/// Heartbeat messages are bare `{"type":"ping","timestamp":...}` or
+/// `{"type":"pong","timestamp":...,"echoTimestamp":...}` objects.  They never
+/// have a `"namespace"` field, which every `MeshEnvelope` does -- so we
 /// require the absence of `"namespace"` to avoid falsely swallowing
 /// application envelopes whose `msg_type` happens to be `"ping"`.
 pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
@@ -64,7 +71,10 @@ pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Create a ping message as a JSON value.
+/// Create a v2 legacy ping message as a JSON value.
+///
+/// Kept for backward compatibility. New code should use `create_v3_ping()`
+/// which returns a `ControlMessage`.
 pub fn create_ping() -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -77,7 +87,10 @@ pub fn create_ping() -> serde_json::Value {
     })
 }
 
-/// Create a pong message responding to a ping.
+/// Create a v2 legacy pong message responding to a ping.
+///
+/// Kept for backward compatibility. New code should use `create_v3_pong()`
+/// which returns a `ControlMessage`.
 pub fn create_pong(ping_timestamp: u64) -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,6 +102,33 @@ pub fn create_pong(ping_timestamp: u64) -> serde_json::Value {
         "timestamp": now,
         "echoTimestamp": ping_timestamp
     })
+}
+
+// ---------------------------------------------------------------------------
+// v3 heartbeat helpers (RFC 009 Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Get the current timestamp in milliseconds since epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Create a v3 `ControlMessage::Ping`.
+pub fn create_v3_ping() -> ControlMessage {
+    ControlMessage::Ping {
+        timestamp: now_ms(),
+    }
+}
+
+/// Create a v3 `ControlMessage::Pong` responding to a ping timestamp.
+pub fn create_v3_pong(ping_timestamp: u64) -> ControlMessage {
+    ControlMessage::Pong {
+        timestamp: now_ms(),
+        echo_timestamp: ping_timestamp,
+    }
 }
 
 /// Tracks heartbeat state for a connection.
@@ -129,7 +169,7 @@ impl HeartbeatTracker {
 /// Run a heartbeat loop for a connection.
 ///
 /// Periodically checks if we need to send a ping, and detects timeouts.
-/// Sends encoded ping messages via `write_tx` and signals timeout via return.
+/// Sends v3 control frame pings via `write_tx` and signals timeout via return.
 ///
 /// Returns `Ok(())` if the activity channel is closed (connection cleaned up).
 /// Returns `Err(())` if heartbeat timeout is detected.
@@ -153,9 +193,9 @@ pub async fn heartbeat_loop(
                     return Err(HeartbeatTimeout);
                 }
 
-                // Send ping
-                let ping = create_ping();
-                match super::websocket::encode_message(&ping, false) {
+                // Send v3 control frame ping (RFC 009 Phase 2)
+                let ping = create_v3_ping();
+                match super::websocket::encode_control_frame(&ping, false) {
                     Ok(encoded) => {
                         if write_tx.send(encoded).await.is_err() {
                             // Write channel closed — connection is gone
@@ -163,7 +203,7 @@ pub async fn heartbeat_loop(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("failed to encode ping: {e}");
+                        tracing::warn!("failed to encode v3 ping: {e}");
                     }
                 }
             }
@@ -427,6 +467,117 @@ mod tests {
         assert!(
             result.is_ok(),
             "heartbeat should not have timed out with continuous activity"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v3 heartbeat tests (RFC 009 Phase 2)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v3_ping_has_timestamp() {
+        let ping = create_v3_ping();
+        match ping {
+            ControlMessage::Ping { timestamp } => {
+                assert!(timestamp > 0, "timestamp should be non-zero");
+            }
+            other => panic!("expected Ping, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_pong_echoes_timestamp() {
+        let ping = create_v3_ping();
+        let ping_ts = match ping {
+            ControlMessage::Ping { timestamp } => timestamp,
+            _ => panic!("not a ping"),
+        };
+
+        let pong = create_v3_pong(ping_ts);
+        match pong {
+            ControlMessage::Pong {
+                timestamp,
+                echo_timestamp,
+            } => {
+                assert_eq!(echo_timestamp, ping_ts);
+                assert!(timestamp >= ping_ts, "pong timestamp should be >= ping timestamp");
+            }
+            other => panic!("expected Pong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_ping_encode_decode_roundtrip() {
+        use super::super::websocket::{decode_frame, encode_control_frame, DecodedFrame};
+
+        let ping = create_v3_ping();
+        let encoded = encode_control_frame(&ping, false).unwrap();
+
+        // Verify v3 frame header
+        assert_eq!(encoded[0], 0x01); // FrameType::Control
+        assert_eq!(encoded[1], 0x00); // msgpack flags
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, ping),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_pong_encode_decode_roundtrip() {
+        use super::super::websocket::{decode_frame, encode_control_frame, DecodedFrame};
+
+        let pong = create_v3_pong(1234567890);
+        let encoded = encode_control_frame(&pong, true).unwrap();
+
+        assert_eq!(encoded[0], 0x01); // FrameType::Control
+        assert_eq!(encoded[1], 0x01); // JSON flags
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, pong),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_sends_v3_control_frames() {
+        // Verify that the heartbeat loop sends v3 control frames (not v2).
+        use super::super::websocket::{decode_frame, DecodedFrame};
+
+        let config = HeartbeatConfig {
+            ping_interval: Duration::from_millis(10),
+            timeout: Duration::from_millis(200),
+        };
+
+        let (write_tx, mut write_rx) = mpsc::channel(256);
+        let (activity_tx, activity_rx) = mpsc::channel(64);
+
+        // Spawn the heartbeat loop
+        let hb_handle = tokio::spawn(heartbeat_loop(config, write_tx, activity_rx));
+
+        // Wait a bit for some pings to be sent
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drop to stop the loop
+        drop(activity_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), hb_handle).await;
+
+        // Verify at least one ping was sent as a v3 control frame
+        let mut v3_ping_count = 0;
+        while let Ok(data) = write_rx.try_recv() {
+            match decode_frame(&data) {
+                Ok(DecodedFrame::V3Control(ControlMessage::Ping { timestamp })) => {
+                    assert!(timestamp > 0);
+                    v3_ping_count += 1;
+                }
+                other => panic!("expected v3 control ping, got {other:?}"),
+            }
+        }
+        assert!(
+            v3_ping_count > 0,
+            "heartbeat loop should have sent at least one v3 ping"
         );
     }
 }

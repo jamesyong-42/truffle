@@ -275,30 +275,47 @@ async fn test_ws_heartbeat_keeps_connection_alive() {
 
     // Spawn a client-side responder: reads pings, sends pongs back.
     // This keeps the connection alive by providing activity.
+    // Handles both v3 control frame pings and v2 legacy pings.
     let responder = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_ws.next().await {
             if let Message::Binary(data) = &msg {
-                if let Ok(decoded) = websocket::decode_message(data) {
-                    if decoded
-                        .payload
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        == Some("ping")
-                    {
-                        let ts = decoded
-                            .payload
-                            .get("timestamp")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let pong = truffle_core::transport::heartbeat::create_pong(ts);
-                        let encoded = websocket::encode_message(&pong, false).unwrap();
-                        if client_ws
-                            .send(Message::Binary(bytes::Bytes::from(encoded)))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                if let Ok(decoded) = websocket::decode_frame(data) {
+                    match decoded {
+                        // v3 control frame ping
+                        websocket::DecodedFrame::V3Control(
+                            truffle_core::protocol::frame::ControlMessage::Ping { timestamp },
+                        ) => {
+                            let pong = truffle_core::transport::heartbeat::create_v3_pong(timestamp);
+                            let encoded = websocket::encode_control_frame(&pong, false).unwrap();
+                            if client_ws
+                                .send(Message::Binary(bytes::Bytes::from(encoded)))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
+                        // v2 legacy ping
+                        websocket::DecodedFrame::Legacy(ref wire_msg)
+                            if wire_msg.payload.get("type").and_then(|t| t.as_str())
+                                == Some("ping") =>
+                        {
+                            let ts = wire_msg
+                                .payload
+                                .get("timestamp")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let pong = truffle_core::transport::heartbeat::create_pong(ts);
+                            let encoded = websocket::encode_message(&pong, false).unwrap();
+                            if client_ws
+                                .send(Message::Binary(bytes::Bytes::from(encoded)))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1427,16 +1444,30 @@ async fn test_edge_heartbeat_very_short_interval() {
     .await;
 
     // Respond to a few pings to keep the connection alive briefly,
-    // proving the fast heartbeat doesn't spin or crash
+    // proving the fast heartbeat doesn't spin or crash.
+    // Handles both v3 control frame pings and v2 legacy pings.
     let responder = tokio::spawn(async move {
         let mut pong_count = 0u32;
         while let Some(Ok(msg)) = client_ws.next().await {
             if let Message::Binary(data) = &msg {
-                if let Ok(decoded) = websocket::decode_message(data) {
-                    if decoded.payload.get("type").and_then(|t| t.as_str()) == Some("ping") {
-                        let ts = decoded.payload.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let pong = truffle_core::transport::heartbeat::create_pong(ts);
-                        let encoded = websocket::encode_message(&pong, false).unwrap();
+                if let Ok(decoded) = websocket::decode_frame(data) {
+                    let is_ping = match &decoded {
+                        // v3 control frame ping
+                        websocket::DecodedFrame::V3Control(
+                            truffle_core::protocol::frame::ControlMessage::Ping { timestamp },
+                        ) => Some(*timestamp),
+                        // v2 legacy ping
+                        websocket::DecodedFrame::Legacy(wire_msg)
+                            if wire_msg.payload.get("type").and_then(|t| t.as_str())
+                                == Some("ping") =>
+                        {
+                            wire_msg.payload.get("timestamp").and_then(|v| v.as_u64())
+                        }
+                        _ => None,
+                    };
+                    if let Some(ts) = is_ping {
+                        let pong = truffle_core::transport::heartbeat::create_v3_pong(ts);
+                        let encoded = websocket::encode_control_frame(&pong, false).unwrap();
                         if client_ws.send(Message::Binary(bytes::Bytes::from(encoded))).await.is_err() {
                             break;
                         }

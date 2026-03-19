@@ -13,9 +13,11 @@ use tokio_tungstenite::WebSocketStream;
 use crate::bridge::header::Direction;
 use crate::bridge::manager::BridgeConnection;
 
+use crate::protocol::frame::ControlMessage;
+
 use super::heartbeat::{self, HeartbeatConfig, HeartbeatTimeout};
 use super::reconnect::ReconnectTarget;
-use super::websocket::{self, WireMessage, WsError};
+use super::websocket::{self, DecodedFrame, WireMessage, WsError};
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,7 +277,7 @@ impl ConnectionManager {
 
         // Channels
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>(256);
-        let (msg_tx, mut msg_rx) = mpsc::channel::<WireMessage>(256);
+        let (msg_tx, mut msg_rx) = mpsc::channel::<DecodedFrame>(256);
         let (activity_tx, activity_rx) = mpsc::channel::<()>(64);
 
         let active_conn = ActiveConnection {
@@ -321,35 +323,94 @@ impl ConnectionManager {
             });
             let heartbeat_abort = heartbeat_handle.abort_handle();
 
-            // Message forwarding loop
+            // Message forwarding loop — handles both v2 and v3 frames
             let conn_id_msg = conn_id_r.clone();
             let event_tx_msg = event_tx.clone();
             let msg_forward = tokio::spawn(async move {
-                while let Some(msg) = msg_rx.recv().await {
-                    // Record activity for heartbeat
+                while let Some(frame) = msg_rx.recv().await {
+                    // Record activity for heartbeat on every received frame
                     let _ = activity_tx.send(()).await;
 
-                    // Check if it's a heartbeat message
-                    if heartbeat::is_heartbeat_message(&msg.payload) {
-                        if let Some(ts) = msg.payload.get("timestamp").and_then(|v| v.as_u64()) {
-                            if msg.payload.get("type").and_then(|v| v.as_str()) == Some("ping") {
-                                let pong = heartbeat::create_pong(ts);
-                                let conns = connections_for_pong.read().await;
-                                if let Some(ac) = conns.get(&conn_id_msg) {
-                                    if let Ok(encoded) = websocket::encode_message(&pong, false) {
-                                        let _ = ac.write_tx.send(encoded).await;
-                                    }
+                    match frame {
+                        // --- v3 control frames (RFC 009 Phase 2) ---
+                        DecodedFrame::V3Control(ControlMessage::Ping { timestamp }) => {
+                            // Respond with a v3 pong, echoing the sender's encoding
+                            let pong = heartbeat::create_v3_pong(timestamp);
+                            let conns = connections_for_pong.read().await;
+                            if let Some(ac) = conns.get(&conn_id_msg) {
+                                if let Ok(encoded) =
+                                    websocket::encode_control_frame(&pong, false)
+                                {
+                                    let _ = ac.write_tx.send(encoded).await;
                                 }
                             }
                         }
-                        continue;
-                    }
+                        DecodedFrame::V3Control(ControlMessage::Pong { .. }) => {
+                            // Activity already recorded above; nothing else to do.
+                        }
+                        DecodedFrame::V3Control(ctrl) => {
+                            // Handshake / HandshakeAck — not handled in Phase 2,
+                            // will be wired up in Phase 4.
+                            tracing::debug!(
+                                connection_id = %conn_id_msg,
+                                "received v3 control message (not yet handled): {ctrl:?}"
+                            );
+                        }
 
-                    // Forward application message
-                    let _ = event_tx_msg.send(TransportEvent::Message {
-                        connection_id: conn_id_msg.clone(),
-                        message: msg,
-                    });
+                        // --- v3 data frames ---
+                        DecodedFrame::V3Data { payload, was_json } => {
+                            let msg = WireMessage { payload, was_json };
+                            let _ = event_tx_msg.send(TransportEvent::Message {
+                                connection_id: conn_id_msg.clone(),
+                                message: msg,
+                            });
+                        }
+
+                        // --- v3 error frames ---
+                        DecodedFrame::V3Error(error) => {
+                            tracing::warn!(
+                                connection_id = %conn_id_msg,
+                                code = %error.code,
+                                fatal = error.fatal,
+                                "received protocol error from peer: {}",
+                                error.message
+                            );
+                            // If fatal, the peer will close. We just log it.
+                        }
+
+                        // --- v2 legacy frames ---
+                        DecodedFrame::Legacy(msg) => {
+                            // Check for v2 heartbeat using content inspection
+                            if heartbeat::is_heartbeat_message(&msg.payload) {
+                                if let Some(ts) =
+                                    msg.payload.get("timestamp").and_then(|v| v.as_u64())
+                                {
+                                    if msg.payload.get("type").and_then(|v| v.as_str())
+                                        == Some("ping")
+                                    {
+                                        // Respond with v3 pong (new nodes always
+                                        // respond with v3 control frames)
+                                        let pong = heartbeat::create_v3_pong(ts);
+                                        let conns = connections_for_pong.read().await;
+                                        if let Some(ac) = conns.get(&conn_id_msg) {
+                                            if let Ok(encoded) =
+                                                websocket::encode_control_frame(&pong, false)
+                                            {
+                                                let _ = ac.write_tx.send(encoded).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Forward v2 application message
+                            let _ = event_tx_msg.send(TransportEvent::Message {
+                                connection_id: conn_id_msg.clone(),
+                                message: msg,
+                            });
+                        }
+                    }
                 }
             });
 

@@ -7,10 +7,12 @@ use tokio_tungstenite::tungstenite::{
 };
 use tokio_tungstenite::WebSocketStream;
 
+use crate::protocol::frame::{ControlMessage, Flags, FrameType, ProtocolError, WireError};
+
 /// Maximum WebSocket message size (16 MB, matching old FrameCodec MAX_MESSAGE_SIZE).
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// 1-byte flags prefix on WS binary payload.
+/// 1-byte flags prefix on WS binary payload (v2 protocol).
 pub const FLAG_FORMAT_MSGPACK: u8 = 0x00;
 pub const FLAG_FORMAT_JSON: u8 = 0x02;
 
@@ -40,6 +42,12 @@ pub enum WsError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("v3 wire error: {0}")]
+    Wire(#[from] WireError),
+
+    #[error("v3 frame too short: need at least 2 bytes, got {0}")]
+    FrameTooShort(usize),
 }
 
 /// A decoded mesh message from the wire.
@@ -49,6 +57,182 @@ pub struct WireMessage {
     pub payload: serde_json::Value,
     /// Whether this was received as JSON (debug mode) or MessagePack.
     pub was_json: bool,
+}
+
+// ---------------------------------------------------------------------------
+// v3 frame types (RFC 009 Phase 2)
+// ---------------------------------------------------------------------------
+
+/// A decoded frame from the wire, supporting both v2 (legacy) and v3 formats.
+///
+/// The `decode_frame` function detects the protocol version by inspecting byte 0:
+/// - `0x01`, `0x02`, `0x03` -> v3 frame (2-byte header + payload)
+/// - Anything else -> v2 legacy frame (1-byte flags + payload)
+#[derive(Debug, Clone)]
+pub enum DecodedFrame {
+    /// v3 control frame (heartbeat ping/pong, handshake, etc.).
+    V3Control(ControlMessage),
+    /// v3 data frame (MeshEnvelope payload).
+    V3Data {
+        payload: serde_json::Value,
+        was_json: bool,
+    },
+    /// v3 error frame (protocol-level error from peer).
+    V3Error(ProtocolError),
+    /// Legacy v2 frame (old 1-byte flags format). Backward compatibility.
+    Legacy(WireMessage),
+}
+
+// ---------------------------------------------------------------------------
+// v3 encode functions
+// ---------------------------------------------------------------------------
+
+/// Encode a v3 frame with the given frame type, flags, and raw payload bytes.
+///
+/// Produces: `[frame_type_byte, flags_byte, ...payload]`
+pub fn encode_v3_frame(frame_type: FrameType, flags: Flags, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(2 + payload.len());
+    buf.push(frame_type as u8);
+    buf.push(flags.as_byte());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+/// Encode a v3 data frame containing a `serde_json::Value` payload.
+///
+/// Produces: `[0x02, flags, msgpack_or_json(value)]`
+pub fn encode_data_frame(value: &serde_json::Value, use_json: bool) -> Result<Vec<u8>, WsError> {
+    let flags = Flags::new(use_json);
+    let payload = encode_payload_bytes(value, use_json)?;
+    Ok(encode_v3_frame(FrameType::Data, flags, &payload))
+}
+
+/// Encode a v3 control frame from a `ControlMessage`.
+///
+/// Produces: `[0x01, flags, msgpack_or_json(control_msg)]`
+pub fn encode_control_frame(msg: &ControlMessage, use_json: bool) -> Result<Vec<u8>, WsError> {
+    let flags = Flags::new(use_json);
+    let payload = if use_json {
+        serde_json::to_vec(msg)?
+    } else {
+        rmp_serde::to_vec_named(msg)?
+    };
+    Ok(encode_v3_frame(FrameType::Control, flags, &payload))
+}
+
+/// Encode a v3 error frame from a `ProtocolError`.
+///
+/// Produces: `[0x03, flags, msgpack_or_json(error)]`
+pub fn encode_error_frame(error: &ProtocolError, use_json: bool) -> Result<Vec<u8>, WsError> {
+    let flags = Flags::new(use_json);
+    let payload = if use_json {
+        serde_json::to_vec(error)?
+    } else {
+        rmp_serde::to_vec_named(error)?
+    };
+    Ok(encode_v3_frame(FrameType::Error, flags, &payload))
+}
+
+// ---------------------------------------------------------------------------
+// v3 decode functions
+// ---------------------------------------------------------------------------
+
+/// Decode a binary WebSocket message, accepting both v2 and v3 formats.
+///
+/// Detection logic:
+/// - If byte 0 is `0x01`, `0x02`, or `0x03` -> v3 frame (2-byte header).
+/// - Otherwise -> v2 legacy frame (1-byte flags).
+///
+/// This allows old v2 nodes and new v3 nodes to coexist during migration.
+pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, WsError> {
+    if data.is_empty() {
+        return Err(WsError::EmptyBinaryFrame);
+    }
+
+    let first_byte = data[0];
+
+    // v3 detection: byte 0 is a known FrameType (0x01, 0x02, 0x03).
+    // v2 frames use byte 0 as flags where bits 1-2 encode the format:
+    //   0x00 = msgpack, 0x02 = json. Neither 0x01 nor 0x03 are valid v2 flags.
+    // So 0x01 and 0x03 unambiguously indicate v3.
+    // 0x02 is ambiguous (could be v2 JSON or v3 Data frame), but we resolve this
+    // by checking if the frame has at least 2 bytes and byte 1 is a valid v3 Flags
+    // byte (0x00 or 0x01). For v2 JSON, byte 1 would be the start of the JSON
+    // payload (typically '{' = 0x7B), which has reserved bits set and would fail
+    // Flags::from_byte. So we try v3 first for 0x02; if flags parsing fails, fall
+    // back to v2.
+    match first_byte {
+        0x01 | 0x03 => decode_v3_frame(data),
+        0x02 => {
+            // Ambiguous: could be v3 Data or v2 JSON.
+            // Try v3 first — if flags byte (data[1]) passes reserved-bits check,
+            // treat as v3. Otherwise fall back to v2.
+            if data.len() >= 2 {
+                if let Ok(_flags) = Flags::from_byte(data[1]) {
+                    return decode_v3_frame(data);
+                }
+            }
+            // Fall back to v2 legacy decode
+            decode_message(data).map(DecodedFrame::Legacy)
+        }
+        _ => {
+            // v2 legacy frame
+            decode_message(data).map(DecodedFrame::Legacy)
+        }
+    }
+}
+
+/// Decode a v3 frame (assumes byte 0 is a valid FrameType).
+fn decode_v3_frame(data: &[u8]) -> Result<DecodedFrame, WsError> {
+    if data.len() < 2 {
+        return Err(WsError::FrameTooShort(data.len()));
+    }
+
+    let frame_type = FrameType::try_from(data[0])?;
+    let flags = Flags::from_byte(data[1])?;
+    let payload_bytes = &data[2..];
+
+    match frame_type {
+        FrameType::Control => {
+            let msg: ControlMessage = if flags.is_json() {
+                serde_json::from_slice(payload_bytes)?
+            } else {
+                rmp_serde::from_slice(payload_bytes)?
+            };
+            Ok(DecodedFrame::V3Control(msg))
+        }
+        FrameType::Data => {
+            let value: serde_json::Value = if flags.is_json() {
+                serde_json::from_slice(payload_bytes)?
+            } else {
+                rmp_serde::from_slice(payload_bytes)?
+            };
+            Ok(DecodedFrame::V3Data {
+                payload: value,
+                was_json: flags.is_json(),
+            })
+        }
+        FrameType::Error => {
+            let error: ProtocolError = if flags.is_json() {
+                serde_json::from_slice(payload_bytes)?
+            } else {
+                rmp_serde::from_slice(payload_bytes)?
+            };
+            Ok(DecodedFrame::V3Error(error))
+        }
+    }
+}
+
+/// Serialize a value to msgpack or JSON bytes (helper for encode functions).
+fn encode_payload_bytes(
+    value: &serde_json::Value,
+    use_json: bool,
+) -> Result<Vec<u8>, WsError> {
+    if use_json {
+        Ok(serde_json::to_vec(value)?)
+    } else {
+        Ok(rmp_serde::to_vec(value)?)
+    }
 }
 
 /// WebSocket configuration for tokio-tungstenite.
@@ -122,7 +306,9 @@ pub enum ReadPumpExit {
 
 /// Run the WebSocket read pump.
 ///
-/// Reads messages from the WS stream and forwards decoded messages to `msg_tx`.
+/// Reads messages from the WS stream and forwards decoded `DecodedFrame`s to
+/// `msg_tx`. Supports both v2 (legacy) and v3 binary frames.
+///
 /// Ping/pong is handled at the protocol level by tokio-tungstenite automatically.
 /// Returns when the connection closes or errors.
 ///
@@ -130,7 +316,7 @@ pub enum ReadPumpExit {
 /// `TokioIo<Upgraded>`, etc.).
 pub async fn read_pump<S>(
     mut read_half: futures_util::stream::SplitStream<WebSocketStream<S>>,
-    msg_tx: mpsc::Sender<WireMessage>,
+    msg_tx: mpsc::Sender<DecodedFrame>,
 ) -> ReadPumpExit
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -141,9 +327,9 @@ where
                 if data.len() > MAX_MESSAGE_SIZE {
                     return ReadPumpExit::Error(WsError::MessageTooLarge(data.len()));
                 }
-                match decode_message(&data) {
-                    Ok(msg) => {
-                        if msg_tx.send(msg).await.is_err() {
+                match decode_frame(&data) {
+                    Ok(frame) => {
+                        if msg_tx.send(frame).await.is_err() {
                             return ReadPumpExit::ClosedByLocal;
                         }
                     }
@@ -154,14 +340,14 @@ where
                 }
             }
             Some(Ok(Message::Text(text))) => {
-                // Legacy text frames: try to parse as JSON
+                // Legacy text frames: try to parse as JSON, wrap as Legacy
                 match serde_json::from_str::<serde_json::Value>(&text) {
                     Ok(payload) => {
-                        let msg = WireMessage {
+                        let frame = DecodedFrame::Legacy(WireMessage {
                             payload,
                             was_json: true,
-                        };
-                        if msg_tx.send(msg).await.is_err() {
+                        });
+                        if msg_tx.send(frame).await.is_err() {
                             return ReadPumpExit::ClosedByLocal;
                         }
                     }
@@ -224,6 +410,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::frame::{ControlMessage, ErrorCode, Flags, FrameType, ProtocolError};
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v2 legacy encode/decode tests (existing, preserved)
+    // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
     fn encode_decode_msgpack_roundtrip() {
@@ -300,5 +491,401 @@ mod tests {
     fn ws_config_max_size() {
         let config = ws_config();
         assert_eq!(config.max_message_size, Some(MAX_MESSAGE_SIZE));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v3 control frame encode/decode roundtrip tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v3_control_ping_msgpack_roundtrip() {
+        let msg = ControlMessage::Ping {
+            timestamp: 1710764400000,
+        };
+        let encoded = encode_control_frame(&msg, false).unwrap();
+        assert_eq!(encoded[0], FrameType::Control as u8);
+        assert_eq!(encoded[1], 0x00); // msgpack flags
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_control_ping_json_roundtrip() {
+        let msg = ControlMessage::Ping {
+            timestamp: 1710764400000,
+        };
+        let encoded = encode_control_frame(&msg, true).unwrap();
+        assert_eq!(encoded[0], FrameType::Control as u8);
+        assert_eq!(encoded[1], 0x01); // json flags
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_control_pong_msgpack_roundtrip() {
+        let msg = ControlMessage::Pong {
+            timestamp: 1710764400001,
+            echo_timestamp: 1710764400000,
+        };
+        let encoded = encode_control_frame(&msg, false).unwrap();
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_control_pong_json_roundtrip() {
+        let msg = ControlMessage::Pong {
+            timestamp: 1710764400001,
+            echo_timestamp: 1710764400000,
+        };
+        let encoded = encode_control_frame(&msg, true).unwrap();
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+            other => panic!("expected V3Control, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_control_handshake_roundtrip() {
+        let msg = ControlMessage::Handshake {
+            protocol_version: 3,
+            device_id: "device-abc".to_string(),
+            capabilities: vec!["mesh".to_string(), "sync".to_string()],
+        };
+        for use_json in [true, false] {
+            let encoded = encode_control_frame(&msg, use_json).unwrap();
+            let decoded = decode_frame(&encoded).unwrap();
+            match decoded {
+                DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+                other => panic!("expected V3Control, got {other:?} (json={use_json})"),
+            }
+        }
+    }
+
+    #[test]
+    fn v3_control_handshake_ack_roundtrip() {
+        let msg = ControlMessage::HandshakeAck {
+            protocol_version: 3,
+            device_id: "device-xyz".to_string(),
+            negotiated_version: 3,
+        };
+        for use_json in [true, false] {
+            let encoded = encode_control_frame(&msg, use_json).unwrap();
+            let decoded = decode_frame(&encoded).unwrap();
+            match decoded {
+                DecodedFrame::V3Control(ctrl) => assert_eq!(ctrl, msg),
+                other => panic!("expected V3Control, got {other:?} (json={use_json})"),
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v3 data frame encode/decode roundtrip tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v3_data_msgpack_roundtrip() {
+        let value = serde_json::json!({
+            "namespace": "mesh",
+            "type": "device-announce",
+            "payload": { "deviceId": "abc123" }
+        });
+        let encoded = encode_data_frame(&value, false).unwrap();
+        assert_eq!(encoded[0], FrameType::Data as u8);
+        assert_eq!(encoded[1], 0x00);
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Data { payload, was_json } => {
+                assert!(!was_json);
+                assert_eq!(payload, value);
+            }
+            other => panic!("expected V3Data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_data_json_roundtrip() {
+        let value = serde_json::json!({
+            "namespace": "mesh",
+            "type": "device-announce",
+            "payload": { "deviceId": "abc123" }
+        });
+        let encoded = encode_data_frame(&value, true).unwrap();
+        assert_eq!(encoded[0], FrameType::Data as u8);
+        assert_eq!(encoded[1], 0x01);
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Data { payload, was_json } => {
+                assert!(was_json);
+                assert_eq!(payload, value);
+            }
+            other => panic!("expected V3Data, got {other:?}"),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v3 error frame encode/decode roundtrip tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v3_error_msgpack_roundtrip() {
+        let error = ProtocolError {
+            code: ErrorCode::MalformedPayload,
+            message: "bad payload".to_string(),
+            fatal: false,
+        };
+        let encoded = encode_error_frame(&error, false).unwrap();
+        assert_eq!(encoded[0], FrameType::Error as u8);
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Error(e) => assert_eq!(e, error),
+            other => panic!("expected V3Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_error_json_roundtrip() {
+        let error = ProtocolError {
+            code: ErrorCode::VersionMismatch,
+            message: "incompatible version".to_string(),
+            fatal: true,
+        };
+        let encoded = encode_error_frame(&error, true).unwrap();
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::V3Error(e) => assert_eq!(e, error),
+            other => panic!("expected V3Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v3_error_all_codes_roundtrip() {
+        let codes = [
+            ErrorCode::UnknownFrameType,
+            ErrorCode::InvalidFlags,
+            ErrorCode::MalformedPayload,
+            ErrorCode::UnknownNamespace,
+            ErrorCode::UnknownMessageType,
+            ErrorCode::VersionMismatch,
+            ErrorCode::MessageTooLarge,
+            ErrorCode::RateLimited,
+        ];
+        for code in codes {
+            for use_json in [true, false] {
+                let error = ProtocolError {
+                    code,
+                    message: format!("test {code}"),
+                    fatal: false,
+                };
+                let encoded = encode_error_frame(&error, use_json).unwrap();
+                let decoded = decode_frame(&encoded).unwrap();
+                match decoded {
+                    DecodedFrame::V3Error(e) => assert_eq!(e.code, code),
+                    other => panic!("expected V3Error for {code:?}, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // decode_frame backward compatibility: v2 frames decoded as Legacy
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn decode_frame_v2_msgpack_as_legacy() {
+        let value = serde_json::json!({
+            "namespace": "mesh",
+            "type": "announce",
+            "payload": { "deviceId": "abc123" }
+        });
+        // v2 msgpack: byte 0 = 0x00
+        let encoded = encode_message(&value, false).unwrap();
+        assert_eq!(encoded[0], 0x00);
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::Legacy(msg) => {
+                assert!(!msg.was_json);
+                assert_eq!(msg.payload, value);
+            }
+            other => panic!("expected Legacy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_frame_v2_json_as_legacy() {
+        let value = serde_json::json!({
+            "namespace": "mesh",
+            "type": "announce",
+            "payload": { "deviceId": "abc123" }
+        });
+        // v2 JSON: byte 0 = 0x02, byte 1 = '{' (0x7B)
+        let encoded = encode_message(&value, true).unwrap();
+        assert_eq!(encoded[0], 0x02);
+        // byte 1 is '{' = 0x7B which has reserved bits set, so Flags::from_byte
+        // will fail, causing decode_frame to fall back to v2 Legacy.
+        assert_eq!(encoded[1], b'{');
+
+        let decoded = decode_frame(&encoded).unwrap();
+        match decoded {
+            DecodedFrame::Legacy(msg) => {
+                assert!(msg.was_json);
+                assert_eq!(msg.payload, value);
+            }
+            other => panic!("expected Legacy for v2 JSON, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_frame_empty() {
+        let err = decode_frame(&[]).unwrap_err();
+        assert!(matches!(err, WsError::EmptyBinaryFrame));
+    }
+
+    #[test]
+    fn decode_frame_single_byte() {
+        // A single byte 0x01 is too short for a v3 frame (needs at least 2)
+        let err = decode_frame(&[0x01]).unwrap_err();
+        assert!(matches!(err, WsError::FrameTooShort(1)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // v3 frame header validation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v3_frame_reserved_bits_rejected() {
+        // Control frame with reserved bits set in flags byte
+        let data = vec![0x01, 0x02, 0x00]; // flags=0x02 has bit 1 set
+        let err = decode_frame(&data).unwrap_err();
+        assert!(
+            matches!(err, WsError::Wire(WireError::ReservedBitsSet(0x02))),
+            "expected ReservedBitsSet, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn v3_encode_frame_raw_structure() {
+        let flags = Flags::new(false);
+        let payload = b"hello";
+        let frame = encode_v3_frame(FrameType::Data, flags, payload);
+        assert_eq!(frame[0], 0x02); // Data
+        assert_eq!(frame[1], 0x00); // msgpack
+        assert_eq!(&frame[2..], b"hello");
+    }
+
+    #[test]
+    fn v3_data_frame_empty_payload() {
+        // An empty JSON object
+        let value = serde_json::json!({});
+        for use_json in [true, false] {
+            let encoded = encode_data_frame(&value, use_json).unwrap();
+            let decoded = decode_frame(&encoded).unwrap();
+            match decoded {
+                DecodedFrame::V3Data { payload, .. } => assert_eq!(payload, value),
+                other => panic!("expected V3Data, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn v3_control_frame_pong_echoes_encoding() {
+        // Encode ping as JSON, decode, create pong, encode pong with same encoding
+        let ping = ControlMessage::Ping {
+            timestamp: 12345,
+        };
+        let encoded_ping = encode_control_frame(&ping, true).unwrap();
+        assert_eq!(encoded_ping[1], 0x01); // JSON flags
+
+        // Decode and check
+        let decoded = decode_frame(&encoded_ping).unwrap();
+        let was_json = encoded_ping[1] == 0x01; // echo the flags
+        match decoded {
+            DecodedFrame::V3Control(ControlMessage::Ping { timestamp }) => {
+                let pong = ControlMessage::Pong {
+                    timestamp: 12346,
+                    echo_timestamp: timestamp,
+                };
+                // Pong should be sent with the same encoding as the ping
+                let encoded_pong = encode_control_frame(&pong, was_json).unwrap();
+                assert_eq!(encoded_pong[1], 0x01); // same JSON flags
+                let decoded_pong = decode_frame(&encoded_pong).unwrap();
+                match decoded_pong {
+                    DecodedFrame::V3Control(ControlMessage::Pong {
+                        echo_timestamp, ..
+                    }) => {
+                        assert_eq!(echo_timestamp, 12345);
+                    }
+                    other => panic!("expected V3Control Pong, got {other:?}"),
+                }
+            }
+            other => panic!("expected V3Control Ping, got {other:?}"),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Mixed v2/v3 coexistence
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn decode_frame_distinguishes_v2_and_v3() {
+        // v2 msgpack data
+        let v2_value = serde_json::json!({"namespace": "mesh", "type": "test"});
+        let v2_encoded = encode_message(&v2_value, false).unwrap();
+
+        // v3 data frame
+        let v3_value = serde_json::json!({"namespace": "sync", "type": "sync-full"});
+        let v3_encoded = encode_data_frame(&v3_value, false).unwrap();
+
+        // v3 control frame
+        let v3_ping = ControlMessage::Ping { timestamp: 42 };
+        let v3_ctrl = encode_control_frame(&v3_ping, false).unwrap();
+
+        // All should decode correctly
+        assert!(matches!(decode_frame(&v2_encoded).unwrap(), DecodedFrame::Legacy(_)));
+        assert!(matches!(decode_frame(&v3_encoded).unwrap(), DecodedFrame::V3Data { .. }));
+        assert!(matches!(decode_frame(&v3_ctrl).unwrap(), DecodedFrame::V3Control(_)));
+    }
+
+    #[test]
+    fn v3_data_large_payload_roundtrip() {
+        // Test with a larger payload to ensure no size-related issues
+        let mut items = Vec::new();
+        for i in 0..100 {
+            items.push(serde_json::json!({"id": i, "name": format!("item-{i}")}));
+        }
+        let value = serde_json::json!({
+            "namespace": "sync",
+            "type": "sync-full",
+            "payload": { "items": items }
+        });
+
+        for use_json in [true, false] {
+            let encoded = encode_data_frame(&value, use_json).unwrap();
+            let decoded = decode_frame(&encoded).unwrap();
+            match decoded {
+                DecodedFrame::V3Data { payload, was_json } => {
+                    assert_eq!(was_json, use_json);
+                    assert_eq!(payload, value);
+                }
+                other => panic!("expected V3Data, got {other:?}"),
+            }
+        }
     }
 }
