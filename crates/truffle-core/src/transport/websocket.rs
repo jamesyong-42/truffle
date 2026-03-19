@@ -340,6 +340,9 @@ where
                 }
             }
             Some(Ok(Message::Text(text))) => {
+                // RFC 009 Phase 4: text frames are deprecated; log a warning.
+                tracing::warn!("Received text frame — deprecated, use binary frames");
+
                 // Legacy text frames: try to parse as JSON, wrap as Legacy
                 match serde_json::from_str::<serde_json::Value>(&text) {
                     Ok(payload) => {

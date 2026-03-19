@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,12 @@ use super::heartbeat::{self, HeartbeatConfig, HeartbeatTimeout};
 use super::reconnect::ReconnectTarget;
 use super::websocket::{self, DecodedFrame, WireMessage, WsError};
 
+/// Protocol version 2: legacy format (pre-RFC 009). No frame type byte.
+pub const PROTOCOL_V2: u8 = 2;
+
+/// Protocol version 3: RFC 009 format. 2-byte header, typed frames.
+pub const PROTOCOL_V3: u8 = 3;
+
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -36,6 +43,9 @@ pub struct WSConnection {
     pub remote_addr: String,
     pub remote_dns_name: String,
     pub status: ConnectionStatus,
+    /// Negotiated protocol version: 2 = legacy (v2), 3 = RFC 009 (v3).
+    /// Starts at v2 (legacy) and upgrades to v3 after a successful handshake.
+    pub protocol_version: u8,
 }
 
 /// Events emitted by the ConnectionManager.
@@ -74,6 +84,9 @@ pub struct TransportConfig {
     pub max_reconnect_delay: Duration,
     /// Whether to use JSON mode for outgoing messages (debug).
     pub debug_json_mode: bool,
+    /// Local device ID, used for v3 handshake messages.
+    /// If `None`, handshake will not be sent (v2-only mode).
+    pub local_device_id: Option<String>,
 }
 
 impl Default for TransportConfig {
@@ -83,6 +96,7 @@ impl Default for TransportConfig {
             auto_reconnect: true,
             max_reconnect_delay: super::reconnect::MAX_RECONNECT_DELAY,
             debug_json_mode: false,
+            local_device_id: None,
         }
     }
 }
@@ -95,6 +109,9 @@ struct ActiveConnection {
     write_tx: mpsc::Sender<Vec<u8>>,
     /// Signal activity to the heartbeat tracker.
     activity_tx: mpsc::Sender<()>,
+    /// Negotiated protocol version, shared with message loop tasks.
+    /// Starts at PROTOCOL_V2, upgraded to PROTOCOL_V3 after handshake.
+    protocol_version: Arc<AtomicU8>,
 }
 
 /// Manages WebSocket connections over bridged TCP streams.
@@ -171,6 +188,7 @@ impl ConnectionManager {
             remote_addr,
             remote_dns_name: remote_dns,
             status: ConnectionStatus::Connected,
+            protocol_version: PROTOCOL_V2,
         };
 
         self.setup_connection(connection_id, ws_stream, ws_conn)
@@ -212,6 +230,7 @@ impl ConnectionManager {
             remote_addr,
             remote_dns_name: remote_dns,
             status: ConnectionStatus::Connected,
+            protocol_version: PROTOCOL_V2,
         };
 
         self.setup_connection(connection_id, ws_stream, ws_conn)
@@ -255,6 +274,7 @@ impl ConnectionManager {
             remote_addr,
             remote_dns_name,
             status: ConnectionStatus::Connected,
+            protocol_version: PROTOCOL_V2,
         };
 
         self.setup_connection(connection_id, ws_stream, ws_conn)
@@ -280,10 +300,14 @@ impl ConnectionManager {
         let (msg_tx, mut msg_rx) = mpsc::channel::<DecodedFrame>(256);
         let (activity_tx, activity_rx) = mpsc::channel::<()>(64);
 
+        // Shared protocol version — starts at v2, upgraded to v3 after handshake.
+        let protocol_version = Arc::new(AtomicU8::new(PROTOCOL_V2));
+
         let active_conn = ActiveConnection {
             info: ws_conn.clone(),
             write_tx: write_tx.clone(),
             activity_tx: activity_tx.clone(),
+            protocol_version: protocol_version.clone(),
         };
 
         // Store connection
@@ -303,6 +327,37 @@ impl ConnectionManager {
             }
         });
 
+        // --- RFC 009 Phase 4: Send v3 handshake (fire-and-forget) ---
+        // If we have a local_device_id, send a handshake control frame.
+        // Don't wait for the ack — start normal operation immediately.
+        // The message loop will upgrade protocol_version when the ack arrives.
+        if let Some(ref local_device_id) = self.config.local_device_id {
+            let handshake = ControlMessage::Handshake {
+                protocol_version: PROTOCOL_V3 as u32,
+                device_id: local_device_id.clone(),
+                capabilities: vec![],
+            };
+            let use_json = self.config.debug_json_mode;
+            match websocket::encode_control_frame(&handshake, use_json) {
+                Ok(encoded) => {
+                    let conns = self.connections.read().await;
+                    if let Some(ac) = conns.get(&connection_id) {
+                        let _ = ac.write_tx.send(encoded).await;
+                        tracing::debug!(
+                            connection_id = %connection_id,
+                            "sent v3 handshake to peer"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        "failed to encode v3 handshake: {e}"
+                    );
+                }
+            }
+        }
+
         // Spawn the connection lifecycle task
         let conn_id_r = connection_id.clone();
         let event_tx = self.event_tx.clone();
@@ -310,6 +365,7 @@ impl ConnectionManager {
         let connections_for_cleanup = self.connections.clone();
         let device_to_conn = self.device_to_connection.clone();
         let config = self.config.clone();
+        let proto_ver = protocol_version;
 
         tokio::spawn(async move {
             // Read pump — forwards messages
@@ -326,13 +382,14 @@ impl ConnectionManager {
             // Message forwarding loop — handles both v2 and v3 frames
             let conn_id_msg = conn_id_r.clone();
             let event_tx_msg = event_tx.clone();
+            let local_device_id = config.local_device_id.clone();
             let msg_forward = tokio::spawn(async move {
                 while let Some(frame) = msg_rx.recv().await {
                     // Record activity for heartbeat on every received frame
                     let _ = activity_tx.send(()).await;
 
                     match frame {
-                        // --- v3 control frames (RFC 009 Phase 2) ---
+                        // --- v3 control frames (RFC 009 Phase 2 + Phase 4) ---
                         DecodedFrame::V3Control(ControlMessage::Ping { timestamp }) => {
                             // Respond with a v3 pong, echoing the sender's encoding
                             let pong = heartbeat::create_v3_pong(timestamp);
@@ -348,13 +405,63 @@ impl ConnectionManager {
                         DecodedFrame::V3Control(ControlMessage::Pong { .. }) => {
                             // Activity already recorded above; nothing else to do.
                         }
-                        DecodedFrame::V3Control(ctrl) => {
-                            // Handshake / HandshakeAck — not handled in Phase 2,
-                            // will be wired up in Phase 4.
-                            tracing::debug!(
+
+                        // --- RFC 009 Phase 4: Handshake handling ---
+                        DecodedFrame::V3Control(ControlMessage::Handshake {
+                            protocol_version: peer_version,
+                            device_id: peer_device_id,
+                            ..
+                        }) => {
+                            // Peer is initiating a v3 handshake. Respond with ack.
+                            let negotiated = std::cmp::min(PROTOCOL_V3 as u32, peer_version);
+                            tracing::info!(
                                 connection_id = %conn_id_msg,
-                                "received v3 control message (not yet handled): {ctrl:?}"
+                                peer_device_id = %peer_device_id,
+                                peer_version = peer_version,
+                                negotiated_version = negotiated,
+                                "received v3 handshake from peer"
                             );
+
+                            // Upgrade our protocol version
+                            if negotiated >= PROTOCOL_V3 as u32 {
+                                proto_ver.store(PROTOCOL_V3, Ordering::Release);
+                            }
+
+                            // Send HandshakeAck
+                            let ack_device_id = local_device_id
+                                .as_deref()
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let ack = ControlMessage::HandshakeAck {
+                                protocol_version: PROTOCOL_V3 as u32,
+                                device_id: ack_device_id,
+                                negotiated_version: negotiated,
+                            };
+                            let conns = connections_for_pong.read().await;
+                            if let Some(ac) = conns.get(&conn_id_msg) {
+                                if let Ok(encoded) =
+                                    websocket::encode_control_frame(&ack, false)
+                                {
+                                    let _ = ac.write_tx.send(encoded).await;
+                                }
+                            }
+                        }
+                        DecodedFrame::V3Control(ControlMessage::HandshakeAck {
+                            negotiated_version,
+                            device_id: peer_device_id,
+                            ..
+                        }) => {
+                            tracing::info!(
+                                connection_id = %conn_id_msg,
+                                peer_device_id = %peer_device_id,
+                                negotiated_version = negotiated_version,
+                                "received v3 handshake ack — upgrading connection"
+                            );
+
+                            // Upgrade protocol version to negotiated
+                            if negotiated_version >= PROTOCOL_V3 as u32 {
+                                proto_ver.store(PROTOCOL_V3, Ordering::Release);
+                            }
                         }
 
                         // --- v3 data frames ---
@@ -456,6 +563,10 @@ impl ConnectionManager {
     }
 
     /// Send a message to a specific connection.
+    ///
+    /// Version-aware (RFC 009 Phase 4): if the connection has been upgraded
+    /// to v3 via handshake, sends a v3 data frame. Otherwise sends a v2
+    /// legacy frame.
     pub async fn send(
         &self,
         connection_id: &str,
@@ -464,13 +575,35 @@ impl ConnectionManager {
         let conns = self.connections.read().await;
         let conn = conns.get(connection_id).ok_or(WsError::Closed)?;
 
-        let encoded = websocket::encode_message(value, self.config.debug_json_mode)?;
+        let version = conn.protocol_version.load(Ordering::Acquire);
+        let use_json = self.config.debug_json_mode;
+
+        let encoded = if version >= PROTOCOL_V3 {
+            // v3 peer: use 2-byte header data frame
+            websocket::encode_data_frame(value, use_json)?
+        } else {
+            // v2 peer: use 1-byte flags legacy format
+            websocket::encode_message(value, use_json)?
+        };
+
         conn.write_tx
             .send(encoded)
             .await
             .map_err(|_| WsError::Closed)?;
 
         Ok(())
+    }
+
+    /// Get the negotiated protocol version for a connection.
+    ///
+    /// Returns `PROTOCOL_V2` (2) for legacy connections, `PROTOCOL_V3` (3)
+    /// for connections that completed a v3 handshake, or `None` if the
+    /// connection is not found.
+    pub async fn get_protocol_version(&self, connection_id: &str) -> Option<u8> {
+        let conns = self.connections.read().await;
+        conns
+            .get(connection_id)
+            .map(|ac| ac.protocol_version.load(Ordering::Acquire))
     }
 
     /// Set the device ID for a connection (after mesh announce).
@@ -709,6 +842,7 @@ mod tests {
             auto_reconnect: false,
             max_reconnect_delay: Duration::from_secs(1),
             debug_json_mode: false,
+            local_device_id: None,
         }
     }
 
@@ -1798,6 +1932,524 @@ mod tests {
         assert_eq!(
             count2, 5,
             "second subscriber should have 5 events (subscribed mid-stream)"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RFC 009 Phase 4: Handshake and Protocol Version tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Build a TransportConfig that sends v3 handshakes.
+    fn test_config_with_handshake(device_id: &str) -> TransportConfig {
+        TransportConfig {
+            heartbeat: HeartbeatConfig {
+                ping_interval: Duration::from_secs(600),
+                timeout: Duration::from_secs(600),
+            },
+            auto_reconnect: false,
+            max_reconnect_delay: Duration::from_secs(1),
+            debug_json_mode: false,
+            local_device_id: Some(device_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn ws_connection_default_protocol_version_is_v2() {
+        let conn = WSConnection {
+            id: "test".to_string(),
+            device_id: None,
+            direction: Direction::Incoming,
+            remote_addr: "127.0.0.1:1234".to_string(),
+            remote_dns_name: "test.ts.net".to_string(),
+            status: ConnectionStatus::Connected,
+            protocol_version: PROTOCOL_V2,
+        };
+        assert_eq!(conn.protocol_version, PROTOCOL_V2);
+        assert_eq!(conn.protocol_version, 2);
+    }
+
+    #[test]
+    fn protocol_version_constants() {
+        assert_eq!(PROTOCOL_V2, 2);
+        assert_eq!(PROTOCOL_V3, 3);
+        assert!(PROTOCOL_V3 > PROTOCOL_V2);
+    }
+
+    #[tokio::test]
+    async fn test_connection_starts_at_v2() {
+        // When local_device_id is None, no handshake is sent.
+        // Protocol version should remain at v2.
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+        let version = manager.get_protocol_version(conn_id).await;
+        assert_eq!(version, Some(PROTOCOL_V2));
+    }
+
+    #[tokio::test]
+    async fn test_get_protocol_version_missing_connection() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        assert_eq!(manager.get_protocol_version("no-such-conn").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_handshake_sent_when_device_id_configured() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Create a manager that has a local_device_id, triggering handshake
+        let config = test_config_with_handshake("local-dev-1");
+        let (manager, _rx) = ConnectionManager::new(config);
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // The client side should receive a v3 handshake control frame
+        let msg = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .expect("timed out waiting for handshake")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match msg {
+            Message::Binary(data) => {
+                // Should be a v3 control frame
+                let frame = websocket::decode_frame(&data).unwrap();
+                match frame {
+                    DecodedFrame::V3Control(ControlMessage::Handshake {
+                        protocol_version,
+                        device_id,
+                        capabilities,
+                    }) => {
+                        assert_eq!(protocol_version, PROTOCOL_V3 as u32);
+                        assert_eq!(device_id, "local-dev-1");
+                        assert!(capabilities.is_empty());
+                    }
+                    other => panic!("expected Handshake, got {other:?}"),
+                }
+            }
+            other => panic!("expected binary frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_handshake_sent_when_device_id_not_configured() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        // No local_device_id => no handshake sent
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // The heartbeat loop sends a v3 ping immediately on the first tick.
+        // We should NOT receive a Handshake frame. Any frame that arrives
+        // should be a heartbeat ping, not a handshake.
+        let result =
+            tokio::time::timeout(Duration::from_millis(200), client_ws.next()).await;
+
+        match result {
+            Err(_) => {
+                // Timeout — no message at all, which is fine
+            }
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                // A message arrived — verify it's NOT a handshake
+                let frame = websocket::decode_frame(&data).unwrap();
+                match frame {
+                    DecodedFrame::V3Control(ControlMessage::Handshake { .. }) => {
+                        panic!("received a Handshake when local_device_id is None");
+                    }
+                    _ => {
+                        // Heartbeat ping or other — acceptable
+                    }
+                }
+            }
+            Ok(other) => {
+                // Stream ended or text frame — fine for this test
+                let _ = other;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handshake_ack_upgrades_to_v3() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Create a manager with handshake enabled
+        let config = test_config_with_handshake("local-dev-1");
+        let (manager, _rx) = ConnectionManager::new(config);
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+
+        // Consume the handshake that the manager sent
+        let _handshake_msg = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_ws.next(),
+        )
+        .await
+        .expect("timed out waiting for handshake")
+        .expect("stream ended")
+        .expect("ws error");
+
+        // Still v2 before ack
+        assert_eq!(
+            manager.get_protocol_version(conn_id).await,
+            Some(PROTOCOL_V2)
+        );
+
+        // Client sends HandshakeAck back
+        let ack = ControlMessage::HandshakeAck {
+            protocol_version: 3,
+            device_id: "peer-dev-1".to_string(),
+            negotiated_version: 3,
+        };
+        let ack_frame = websocket::encode_control_frame(&ack, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(ack_frame)))
+            .await
+            .unwrap();
+
+        // Give the message loop time to process the ack
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Now the connection should be upgraded to v3
+        assert_eq!(
+            manager.get_protocol_version(conn_id).await,
+            Some(PROTOCOL_V3)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incoming_handshake_sends_ack_and_upgrades() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Create a manager without local_device_id (won't send handshake first)
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.5:443".into(),
+                "v3-peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.5:443";
+
+        // Peer sends a Handshake to us
+        let handshake = ControlMessage::Handshake {
+            protocol_version: 3,
+            device_id: "remote-peer".to_string(),
+            capabilities: vec!["mesh".to_string()],
+        };
+        let handshake_frame =
+            websocket::encode_control_frame(&handshake, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(handshake_frame)))
+            .await
+            .unwrap();
+
+        // We should receive a HandshakeAck back
+        let ack_msg = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .expect("timed out waiting for ack")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match ack_msg {
+            Message::Binary(data) => {
+                let frame = websocket::decode_frame(&data).unwrap();
+                match frame {
+                    DecodedFrame::V3Control(ControlMessage::HandshakeAck {
+                        protocol_version,
+                        negotiated_version,
+                        device_id,
+                    }) => {
+                        assert_eq!(protocol_version, PROTOCOL_V3 as u32);
+                        assert_eq!(negotiated_version, 3);
+                        // device_id is "unknown" because no local_device_id was set
+                        assert_eq!(device_id, "unknown");
+                    }
+                    other => panic!("expected HandshakeAck, got {other:?}"),
+                }
+            }
+            other => panic!("expected binary frame, got {other:?}"),
+        }
+
+        // Connection should be upgraded to v3
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            manager.get_protocol_version(conn_id).await,
+            Some(PROTOCOL_V3)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_aware_send_v2() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        // No handshake => v2 mode => send() uses v2 format
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+
+        // Send a message — should use v2 format (1-byte flags header)
+        let msg = serde_json::json!({"namespace": "mesh", "type": "test"});
+        manager.send(conn_id, &msg).await.unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match received {
+            Message::Binary(data) => {
+                // v2 format: byte 0 is flags (0x00 = msgpack)
+                assert_eq!(data[0], 0x00, "expected v2 msgpack flag byte");
+                // Verify it decodes as v2 legacy
+                let decoded = websocket::decode_message(&data).unwrap();
+                assert_eq!(decoded.payload["type"], "test");
+            }
+            other => panic!("expected binary, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_version_aware_send_v3_after_handshake() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Setup with handshake enabled
+        let config = test_config_with_handshake("dev-local");
+        let (manager, _rx) = ConnectionManager::new(config);
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+
+        // Consume the handshake
+        let _hs = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        // Send HandshakeAck from peer to upgrade
+        let ack = ControlMessage::HandshakeAck {
+            protocol_version: 3,
+            device_id: "peer-dev".to_string(),
+            negotiated_version: 3,
+        };
+        let ack_frame = websocket::encode_control_frame(&ack, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(ack_frame)))
+            .await
+            .unwrap();
+
+        // Wait for upgrade
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            manager.get_protocol_version(conn_id).await,
+            Some(PROTOCOL_V3)
+        );
+
+        // Now send a data message — should use v3 format
+        let msg = serde_json::json!({"namespace": "sync", "type": "sync-full"});
+        manager.send(conn_id, &msg).await.unwrap();
+
+        // Read frames from the client, skipping any heartbeat pings, until
+        // we find the data frame.
+        let data_frame = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let msg = client_ws.next().await.expect("stream ended").expect("ws error");
+                if let Message::Binary(data) = msg {
+                    // Skip v3 control frames (heartbeat pings)
+                    if data[0] == 0x01 {
+                        continue;
+                    }
+                    return data.to_vec();
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for v3 data frame");
+
+        // v3 format: byte 0 = 0x02 (Data), byte 1 = flags
+        assert_eq!(
+            data_frame[0], 0x02,
+            "expected v3 Data frame type byte (0x02), got 0x{:02X}",
+            data_frame[0]
+        );
+        // Verify it decodes as v3 data
+        let decoded = websocket::decode_frame(&data_frame).unwrap();
+        match decoded {
+            DecodedFrame::V3Data { payload, .. } => {
+                assert_eq!(payload["type"], "sync-full");
+            }
+            other => panic!("expected V3Data, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_bidirectional_handshake() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Both sides have handshake enabled
+        let config_a = test_config_with_handshake("device-a");
+        let config_b = test_config_with_handshake("device-b");
+
+        let (manager_a, _rx_a) = ConnectionManager::new(config_a);
+        let (manager_b, _rx_b) = ConnectionManager::new(config_b);
+
+        let (ws_a, ws_b) = duplex_ws_pair().await;
+
+        // Manager A handles one side (incoming)
+        manager_a
+            .handle_ws_stream(
+                ws_a,
+                "100.64.0.1:443".into(),
+                "a.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Manager B handles the other side (outgoing)
+        manager_b
+            .handle_ws_stream(
+                ws_b,
+                "100.64.0.2:443".into(),
+                "b.ts.net".into(),
+                Direction::Outgoing,
+            )
+            .await;
+
+        let conn_id_a = "incoming:100.64.0.1:443";
+        let conn_id_b = "dial:100.64.0.2:443";
+
+        // Both sides send handshakes and process acks.
+        // Wait for the handshake exchange to complete.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Both should be upgraded to v3
+        assert_eq!(
+            manager_a.get_protocol_version(conn_id_a).await,
+            Some(PROTOCOL_V3),
+            "manager_a should be v3"
+        );
+        assert_eq!(
+            manager_b.get_protocol_version(conn_id_b).await,
+            Some(PROTOCOL_V3),
+            "manager_b should be v3"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handshake_version_negotiation_min() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // Create a manager that sends v3 handshake
+        let config = test_config_with_handshake("local-node");
+        let (manager, _rx) = ConnectionManager::new(config);
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.9:443".into(),
+                "old-peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.9:443";
+
+        // Consume the handshake
+        let _hs = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        // Peer responds with negotiated_version: 2 (it only supports v2)
+        let ack = ControlMessage::HandshakeAck {
+            protocol_version: 2,
+            device_id: "old-peer".to_string(),
+            negotiated_version: 2,
+        };
+        let ack_frame = websocket::encode_control_frame(&ack, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(ack_frame)))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // negotiated_version < 3, so we stay at v2
+        assert_eq!(
+            manager.get_protocol_version(conn_id).await,
+            Some(PROTOCOL_V2),
+            "should remain v2 when peer negotiates v2"
         );
     }
 }

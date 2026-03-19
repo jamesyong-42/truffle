@@ -834,6 +834,7 @@ mod tests {
             remote_addr: "100.64.0.5:443".to_string(),
             remote_dns_name: "peer.ts.net".to_string(),
             status: ConnectionStatus::Connected,
+            protocol_version: crate::transport::connection::PROTOCOL_V2,
         };
 
         // Should not panic - sends announce (fails silently on missing conn)
@@ -862,6 +863,7 @@ mod tests {
             remote_addr: "100.64.0.5:443".to_string(),
             remote_dns_name: "peer.ts.net".to_string(),
             status: ConnectionStatus::Connected,
+            protocol_version: crate::transport::connection::PROTOCOL_V2,
         };
 
         // Should not panic - sends announce + device list (both fail silently)

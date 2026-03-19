@@ -318,9 +318,12 @@ impl TruffleRuntimeBuilder {
             timing: mesh_timing,
         };
 
+        let mut transport_config = TransportConfig::default();
+        transport_config.local_device_id = Some(mesh_config.device_id.clone());
+
         let runtime_config = RuntimeConfig {
             mesh: mesh_config,
-            transport: TransportConfig::default(),
+            transport: transport_config,
             sidecar_path: self.sidecar_path,
             state_dir: self.state_dir,
             auth_key: self.auth_key,

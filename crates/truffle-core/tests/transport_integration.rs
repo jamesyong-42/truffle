@@ -84,6 +84,7 @@ fn quiet_heartbeat_config() -> TransportConfig {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(1),
         debug_json_mode: false,
+        local_device_id: None,
     }
 }
 
@@ -250,6 +251,7 @@ async fn test_ws_heartbeat_keeps_connection_alive() {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(1),
         debug_json_mode: false,
+        local_device_id: None,
     };
 
     let (manager, mut rx) = ConnectionManager::new(config);
@@ -383,6 +385,7 @@ async fn test_ws_heartbeat_timeout_disconnects() {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(1),
         debug_json_mode: false,
+        local_device_id: None,
     };
 
     let (manager, mut rx) = ConnectionManager::new(config);
@@ -1421,6 +1424,7 @@ async fn test_edge_heartbeat_very_short_interval() {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(1),
         debug_json_mode: false,
+        local_device_id: None,
     };
 
     let (manager, mut rx) = ConnectionManager::new(config);
@@ -1514,6 +1518,7 @@ async fn test_edge_connection_closed_during_heartbeat() {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(1),
         debug_json_mode: false,
+        local_device_id: None,
     };
 
     let (manager, mut rx) = ConnectionManager::new(config);
@@ -1774,6 +1779,7 @@ async fn spawn_full_node(name: &str, state_dir_name: &str) -> FullTestNode {
         auto_reconnect: false,
         max_reconnect_delay: Duration::from_secs(5),
         debug_json_mode: false,
+        local_device_id: None,
     };
     let (transport, transport_rx) = ConnectionManager::new(transport_config);
     let transport = std::sync::Arc::new(transport);
