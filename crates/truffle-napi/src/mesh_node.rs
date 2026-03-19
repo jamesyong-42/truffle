@@ -1,51 +1,39 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
-use truffle_core::bridge::header::Direction;
-use truffle_core::bridge::manager::{BridgeManager, ChannelHandler};
-use truffle_core::bridge::shim::{GoShim, ShimConfig, ShimLifecycleEvent};
 use truffle_core::mesh::election::ElectionTimingConfig;
 use truffle_core::mesh::message_bus::MeshMessageBus;
-use truffle_core::mesh::node::{MeshNode as CoreMeshNode, MeshNodeConfig, MeshNodeEvent, MeshTimingConfig};
+use truffle_core::mesh::node::{MeshNodeConfig, MeshTimingConfig};
 use truffle_core::protocol::envelope::MeshEnvelope;
-use truffle_core::transport::connection::{ConnectionManager, TransportConfig};
-use truffle_core::types::TailnetPeer;
+use truffle_core::runtime::{RuntimeConfig, TruffleEvent, TruffleRuntime};
+use truffle_core::transport::connection::TransportConfig;
 
 use crate::types::{
-    mesh_event_to_napi, napi_peer_to_core, NapiBaseDevice,
-    NapiMeshEvent, NapiMeshNodeConfig, NapiTailnetPeer,
+    napi_peer_to_core, truffle_event_to_napi, NapiBaseDevice,
+    NapiMeshNodeConfig, NapiTailnetPeer, NapiTruffleEvent,
 };
 
-/// NapiMeshNode - Node.js wrapper for truffle-core MeshNode.
+/// NapiMeshNode - Node.js wrapper for TruffleRuntime.
 ///
 /// Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
-/// and MeshNode. The sidecar provides Tailscale connectivity; the bridge routes
-/// TCP streams; the connection manager upgrades them to WebSocket; and the mesh
-/// node handles device discovery, election, and messaging.
+/// and MeshNode via the unified `TruffleRuntime`. The sidecar provides Tailscale
+/// connectivity; the bridge routes TCP streams; the connection manager upgrades
+/// them to WebSocket; and the mesh node handles device discovery, election,
+/// and messaging.
+///
+/// ## RFC 008 Phase 3
+/// This wrapper now delegates to `TruffleRuntime` instead of manually wiring
+/// individual components. Events are delivered as `TruffleEvent` through the
+/// unified channel, converted to `NapiTruffleEvent` for JS consumption.
 #[napi]
 pub struct NapiMeshNode {
-    inner: Arc<CoreMeshNode>,
-    connection_manager: Arc<ConnectionManager>,
-    pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiMeshEvent>>>,
-    /// Stored config fields needed at start() time for sidecar spawning.
-    sidecar_path: Option<String>,
-    state_dir: Option<String>,
-    auth_key: Option<String>,
-    hostname_prefix: String,
-    device_id: String,
-    device_type: String,
-    /// Whether the tsnet node is ephemeral.
-    ephemeral: Option<bool>,
-    /// ACL tags to advertise.
-    tags: Option<Vec<String>>,
-    /// GoShim handle, kept alive for the node's lifetime.
-    shim: Arc<tokio::sync::Mutex<Option<GoShim>>>,
+    runtime: Arc<TruffleRuntime>,
+    pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiTruffleEvent>>>,
 }
 
 #[napi]
@@ -87,25 +75,19 @@ impl NapiMeshNode {
             timing: mesh_timing,
         };
 
-        let transport_config = TransportConfig::default();
-        let (connection_manager, _transport_event_rx) = ConnectionManager::new(transport_config);
-        let connection_manager = Arc::new(connection_manager);
-
-        let (inner, _event_rx) = CoreMeshNode::new(core_config, connection_manager.clone());
-
-        Ok(Self {
-            inner: Arc::new(inner),
-            connection_manager,
-            pending_callback: std::sync::Mutex::new(None),
-            sidecar_path: config.sidecar_path,
+        let runtime_config = RuntimeConfig {
+            mesh: core_config,
+            transport: TransportConfig::default(),
+            sidecar_path: config.sidecar_path.map(std::path::PathBuf::from),
             state_dir: config.state_dir,
             auth_key: config.auth_key,
-            hostname_prefix: config.hostname_prefix,
-            device_id: config.device_id,
-            device_type: config.device_type,
-            ephemeral: config.ephemeral,
-            tags: config.tags,
-            shim: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        let (runtime, _event_rx) = TruffleRuntime::new(&runtime_config);
+
+        Ok(Self {
+            runtime: Arc::new(runtime),
+            pending_callback: std::sync::Mutex::new(None),
         })
     }
 
@@ -114,6 +96,9 @@ impl NapiMeshNode {
     /// If `sidecarPath` was provided, this spawns the Go sidecar process,
     /// creates a BridgeManager to route connections, and wires everything
     /// together for full Tailscale mesh networking.
+    ///
+    /// Events are delivered through the unified `TruffleEvent` channel,
+    /// converted to `NapiTruffleEvent` for JS consumption.
     #[napi]
     pub async fn start(&self) -> Result<()> {
         // Spawn the JS event loop if a callback was registered before start
@@ -124,241 +109,15 @@ impl NapiMeshNode {
             .take();
 
         if let Some(cb) = callback {
-            let rx = self.inner.subscribe_events();
+            let rx = self.runtime.subscribe();
             tokio::spawn(async move {
                 Self::event_loop(rx, cb).await;
             });
         }
 
-        // If sidecar_path is provided, wire up the full bridge + sidecar stack
-        if let Some(ref sidecar_path) = self.sidecar_path {
-            self.start_with_sidecar(sidecar_path.clone()).await?;
-        }
-
-        // Start the core mesh node (begins event processing loop)
-        self.inner.start().await;
-        Ok(())
-    }
-
-    /// Wire up BridgeManager + GoShim + ConnectionManager for full connectivity.
-    async fn start_with_sidecar(&self, sidecar_path: String) -> Result<()> {
-        // 1. Generate a random session token
-        let mut session_token = [0u8; 32];
-        getrandom::getrandom(&mut session_token)
-            .map_err(|e| Error::from_reason(format!("failed to generate session token: {e}")))?;
-
-        let session_token_hex = hex::encode(session_token);
-
-        // 2. Bind the BridgeManager on an ephemeral port
-        let mut bridge_manager = BridgeManager::bind(session_token)
-            .await
-            .map_err(|e| Error::from_reason(format!("failed to bind bridge: {e}")))?;
-
-        let bridge_port = bridge_manager.local_port();
-        tracing::info!("Bridge listening on 127.0.0.1:{bridge_port}");
-
-        // 3. Register handlers for WebSocket connections (port 443)
-        let (ws_in_tx, mut ws_in_rx) = mpsc::channel(64);
-        let (ws_out_tx, mut ws_out_rx) = mpsc::channel(64);
-        bridge_manager.add_handler(
-            443,
-            Direction::Incoming,
-            Arc::new(ChannelHandler::new(ws_in_tx)),
-        );
-        bridge_manager.add_handler(
-            443,
-            Direction::Outgoing,
-            Arc::new(ChannelHandler::new(ws_out_tx)),
-        );
-
-        // 4. Spawn the bridge accept loop
-        tokio::spawn(async move {
-            bridge_manager.run(tokio_util::sync::CancellationToken::new()).await;
-        });
-
-        // 5. Spawn tasks to feed bridge connections to the ConnectionManager
-        let conn_mgr_in = self.connection_manager.clone();
-        tokio::spawn(async move {
-            while let Some(bridge_conn) = ws_in_rx.recv().await {
-                conn_mgr_in.handle_incoming(bridge_conn).await;
-            }
-            tracing::info!("Bridge incoming handler loop ended");
-        });
-        let conn_mgr_out = self.connection_manager.clone();
-        tokio::spawn(async move {
-            while let Some(bridge_conn) = ws_out_rx.recv().await {
-                conn_mgr_out.handle_outgoing(bridge_conn).await;
-            }
-            tracing::info!("Bridge outgoing handler loop ended");
-        });
-
-        // 6. Build the hostname: prefix-type-id (matches protocol::hostname format)
-        let hostname = format!(
-            "{}-{}-{}",
-            self.hostname_prefix, self.device_type, self.device_id
-        );
-
-        // 7. Determine state directory
-        let state_dir = self
-            .state_dir
-            .clone()
-            .unwrap_or_else(|| format!(".truffle-state/{}", self.device_id));
-
-        // Ensure state directory exists
-        std::fs::create_dir_all(&state_dir).map_err(|e| {
-            Error::from_reason(format!("failed to create state dir '{}': {e}", state_dir))
-        })?;
-
-        // 8. Spawn the Go sidecar
-        let shim_config = ShimConfig {
-            binary_path: PathBuf::from(sidecar_path),
-            hostname,
-            state_dir,
-            auth_key: self.auth_key.clone(),
-            bridge_port,
-            session_token: session_token_hex,
-            auto_restart: true,
-            ephemeral: self.ephemeral,
-            tags: self.tags.clone(),
-        };
-
-        let (shim, mut lifecycle_rx) = GoShim::spawn(shim_config)
-            .await
-            .map_err(|e| Error::from_reason(format!("failed to spawn sidecar: {e}")))?;
-
-        tracing::info!("Go sidecar spawned");
-
-        // 9. Store shim handle so it stays alive
-        {
-            let mut shim_guard = self.shim.lock().await;
-            *shim_guard = Some(shim);
-        }
-
-        // 10. Spawn lifecycle event loop: maps sidecar events to mesh node actions
-        let inner = self.inner.clone();
-        let shim_handle = self.shim.clone();
-        let hostname_prefix = self.hostname_prefix.clone();
-        tokio::spawn(async move {
-            loop {
-                match lifecycle_rx.recv().await {
-                    Ok(event) => match event {
-                        ShimLifecycleEvent::Started => {
-                            tracing::info!("Sidecar started");
-                        }
-                        ShimLifecycleEvent::Status(status) => {
-                            tracing::info!(
-                                "Sidecar status: state={}, ip={}, dns={}",
-                                status.state,
-                                status.tailscale_ip,
-                                status.dns_name
-                            );
-                            if !status.tailscale_ip.is_empty() {
-                                let dns = if status.dns_name.is_empty() {
-                                    None
-                                } else {
-                                    Some(status.dns_name.as_str())
-                                };
-                                inner.set_local_online(&status.tailscale_ip, dns).await;
-                                inner.set_auth_authenticated().await;
-
-                                // Auto-request peer list now that we're online
-                                let shim_guard = shim_handle.lock().await;
-                                if let Some(ref shim) = *shim_guard {
-                                    tracing::info!("Requesting peer list after auth");
-                                    if let Err(e) = shim.get_peers().await {
-                                        tracing::warn!("Failed to request peers after auth: {e}");
-                                    }
-                                }
-                            }
-                        }
-                        ShimLifecycleEvent::AuthRequired { auth_url } => {
-                            tracing::info!("Tailscale auth required: {auth_url}");
-                            // Delegate to core: sets state + emits event
-                            inner.set_auth_required(&auth_url).await;
-                        }
-                        ShimLifecycleEvent::Peers(peers_data) => {
-                            let core_peers: Vec<TailnetPeer> = peers_data
-                                .peers
-                                .iter()
-                                .map(|p| p.to_canonical())
-                                .collect();
-                            inner.handle_tailnet_peers(&core_peers).await;
-
-                            // Dial online peers to establish WebSocket connections.
-                            let local_device = inner.local_device().await;
-                            let local_dns = local_device.tailscale_dns_name.clone()
-                                .unwrap_or_default();
-                            for peer in &peers_data.peers {
-                                if !peer.online || peer.dns_name.is_empty() {
-                                    continue;
-                                }
-                                if peer.dns_name == local_dns {
-                                    continue;
-                                }
-                                if !peer.hostname.contains(&hostname_prefix) {
-                                    continue;
-                                }
-                                let dns = peer.dns_name.clone();
-                                let shim_ref = shim_handle.clone();
-                                tracing::info!("Dialing peer {dns} via sidecar");
-                                // Spawn each dial as independent task (don't hold shim lock)
-                                tokio::spawn(async move {
-                                    let shim_guard = shim_ref.lock().await;
-                                    if let Some(ref shim) = *shim_guard {
-                                        let request_id = uuid::Uuid::new_v4().to_string();
-                                        if let Err(e) = shim.dial_raw(dns.clone(), 443, request_id).await {
-                                            tracing::warn!("Failed to dial {dns}: {e}");
-                                        } else {
-                                            tracing::info!("Dial initiated to {dns}");
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                        ShimLifecycleEvent::NeedsApproval => {
-                            tracing::warn!("Node needs admin approval (NeedsMachineAuth)");
-                            inner.emit_event(MeshNodeEvent::Error(
-                                "Node needs admin approval to join tailnet".to_string(),
-                            ));
-                        }
-                        ShimLifecycleEvent::StateChanged { state, .. } => {
-                            tracing::info!("Tailscale state changed: {state}");
-                        }
-                        ShimLifecycleEvent::KeyExpiring { expires_at } => {
-                            tracing::warn!("Tailscale key expiring at {expires_at}");
-                        }
-                        ShimLifecycleEvent::HealthWarning { warnings } => {
-                            tracing::warn!("Tailscale health warnings: {:?}", warnings);
-                        }
-                        ShimLifecycleEvent::DialFailed { request_id, error } => {
-                            tracing::warn!("Dial failed: request_id={request_id}: {error}");
-                        }
-                        ShimLifecycleEvent::Crashed {
-                            exit_code,
-                            stderr_tail,
-                        } => {
-                            let msg = format!(
-                                "Sidecar crashed (exit_code={:?}): {}",
-                                exit_code,
-                                stderr_tail.chars().take(200).collect::<String>()
-                            );
-                            tracing::error!("{msg}");
-                            inner.emit_event(MeshNodeEvent::Error(msg));
-                        }
-                        ShimLifecycleEvent::Stopped => {
-                            tracing::info!("Sidecar stopped");
-                        }
-                    },
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Sidecar lifecycle receiver lagged by {n} events");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("Sidecar lifecycle channel closed");
-                        break;
-                    }
-                }
-            }
-        });
+        // Start the runtime (handles sidecar, bridge, mesh node, event forwarding)
+        self.runtime.start().await
+            .map_err(|e| Error::from_reason(format!("runtime start failed: {e}")))?;
 
         Ok(())
     }
@@ -366,70 +125,59 @@ impl NapiMeshNode {
     /// Stop the mesh node and sidecar.
     #[napi]
     pub async fn stop(&self) -> Result<()> {
-        // Stop sidecar first
-        let shim = {
-            let mut guard = self.shim.lock().await;
-            guard.take()
-        };
-        if let Some(shim) = shim {
-            if let Err(e) = shim.stop().await {
-                tracing::warn!("Error stopping sidecar: {e}");
-            }
-        }
-
-        self.inner.stop().await;
+        self.runtime.stop().await;
         Ok(())
     }
 
     /// Check if the node is running.
     #[napi]
     pub async fn is_running(&self) -> Result<bool> {
-        Ok(self.inner.is_running().await)
+        Ok(self.runtime.mesh_node().is_running().await)
     }
 
     /// Get the local device info.
     #[napi]
     pub async fn local_device(&self) -> Result<NapiBaseDevice> {
-        let device = self.inner.local_device().await;
+        let device = self.runtime.local_device().await;
         Ok(NapiBaseDevice::from(device))
     }
 
     /// Get the local device ID.
     #[napi]
     pub async fn device_id(&self) -> Result<String> {
-        Ok(self.inner.device_id().await)
+        Ok(self.runtime.device_id().await)
     }
 
     /// Get all known devices.
     #[napi]
     pub async fn devices(&self) -> Result<Vec<NapiBaseDevice>> {
-        let devices = self.inner.devices().await;
+        let devices = self.runtime.devices().await;
         Ok(devices.into_iter().map(NapiBaseDevice::from).collect())
     }
 
     /// Get a device by ID.
     #[napi]
     pub async fn device_by_id(&self, id: String) -> Result<Option<NapiBaseDevice>> {
-        let device = self.inner.device_by_id(&id).await;
+        let device = self.runtime.mesh_node().device_by_id(&id).await;
         Ok(device.map(NapiBaseDevice::from))
     }
 
     /// Check if this node is the primary.
     #[napi]
     pub async fn is_primary(&self) -> Result<bool> {
-        Ok(self.inner.is_primary().await)
+        Ok(self.runtime.is_primary().await)
     }
 
     /// Get the current primary device ID.
     #[napi]
     pub async fn primary_id(&self) -> Result<Option<String>> {
-        Ok(self.inner.primary_id().await)
+        Ok(self.runtime.mesh_node().primary_id().await)
     }
 
     /// Get the current role as a string ("primary" or "secondary").
     #[napi]
     pub async fn role(&self) -> Result<String> {
-        let role = self.inner.role().await;
+        let role = self.runtime.mesh_node().role().await;
         Ok(match role {
             truffle_core::types::DeviceRole::Primary => "primary".to_string(),
             truffle_core::types::DeviceRole::Secondary => "secondary".to_string(),
@@ -447,7 +195,7 @@ impl NapiMeshNode {
         payload: serde_json::Value,
     ) -> Result<bool> {
         let envelope = MeshEnvelope::new(namespace, msg_type, payload);
-        Ok(self.inner.send_envelope(&device_id, &envelope).await)
+        Ok(self.runtime.send_envelope(&device_id, &envelope).await)
     }
 
     /// Broadcast a mesh envelope to all connected devices.
@@ -459,14 +207,14 @@ impl NapiMeshNode {
         payload: serde_json::Value,
     ) -> Result<()> {
         let envelope = MeshEnvelope::new(namespace, msg_type, payload);
-        self.inner.broadcast_envelope(&envelope).await;
+        self.runtime.broadcast_envelope(&envelope).await;
         Ok(())
     }
 
     /// Get the current auth status ("unknown", "required", "authenticated").
     #[napi]
     pub async fn auth_status(&self) -> Result<String> {
-        let status = self.inner.auth_status().await;
+        let status = self.runtime.mesh_node().auth_status().await;
         Ok(match status {
             truffle_core::types::AuthStatus::Unknown => "unknown".to_string(),
             truffle_core::types::AuthStatus::Required => "required".to_string(),
@@ -477,14 +225,14 @@ impl NapiMeshNode {
     /// Get the current auth URL, if auth is required.
     #[napi]
     pub async fn auth_url(&self) -> Result<Option<String>> {
-        Ok(self.inner.auth_url().await)
+        Ok(self.runtime.mesh_node().auth_url().await)
     }
 
     /// Get the message bus for namespace-based pub/sub.
     #[napi]
     pub fn message_bus(&self) -> NapiMessageBus {
         NapiMessageBus {
-            inner: self.inner.message_bus(),
+            inner: self.runtime.bus(),
         }
     }
 
@@ -492,7 +240,7 @@ impl NapiMeshNode {
     #[napi]
     pub async fn handle_tailnet_peers(&self, peers: Vec<NapiTailnetPeer>) -> Result<()> {
         let core_peers: Vec<_> = peers.iter().map(napi_peer_to_core).collect();
-        self.inner.handle_tailnet_peers(&core_peers).await;
+        self.runtime.mesh_node().handle_tailnet_peers(&core_peers).await;
         Ok(())
     }
 
@@ -503,7 +251,7 @@ impl NapiMeshNode {
         tailscale_ip: String,
         dns_name: Option<String>,
     ) -> Result<()> {
-        self.inner
+        self.runtime.mesh_node()
             .set_local_online(&tailscale_ip, dns_name.as_deref())
             .await;
         Ok(())
@@ -515,22 +263,22 @@ impl NapiMeshNode {
     /// - Critical events (device join/leave, election, errors) are never dropped
     /// - If the JS event queue is full, Rust waits rather than dropping events
     ///
-    /// The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
+    /// The callback receives NapiTruffleEvent objects with event_type, device_id, and payload.
     ///
     /// Can be called multiple times to add multiple subscribers.
     /// Can be called before or after `start()`. If called before `start()`, the
     /// event loop is spawned when `start()` is called.
     #[napi(ts_args_type = "callback: (err: null | Error, event: NapiMeshEvent) => void")]
-    pub fn on_event(&self, callback: ThreadsafeFunction<NapiMeshEvent>) -> Result<()> {
+    pub fn on_event(&self, callback: ThreadsafeFunction<NapiTruffleEvent>) -> Result<()> {
         // If a Tokio runtime is available (called after start or from async context),
         // spawn the event loop immediately with a new subscriber.
         if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-            let rx = self.inner.subscribe_events();
+            let rx = self.runtime.subscribe();
             tokio::spawn(async move {
                 Self::event_loop(rx, callback).await;
             });
         } else {
-            // No Tokio runtime — store callback for start() to spawn.
+            // No Tokio runtime -- store callback for start() to spawn.
             // If one is already pending, we need to handle both.
             let mut guard = self
                 .pending_callback
@@ -547,24 +295,24 @@ impl NapiMeshNode {
         Ok(())
     }
 
-    /// Internal event loop that forwards MeshNodeEvents to JS.
+    /// Internal event loop that forwards TruffleEvents to JS.
     ///
     /// IMPORTANT: This function must NEVER panic. All conversions use
     /// fallible operations. If a conversion fails, the event is logged
     /// and skipped rather than crashing the Node.js process.
     async fn event_loop(
-        mut rx: broadcast::Receiver<MeshNodeEvent>,
-        callback: ThreadsafeFunction<NapiMeshEvent>,
+        mut rx: broadcast::Receiver<TruffleEvent>,
+        callback: ThreadsafeFunction<NapiTruffleEvent>,
     ) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let napi_event = mesh_event_to_napi(&event);
+                    let napi_event = truffle_event_to_napi(&event);
                     // Blocking mode: waits if JS event queue is full.
                     // This ensures critical events are never dropped.
                     let status = callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::Blocking);
                     if status != Status::Ok {
-                        tracing::warn!("Failed to deliver mesh event to JS: {:?}", status);
+                        tracing::warn!("Failed to deliver truffle event to JS: {:?}", status);
                         if status == Status::Closing || status == Status::InvalidArg {
                             tracing::info!("Event callback closed, stopping event loop");
                             break;
@@ -572,10 +320,10 @@ impl NapiMeshNode {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Mesh event receiver lagged by {n} messages");
+                    tracing::warn!("Truffle event receiver lagged by {n} messages");
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    tracing::info!("Mesh event loop ended (channel closed)");
+                    tracing::info!("Truffle event loop ended (channel closed)");
                     break;
                 }
             }
