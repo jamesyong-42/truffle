@@ -11,7 +11,7 @@ use crate::types::BaseDevice;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshMessage {
-    /// Message type (e.g., "device:announce", "election:start").
+    /// Message type (e.g., "device-announce", "election-start").
     #[serde(rename = "type")]
     pub msg_type: String,
     /// Source device ID.
@@ -119,13 +119,13 @@ mod tests {
     #[test]
     fn mesh_message_serde_roundtrip() {
         let msg = MeshMessage::new(
-            "device:announce",
+            "device-announce",
             "device-123",
             serde_json::json!({"key": "value"}),
         );
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: MeshMessage = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.msg_type, "device:announce");
+        assert_eq!(parsed.msg_type, "device-announce");
         assert_eq!(parsed.from, "device-123");
     }
 

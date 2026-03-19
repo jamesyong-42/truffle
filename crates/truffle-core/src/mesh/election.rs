@@ -199,14 +199,14 @@ impl PrimaryElection {
 
         // Broadcast election:start
         self.emit(ElectionEvent::Broadcast(
-            MeshMessage::new("election:start", &config.device_id, serde_json::json!({})),
+            MeshMessage::new("election-start", &config.device_id, serde_json::json!({})),
         ));
 
         // Broadcast our candidacy
         match serde_json::to_value(&my_candidate) {
             Ok(payload) => {
                 self.emit(ElectionEvent::Broadcast(
-                    MeshMessage::new("election:candidate", &config.device_id, payload),
+                    MeshMessage::new("election-candidate", &config.device_id, payload),
                 ));
             }
             Err(e) => {
@@ -309,7 +309,7 @@ impl PrimaryElection {
         match serde_json::to_value(&result) {
             Ok(payload) => {
                 self.emit(ElectionEvent::Broadcast(
-                    MeshMessage::new("election:result", &config.device_id, payload),
+                    MeshMessage::new("election-result", &config.device_id, payload),
                 ));
             }
             Err(e) => {
@@ -350,7 +350,7 @@ impl PrimaryElection {
             match serde_json::to_value(&my_candidate) {
                 Ok(payload) => {
                     self.emit(ElectionEvent::Broadcast(
-                        MeshMessage::new("election:candidate", &config.device_id, payload),
+                        MeshMessage::new("election-candidate", &config.device_id, payload),
                     ));
                 }
                 Err(e) => {
@@ -741,10 +741,10 @@ mod tests {
 
         while let Ok(event) = rx.try_recv() {
             match &event {
-                ElectionEvent::Broadcast(msg) if msg.msg_type == "election:start" => {
+                ElectionEvent::Broadcast(msg) if msg.msg_type == "election-start" => {
                     found_start = true;
                 }
-                ElectionEvent::Broadcast(msg) if msg.msg_type == "election:candidate" => {
+                ElectionEvent::Broadcast(msg) if msg.msg_type == "election-candidate" => {
                     found_candidate = true;
                 }
                 ElectionEvent::ElectionStarted => {
@@ -812,7 +812,7 @@ mod tests {
         let mut found_candidate = false;
         while let Ok(event) = rx.try_recv() {
             if let ElectionEvent::Broadcast(msg) = &event {
-                if msg.msg_type == "election:candidate" {
+                if msg.msg_type == "election-candidate" {
                     found_candidate = true;
                 }
             }

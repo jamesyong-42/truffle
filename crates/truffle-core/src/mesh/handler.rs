@@ -86,7 +86,7 @@ impl TransportHandler {
             }
         };
         let announce = MeshMessage::new(
-            "device:announce",
+            "device-announce",
             &self.config.device_id,
             announce_payload,
         );
@@ -113,7 +113,7 @@ impl TransportHandler {
                 }
             };
             let list = MeshMessage::new(
-                "device:list",
+                "device-list",
                 &self.config.device_id,
                 list_payload,
             );
@@ -198,7 +198,7 @@ impl TransportHandler {
         };
 
         // Bind device ID from announce
-        if mesh_msg.msg_type == "device:announce" {
+        if mesh_msg.msg_type == "device-announce" {
             if let Ok(payload) =
                 serde_json::from_value::<DeviceAnnouncePayload>(mesh_msg.payload.clone())
             {
@@ -288,7 +288,7 @@ impl TransportHandler {
         }
 
         match envelope.msg_type.as_str() {
-            "route:message" | "route-message" => {
+            "route-message" => {
                 if let (Some(target), Some(inner)) = (
                     envelope
                         .payload
@@ -302,7 +302,7 @@ impl TransportHandler {
                             tracing::warn!(
                                 connection_id,
                                 error = %e,
-                                "Failed to parse inner envelope in route:message"
+                                "Failed to parse inner envelope in route-message"
                             );
                             return;
                         }
@@ -310,8 +310,7 @@ impl TransportHandler {
 
                     // Nesting depth guard: reject inner envelopes that are themselves route envelopes
                     if inner_env.namespace == MESH_NAMESPACE
-                        && (inner_env.msg_type.starts_with("route:")
-                            || inner_env.msg_type.starts_with("route-"))
+                        && inner_env.msg_type.starts_with("route-")
                     {
                         tracing::warn!(
                             connection_id,
@@ -335,23 +334,23 @@ impl TransportHandler {
                     } else {
                         tracing::warn!(
                             target_device_id = target,
-                            "route:message target device not connected"
+                            "route-message target device not connected"
                         );
                     }
                 } else {
                     tracing::warn!(
                         connection_id,
-                        "route:message missing targetDeviceId or envelope field"
+                        "route-message missing targetDeviceId or envelope field"
                     );
                 }
             }
-            "route:broadcast" | "route-broadcast" => {
+            "route-broadcast" => {
                 let inner = match envelope.payload.get("envelope") {
                     Some(inner) => inner,
                     None => {
                         tracing::warn!(
                             connection_id,
-                            "route:broadcast missing envelope field"
+                            "route-broadcast missing envelope field"
                         );
                         return;
                     }
@@ -363,7 +362,7 @@ impl TransportHandler {
                         tracing::warn!(
                             connection_id,
                             error = %e,
-                            "Failed to parse inner envelope in route:broadcast"
+                            "Failed to parse inner envelope in route-broadcast"
                         );
                         return;
                     }
@@ -375,13 +374,13 @@ impl TransportHandler {
                     tracing::warn!(
                         connection_id,
                         inner_type = %inner_env.msg_type,
-                        "route:broadcast with mesh namespace rejected -- use dispatch_mesh_message directly"
+                        "route-broadcast with mesh namespace rejected -- use dispatch_mesh_message directly"
                     );
                     return;
                 }
 
                 // Nesting depth guard: reject inner envelopes that are themselves route envelopes
-                if inner_env.msg_type.starts_with("route:") || inner_env.msg_type.starts_with("route-") {
+                if inner_env.msg_type.starts_with("route-") {
                     tracing::warn!(
                         connection_id,
                         inner_type = %inner_env.msg_type,
@@ -562,7 +561,7 @@ mod tests {
     /// Helper: create a device:announce MeshMessage.
     fn make_announce_msg(device: &BaseDevice) -> MeshMessage {
         MeshMessage::new(
-            "device:announce",
+            "device-announce",
             &device.id,
             serde_json::to_value(&DeviceAnnouncePayload {
                 device: device.clone(),
@@ -641,7 +640,7 @@ mod tests {
         ];
 
         let msg = MeshMessage::new(
-            "device:list",
+            "device-list",
             "primary-node",
             serde_json::to_value(&DeviceListPayload {
                 devices,
@@ -663,7 +662,7 @@ mod tests {
         let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
 
         let msg = MeshMessage::new(
-            "device:list",
+            "device-list",
             "primary-node",
             serde_json::to_value(&DeviceListPayload {
                 devices: vec![make_device("primary-node", "Primary")],
@@ -694,7 +693,7 @@ mod tests {
 
         // Send goodbye
         let goodbye = MeshMessage::new(
-            "device:goodbye",
+            "device-goodbye",
             "remote-1",
             serde_json::to_value(&crate::protocol::message_types::DeviceGoodbyePayload {
                 device_id: "remote-1".to_string(),
@@ -723,7 +722,7 @@ mod tests {
         }
 
         let msg = MeshMessage::new(
-            "election:start",
+            "election-start",
             "remote-1",
             serde_json::json!({}),
         );
@@ -758,7 +757,7 @@ mod tests {
             user_designated: false,
         };
         let msg = MeshMessage::new(
-            "election:candidate",
+            "election-candidate",
             "remote-1",
             serde_json::to_value(&candidate).unwrap(),
         );
@@ -791,7 +790,7 @@ mod tests {
             reason: "election".to_string(),
         };
         let msg = MeshMessage::new(
-            "election:result",
+            "election-result",
             "remote-winner",
             serde_json::to_value(&result).unwrap(),
         );
@@ -1025,7 +1024,7 @@ mod tests {
             election.set_primary("local-dev");
         }
 
-        // Build route:message envelope
+        // Build route-message envelope
         let inner_envelope = MeshEnvelope::new("custom", "data", serde_json::json!({"key": "val"}));
         let route_payload = serde_json::json!({
             "targetDeviceId": "dev-b",
@@ -1033,7 +1032,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:message".to_string(),
+            msg_type: "route-message".to_string(),
             payload: route_payload,
             timestamp: Some(1000),
         };
@@ -1070,7 +1069,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1079,7 +1078,7 @@ mod tests {
             .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
             .await;
 
-        // route:broadcast should deliver locally via event_tx
+        // route-broadcast should deliver locally via event_tx
         let mut found_local_delivery = false;
         while let Ok(event) = event_rx.try_recv() {
             if let MeshNodeEvent::Message(incoming) = event {
@@ -1116,7 +1115,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1141,7 +1140,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:message".to_string(),
+            msg_type: "route-message".to_string(),
             payload: route_payload,
             timestamp: Some(1000),
         };
@@ -1254,7 +1253,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1266,7 +1265,7 @@ mod tests {
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             1,
-            "MessageBus must be dispatched on route:broadcast"
+            "MessageBus must be dispatched on route-broadcast"
         );
     }
 
@@ -1294,7 +1293,7 @@ mod tests {
         let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
 
         let msg = MeshMessage::new(
-            "device:list",
+            "device-list",
             "some-node",
             serde_json::to_value(&DeviceListPayload {
                 devices: vec![make_device("dev-a", "A")],
@@ -1314,7 +1313,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wrap_mesh_message_produces_correct_envelope() {
-        let msg = MeshMessage::new("device:announce", "dev-1", serde_json::json!({}));
+        let msg = MeshMessage::new("device-announce", "dev-1", serde_json::json!({}));
         let envelope = TransportHandler::wrap_mesh_message(&msg)
             .expect("wrap_mesh_message must succeed for valid MeshMessage");
 
@@ -1323,7 +1322,7 @@ mod tests {
         assert!(envelope.timestamp.is_some());
         // Payload should contain the serialized MeshMessage
         let inner: MeshMessage = serde_json::from_value(envelope.payload).unwrap();
-        assert_eq!(inner.msg_type, "device:announce");
+        assert_eq!(inner.msg_type, "device-announce");
         assert_eq!(inner.from, "dev-1");
     }
 
@@ -1338,7 +1337,7 @@ mod tests {
 
         // Goodbye
         let goodbye = MeshMessage::new(
-            "device:goodbye",
+            "device-goodbye",
             "remote-1",
             serde_json::to_value(&crate::protocol::message_types::DeviceGoodbyePayload {
                 device_id: "remote-1".to_string(),
@@ -1396,10 +1395,10 @@ mod tests {
             election.set_primary("local-dev");
         }
 
-        // route:message without targetDeviceId
+        // route-message without targetDeviceId
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:message".to_string(),
+            msg_type: "route-message".to_string(),
             payload: serde_json::json!({"envelope": {"namespace": "x", "type": "y", "payload": {}}}),
             timestamp: Some(1000),
         };
@@ -1425,10 +1424,10 @@ mod tests {
             election.set_primary("local-dev");
         }
 
-        // route:broadcast without envelope field
+        // route-broadcast without envelope field
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: serde_json::json!({"other": "data"}),
             timestamp: Some(1000),
         };
@@ -1440,7 +1439,7 @@ mod tests {
         // Nothing should be delivered
         assert!(
             event_rx.try_recv().is_err(),
-            "route:broadcast without envelope field must be a no-op"
+            "route-broadcast without envelope field must be a no-op"
         );
     }
 
@@ -1457,7 +1456,7 @@ mod tests {
         // Create a device:announce message but with a broken payload
         // (not a valid DeviceAnnouncePayload)
         let msg = MeshMessage::new(
-            "device:announce",
+            "device-announce",
             "remote-1",
             serde_json::json!({"totally": "wrong", "not_a_device": true}),
         );
@@ -1479,7 +1478,7 @@ mod tests {
         let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
 
         let msg = MeshMessage::new(
-            "device:list",
+            "device-list",
             "primary-node",
             serde_json::to_value(&DeviceListPayload {
                 devices: vec![],
@@ -1500,7 +1499,7 @@ mod tests {
             "device:list with non-empty primary_id should still set election primary");
     }
 
-    /// 20. route:broadcast from self: primary receives a broadcast where
+    /// 20. route-broadcast from self: primary receives a broadcast where
     ///     from_device_id is itself. Must deliver locally but not forward to self.
     #[tokio::test]
     async fn route_broadcast_from_self_delivers_locally() {
@@ -1527,7 +1526,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1547,11 +1546,11 @@ mod tests {
             }
         }
         assert!(found_local_delivery,
-            "route:broadcast from self must still deliver locally");
+            "route-broadcast from self must still deliver locally");
     }
 
-    /// 21. Deeply nested envelope: route:broadcast containing another
-    ///     route:broadcast inside. The nesting guard (RFC 009 issue #7) rejects
+    /// 21. Deeply nested envelope: route-broadcast containing another
+    ///     route-broadcast inside. The nesting guard (RFC 009 issue #7) rejects
     ///     inner envelopes with mesh namespace, preventing recursive nesting.
     #[tokio::test]
     async fn nested_route_broadcast_rejected_by_mesh_namespace_guard() {
@@ -1572,7 +1571,7 @@ mod tests {
         let inner_inner = MeshEnvelope::new("app-ns", "data", serde_json::json!({"level": 2}));
         let inner_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: serde_json::json!({
                 "envelope": serde_json::to_value(&inner_inner).unwrap(),
             }),
@@ -1584,7 +1583,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1598,11 +1597,11 @@ mod tests {
         // The inner envelope must NOT be delivered (mesh namespace guard blocks it)
         assert!(
             event_rx.try_recv().is_err(),
-            "Nested route:broadcast with mesh namespace inner must be rejected"
+            "Nested route-broadcast with mesh namespace inner must be rejected"
         );
     }
 
-    /// 21b. route:broadcast with a non-mesh inner envelope that has a route: type prefix.
+    /// 21b. route-broadcast with a non-mesh inner envelope that has a route- type prefix.
     ///      The nesting depth guard rejects it.
     #[tokio::test]
     async fn nested_route_type_rejected_by_nesting_guard() {
@@ -1619,10 +1618,10 @@ mod tests {
             election.set_primary("local-dev");
         }
 
-        // Inner envelope with non-mesh namespace but route: type prefix
+        // Inner envelope with non-mesh namespace but route- type prefix
         let inner_envelope = MeshEnvelope::new(
             "custom-ns",
-            "route:sneaky",
+            "route-sneaky",
             serde_json::json!({"trick": true}),
         );
 
@@ -1631,7 +1630,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:broadcast".to_string(),
+            msg_type: "route-broadcast".to_string(),
             payload: broadcast_payload,
             timestamp: Some(1000),
         };
@@ -1640,14 +1639,14 @@ mod tests {
             .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
             .await;
 
-        // The inner envelope must NOT be delivered (route: prefix guard blocks it)
+        // The inner envelope must NOT be delivered (route- prefix guard blocks it)
         assert!(
             event_rx.try_recv().is_err(),
-            "Inner envelope with route: prefix must be rejected by nesting guard"
+            "Inner envelope with route- prefix must be rejected by nesting guard"
         );
     }
 
-    /// 22. route:message targeting a device that is offline. Must not panic,
+    /// 22. route-message targeting a device that is offline. Must not panic,
     ///     message should be silently dropped (no connection found).
     #[tokio::test]
     async fn route_message_to_offline_device_graceful() {
@@ -1680,7 +1679,7 @@ mod tests {
         });
         let route_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
-            msg_type: "route:message".to_string(),
+            msg_type: "route-message".to_string(),
             payload: route_payload,
             timestamp: Some(1000),
         };
@@ -1700,7 +1699,7 @@ mod tests {
         // Build a ~1MB JSON payload
         let large_string = "x".repeat(1_000_000);
         let msg = MeshMessage::new(
-            "device:announce",
+            "device-announce",
             "remote-big",
             serde_json::json!({"data": large_string}),
         );
@@ -1730,7 +1729,7 @@ mod tests {
         }
 
         let msg = MeshMessage::new(
-            "election:candidate",
+            "election-candidate",
             "remote-1",
             serde_json::json!({"garbage": "not a candidate payload"}),
         );
@@ -1758,7 +1757,7 @@ mod tests {
         }
 
         let msg = MeshMessage::new(
-            "election:result",
+            "election-result",
             "remote-1",
             serde_json::json!({"not_valid": "payload"}),
         );

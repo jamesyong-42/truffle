@@ -9,8 +9,3 @@ pub mod tailscale;
 pub mod transport;
 pub mod types;
 pub mod util;
-
-// Backward compatibility re-exports
-pub use services::store_sync;
-pub use services::file_transfer;
-pub use http::proxy as reverse_proxy;

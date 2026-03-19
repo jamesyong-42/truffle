@@ -6,12 +6,12 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use tokio::sync::mpsc;
 
-use truffle_core::file_transfer::adapter::{
+use truffle_core::services::file_transfer::adapter::{
     AdapterEvent, FileTransferAdapter as CoreAdapter, FileTransferAdapterConfig,
     FileTransferOffer,
 };
-use truffle_core::file_transfer::manager::FileTransferManager;
-use truffle_core::file_transfer::types::{FileInfo, FileTransferConfig, FileTransferEvent};
+use truffle_core::services::file_transfer::manager::FileTransferManager;
+use truffle_core::services::file_transfer::types::{FileInfo, FileTransferConfig, FileTransferEvent};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAPI object types for file transfer

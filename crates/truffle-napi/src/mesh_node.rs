@@ -15,7 +15,7 @@ use truffle_core::transport::connection::{TransportConfig, PROTOCOL_V3};
 
 use crate::types::{
     napi_peer_to_core, truffle_event_to_napi, NapiBaseDevice,
-    NapiMeshNodeConfig, NapiTailnetPeer, NapiTruffleEvent,
+    NapiMeshNodeConfig, NapiTailnetPeer, NapiMeshEvent,
 };
 
 /// NapiMeshNode - Node.js wrapper for TruffleRuntime.
@@ -29,11 +29,11 @@ use crate::types::{
 /// ## RFC 008 Phase 3
 /// This wrapper now delegates to `TruffleRuntime` instead of manually wiring
 /// individual components. Events are delivered as `TruffleEvent` through the
-/// unified channel, converted to `NapiTruffleEvent` for JS consumption.
+/// unified channel, converted to `NapiMeshEvent` for JS consumption.
 #[napi]
 pub struct NapiMeshNode {
     runtime: Arc<TruffleRuntime>,
-    pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiTruffleEvent>>>,
+    pending_callback: std::sync::Mutex<Option<ThreadsafeFunction<NapiMeshEvent>>>,
 }
 
 #[napi]
@@ -98,7 +98,7 @@ impl NapiMeshNode {
     /// together for full Tailscale mesh networking.
     ///
     /// Events are delivered through the unified `TruffleEvent` channel,
-    /// converted to `NapiTruffleEvent` for JS consumption.
+    /// converted to `NapiMeshEvent` for JS consumption.
     #[napi]
     pub async fn start(&self) -> Result<()> {
         // Spawn the JS event loop if a callback was registered before start
@@ -273,13 +273,13 @@ impl NapiMeshNode {
     /// - Critical events (device join/leave, election, errors) are never dropped
     /// - If the JS event queue is full, Rust waits rather than dropping events
     ///
-    /// The callback receives NapiTruffleEvent objects with event_type, device_id, and payload.
+    /// The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
     ///
     /// Can be called multiple times to add multiple subscribers.
     /// Can be called before or after `start()`. If called before `start()`, the
     /// event loop is spawned when `start()` is called.
     #[napi(ts_args_type = "callback: (err: null | Error, event: NapiMeshEvent) => void")]
-    pub fn on_event(&self, callback: ThreadsafeFunction<NapiTruffleEvent>) -> Result<()> {
+    pub fn on_event(&self, callback: ThreadsafeFunction<NapiMeshEvent>) -> Result<()> {
         // If a Tokio runtime is available (called after start or from async context),
         // spawn the event loop immediately with a new subscriber.
         if let Ok(_handle) = tokio::runtime::Handle::try_current() {
@@ -312,7 +312,7 @@ impl NapiMeshNode {
     /// and skipped rather than crashing the Node.js process.
     async fn event_loop(
         mut rx: broadcast::Receiver<TruffleEvent>,
-        callback: ThreadsafeFunction<NapiTruffleEvent>,
+        callback: ThreadsafeFunction<NapiMeshEvent>,
     ) {
         loop {
             match rx.recv().await {

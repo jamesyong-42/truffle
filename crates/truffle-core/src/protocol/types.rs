@@ -13,8 +13,6 @@ use crate::protocol::message_types::{
 /// Message types for the `mesh` namespace.
 ///
 /// Wire strings use kebab-case: `"device-announce"`, `"election-start"`, etc.
-/// The `from_str` method also accepts legacy colon-separated forms for backward
-/// compatibility during the migration period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MeshMessageType {
@@ -29,24 +27,17 @@ pub enum MeshMessageType {
 }
 
 impl MeshMessageType {
-    /// Parse a message type string, accepting both new kebab-case and legacy
-    /// colon-separated forms.
-    ///
-    /// The legacy colon-separated aliases (e.g. `"device:announce"`) exist for
-    /// backward compatibility with v2 nodes and are intentionally kept. They
-    /// are cheap (compile-time match arms) and aid migration. They may be
-    /// removed in a future major version once all nodes run v3 exclusively.
+    /// Parse a message type string (kebab-case).
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            // Canonical kebab-case (v3) | Legacy colon-separated (v2 compat)
-            "device-announce" | "device:announce" => Some(Self::DeviceAnnounce),
-            "device-list" | "device:list" => Some(Self::DeviceList),
-            "device-goodbye" | "device:goodbye" => Some(Self::DeviceGoodbye),
-            "election-start" | "election:start" => Some(Self::ElectionStart),
-            "election-candidate" | "election:candidate" => Some(Self::ElectionCandidate),
-            "election-result" | "election:result" => Some(Self::ElectionResult),
-            "route-message" | "route:message" => Some(Self::RouteMessage),
-            "route-broadcast" | "route:broadcast" => Some(Self::RouteBroadcast),
+            "device-announce" => Some(Self::DeviceAnnounce),
+            "device-list" => Some(Self::DeviceList),
+            "device-goodbye" => Some(Self::DeviceGoodbye),
+            "election-start" => Some(Self::ElectionStart),
+            "election-candidate" => Some(Self::ElectionCandidate),
+            "election-result" => Some(Self::ElectionResult),
+            "route-message" => Some(Self::RouteMessage),
+            "route-broadcast" => Some(Self::RouteBroadcast),
             _ => None,
         }
     }
@@ -79,7 +70,6 @@ impl fmt::Display for MeshMessageType {
 /// Message types for the `sync` namespace.
 ///
 /// Wire strings: `"sync-full"`, `"sync-update"`, `"sync-request"`, `"sync-clear"`.
-/// Legacy forms (`"store:sync:full"`, etc.) are accepted during migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncMessageType {
@@ -90,20 +80,13 @@ pub enum SyncMessageType {
 }
 
 impl SyncMessageType {
-    /// Parse a message type string, accepting both new kebab-case and legacy
-    /// colon-separated forms.
-    ///
-    /// The legacy colon-separated aliases (e.g. `"store:sync:full"`) exist for
-    /// backward compatibility with v2 nodes and are intentionally kept. They
-    /// are cheap (compile-time match arms) and aid migration. They may be
-    /// removed in a future major version once all nodes run v3 exclusively.
+    /// Parse a message type string (kebab-case).
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            // Canonical kebab-case (v3) | Legacy colon-separated (v2 compat)
-            "sync-full" | "store:sync:full" => Some(Self::SyncFull),
-            "sync-update" | "store:sync:update" => Some(Self::SyncUpdate),
-            "sync-request" | "store:sync:request" => Some(Self::SyncRequest),
-            "sync-clear" | "store:sync:clear" => Some(Self::SyncClear),
+            "sync-full" => Some(Self::SyncFull),
+            "sync-update" => Some(Self::SyncUpdate),
+            "sync-request" => Some(Self::SyncRequest),
+            "sync-clear" => Some(Self::SyncClear),
             _ => None,
         }
     }
@@ -132,7 +115,6 @@ impl fmt::Display for SyncMessageType {
 /// Message types for the `file-transfer` namespace.
 ///
 /// Wire strings: `"file-offer"`, `"file-accept"`, `"file-reject"`, `"file-cancel"`.
-/// Legacy SCREAMING_CASE forms (`"OFFER"`, etc.) are accepted during migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FileTransferMessageType {
@@ -143,20 +125,13 @@ pub enum FileTransferMessageType {
 }
 
 impl FileTransferMessageType {
-    /// Parse a message type string, accepting both new kebab-case and legacy
-    /// SCREAMING_CASE forms.
-    ///
-    /// The legacy SCREAMING_CASE aliases (e.g. `"OFFER"`) exist for backward
-    /// compatibility with v2 nodes and are intentionally kept. They are cheap
-    /// (compile-time match arms) and aid migration. They may be removed in a
-    /// future major version once all nodes run v3 exclusively.
+    /// Parse a message type string (kebab-case).
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            // Canonical kebab-case (v3) | Legacy SCREAMING_CASE (v2 compat)
-            "file-offer" | "OFFER" => Some(Self::FileOffer),
-            "file-accept" | "ACCEPT" => Some(Self::FileAccept),
-            "file-reject" | "REJECT" => Some(Self::FileReject),
-            "file-cancel" | "CANCEL" => Some(Self::FileCancel),
+            "file-offer" => Some(Self::FileOffer),
+            "file-accept" => Some(Self::FileAccept),
+            "file-reject" => Some(Self::FileReject),
+            "file-cancel" => Some(Self::FileCancel),
             _ => None,
         }
     }
@@ -326,39 +301,12 @@ mod tests {
     }
 
     #[test]
-    fn mesh_message_type_from_str_legacy_colon() {
-        assert_eq!(
-            MeshMessageType::from_str("device:announce"),
-            Some(MeshMessageType::DeviceAnnounce)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("device:list"),
-            Some(MeshMessageType::DeviceList)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("device:goodbye"),
-            Some(MeshMessageType::DeviceGoodbye)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("election:start"),
-            Some(MeshMessageType::ElectionStart)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("election:candidate"),
-            Some(MeshMessageType::ElectionCandidate)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("election:result"),
-            Some(MeshMessageType::ElectionResult)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("route:message"),
-            Some(MeshMessageType::RouteMessage)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("route:broadcast"),
-            Some(MeshMessageType::RouteBroadcast)
-        );
+    fn mesh_message_type_from_str_legacy_colon_rejected() {
+        // Legacy colon-separated names are no longer accepted
+        assert_eq!(MeshMessageType::from_str("device:announce"), None);
+        assert_eq!(MeshMessageType::from_str("device:list"), None);
+        assert_eq!(MeshMessageType::from_str("election:start"), None);
+        assert_eq!(MeshMessageType::from_str("route:message"), None);
     }
 
     #[test]
@@ -367,7 +315,6 @@ mod tests {
         assert_eq!(MeshMessageType::from_str("unknown"), None);
         assert_eq!(MeshMessageType::from_str("device_announce"), None);
         assert_eq!(MeshMessageType::from_str("DEVICE-ANNOUNCE"), None);
-        assert_eq!(MeshMessageType::from_str("device:anounce"), None); // typo
     }
 
     #[test]
@@ -470,23 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn sync_message_type_from_str_legacy_colon() {
-        assert_eq!(
-            SyncMessageType::from_str("store:sync:full"),
-            Some(SyncMessageType::SyncFull)
-        );
-        assert_eq!(
-            SyncMessageType::from_str("store:sync:update"),
-            Some(SyncMessageType::SyncUpdate)
-        );
-        assert_eq!(
-            SyncMessageType::from_str("store:sync:request"),
-            Some(SyncMessageType::SyncRequest)
-        );
-        assert_eq!(
-            SyncMessageType::from_str("store:sync:clear"),
-            Some(SyncMessageType::SyncClear)
-        );
+    fn sync_message_type_from_str_legacy_colon_rejected() {
+        // Legacy colon-separated names are no longer accepted
+        assert_eq!(SyncMessageType::from_str("store:sync:full"), None);
+        assert_eq!(SyncMessageType::from_str("store:sync:update"), None);
+        assert_eq!(SyncMessageType::from_str("store:sync:request"), None);
+        assert_eq!(SyncMessageType::from_str("store:sync:clear"), None);
     }
 
     #[test]
@@ -586,23 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn file_transfer_message_type_from_str_legacy_screaming() {
-        assert_eq!(
-            FileTransferMessageType::from_str("OFFER"),
-            Some(FileTransferMessageType::FileOffer)
-        );
-        assert_eq!(
-            FileTransferMessageType::from_str("ACCEPT"),
-            Some(FileTransferMessageType::FileAccept)
-        );
-        assert_eq!(
-            FileTransferMessageType::from_str("REJECT"),
-            Some(FileTransferMessageType::FileReject)
-        );
-        assert_eq!(
-            FileTransferMessageType::from_str("CANCEL"),
-            Some(FileTransferMessageType::FileCancel)
-        );
+    fn file_transfer_message_type_from_str_legacy_screaming_rejected() {
+        // Legacy SCREAMING_CASE names are no longer accepted
+        assert_eq!(FileTransferMessageType::from_str("OFFER"), None);
+        assert_eq!(FileTransferMessageType::from_str("ACCEPT"), None);
+        assert_eq!(FileTransferMessageType::from_str("REJECT"), None);
+        assert_eq!(FileTransferMessageType::from_str("CANCEL"), None);
     }
 
     #[test]
@@ -691,10 +616,10 @@ mod tests {
     fn dispatch_error_unknown_message_type_display() {
         let err = DispatchError::UnknownMessageType {
             namespace: "mesh".into(),
-            msg_type: "device:explode".into(),
+            msg_type: "device-explode".into(),
         };
         let msg = format!("{}", err);
-        assert!(msg.contains("device:explode"));
+        assert!(msg.contains("device-explode"));
         assert!(msg.contains("mesh"));
     }
 
@@ -729,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_device_announce_legacy_name() {
+    fn mesh_payload_parse_device_announce_legacy_name_rejected() {
         let payload = serde_json::json!({
             "device": {
                 "id": "dev-1",
@@ -740,8 +665,8 @@ mod tests {
                 "capabilities": []
             }
         });
-        let result = MeshPayload::parse("device:announce", payload).unwrap();
-        assert!(matches!(result, MeshPayload::DeviceAnnounce(_)));
+        let result = MeshPayload::parse("device:announce", payload);
+        assert!(result.is_err(), "legacy colon-separated names should be rejected");
     }
 
     #[test]
@@ -776,13 +701,13 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_device_goodbye_legacy() {
+    fn mesh_payload_parse_device_goodbye_legacy_rejected() {
         let payload = serde_json::json!({
             "deviceId": "dev-1",
             "reason": "crash"
         });
-        let result = MeshPayload::parse("device:goodbye", payload).unwrap();
-        assert!(matches!(result, MeshPayload::DeviceGoodbye(_)));
+        let result = MeshPayload::parse("device:goodbye", payload);
+        assert!(result.is_err(), "legacy colon-separated names should be rejected");
     }
 
     #[test]
@@ -793,9 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_election_start_legacy() {
-        let result = MeshPayload::parse("election:start", serde_json::json!({})).unwrap();
-        assert!(matches!(result, MeshPayload::ElectionStart));
+    fn mesh_payload_parse_election_start_legacy_rejected() {
+        let result = MeshPayload::parse("election:start", serde_json::json!({}));
+        assert!(result.is_err(), "legacy colon-separated names should be rejected");
     }
 
     #[test]
@@ -843,18 +768,18 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_route_message_legacy() {
+    fn mesh_payload_parse_route_message_legacy_rejected() {
         let payload = serde_json::json!({
             "targetDeviceId": "dev-3",
             "envelope": {"namespace": "sync", "type": "sync-full", "payload": {}}
         });
-        let result = MeshPayload::parse("route:message", payload).unwrap();
-        assert!(matches!(result, MeshPayload::RouteMessage(_)));
+        let result = MeshPayload::parse("route:message", payload);
+        assert!(result.is_err(), "legacy colon-separated names should be rejected");
     }
 
     #[test]
     fn mesh_payload_parse_unknown_type() {
-        let result = MeshPayload::parse("device:explode", serde_json::json!({}));
+        let result = MeshPayload::parse("device-explode", serde_json::json!({}));
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, DispatchError::UnknownMessageType { .. }));

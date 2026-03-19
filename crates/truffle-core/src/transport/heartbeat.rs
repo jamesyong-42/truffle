@@ -28,87 +28,8 @@ impl Default for HeartbeatConfig {
     }
 }
 
-/// A ping message to send over the WebSocket (v2 legacy format).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PingMessage {
-    #[serde(rename = "type")]
-    pub msg_type: String,
-    pub timestamp: u64,
-}
-
-/// A pong message sent in response to a ping (v2 legacy format).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PongMessage {
-    #[serde(rename = "type")]
-    pub msg_type: String,
-    pub timestamp: u64,
-    #[serde(rename = "echoTimestamp")]
-    pub echo_timestamp: u64,
-}
-
-/// Check if a JSON value is a heartbeat message (ping or pong).
-/// Returns true if the message was handled as a heartbeat.
-///
-/// This is used for **v2 legacy** heartbeat detection. In v3, heartbeats are
-/// structurally identified by the `FrameType::Control` byte and do not need
-/// content inspection. This function is still needed to handle Legacy frames
-/// from old v2 nodes during the migration period.
-///
-/// Heartbeat messages are bare `{"type":"ping","timestamp":...}` or
-/// `{"type":"pong","timestamp":...,"echoTimestamp":...}` objects.  They never
-/// have a `"namespace"` field, which every `MeshEnvelope` does -- so we
-/// require the absence of `"namespace"` to avoid falsely swallowing
-/// application envelopes whose `msg_type` happens to be `"ping"`.
-#[deprecated(note = "Use v3 ControlMessage::Ping/Pong with FrameType::Control discrimination")]
-pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
-    // MeshEnvelopes always carry a "namespace" key; heartbeats never do.
-    if value.get("namespace").is_some() {
-        return false;
-    }
-    value
-        .get("type")
-        .and_then(|t| t.as_str())
-        .map(|t| t == "ping" || t == "pong")
-        .unwrap_or(false)
-}
-
-/// Create a v2 legacy ping message as a JSON value.
-///
-/// Kept for backward compatibility. New code should use `create_v3_ping()`
-/// which returns a `ControlMessage`.
-#[deprecated(note = "Use create_v3_ping() which returns a ControlMessage")]
-pub fn create_ping() -> serde_json::Value {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    serde_json::json!({
-        "type": "ping",
-        "timestamp": now
-    })
-}
-
-/// Create a v2 legacy pong message responding to a ping.
-///
-/// Kept for backward compatibility. New code should use `create_v3_pong()`
-/// which returns a `ControlMessage`.
-#[deprecated(note = "Use create_v3_pong() which returns a ControlMessage")]
-pub fn create_pong(ping_timestamp: u64) -> serde_json::Value {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    serde_json::json!({
-        "type": "pong",
-        "timestamp": now,
-        "echoTimestamp": ping_timestamp
-    })
-}
-
 // ---------------------------------------------------------------------------
-// v3 heartbeat helpers (RFC 009 Phase 2)
+// v3 heartbeat helpers
 // ---------------------------------------------------------------------------
 
 /// Get the current timestamp in milliseconds since epoch.
@@ -230,43 +151,8 @@ pub async fn heartbeat_loop(
 pub struct HeartbeatTimeout;
 
 #[cfg(test)]
-#[allow(deprecated)] // Tests exercise both v2 legacy and v3 heartbeat functions
 mod tests {
     use super::*;
-
-    #[test]
-    fn ping_pong_format_matches_typescript() {
-        let ping = create_ping();
-        assert_eq!(ping.get("type").unwrap().as_str().unwrap(), "ping");
-        assert!(ping.get("timestamp").unwrap().as_u64().is_some());
-
-        let ts = ping.get("timestamp").unwrap().as_u64().unwrap();
-        let pong = create_pong(ts);
-        assert_eq!(pong.get("type").unwrap().as_str().unwrap(), "pong");
-        assert_eq!(pong.get("echoTimestamp").unwrap().as_u64().unwrap(), ts);
-        assert!(pong.get("timestamp").unwrap().as_u64().is_some());
-    }
-
-    #[test]
-    fn is_heartbeat_message_detection() {
-        assert!(is_heartbeat_message(&serde_json::json!({"type": "ping", "timestamp": 123})));
-        assert!(is_heartbeat_message(&serde_json::json!({"type": "pong", "timestamp": 123})));
-        assert!(!is_heartbeat_message(&serde_json::json!({"type": "announce"})));
-        assert!(!is_heartbeat_message(&serde_json::json!({"foo": "bar"})));
-        assert!(!is_heartbeat_message(&serde_json::json!(null)));
-
-        // MeshEnvelope with msg_type "ping" must NOT be treated as heartbeat
-        assert!(!is_heartbeat_message(&serde_json::json!({
-            "namespace": "test-ns",
-            "type": "ping",
-            "payload": {"msg": "hello"}
-        })));
-        assert!(!is_heartbeat_message(&serde_json::json!({
-            "namespace": "mesh",
-            "type": "pong",
-            "payload": {}
-        })));
-    }
 
     #[test]
     fn heartbeat_tracker_timeout() {
@@ -475,7 +361,7 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // v3 heartbeat tests (RFC 009 Phase 2)
+    // v3 heartbeat tests
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]

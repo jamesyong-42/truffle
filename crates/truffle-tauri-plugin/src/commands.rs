@@ -283,7 +283,7 @@ pub async fn proxy_add(
     let proxy_manager = state.proxy_manager.read().await;
     match proxy_manager.as_ref() {
         Some(pm) => {
-            pm.add(truffle_core::reverse_proxy::ProxyConfig {
+            pm.add(truffle_core::http::proxy::ProxyConfig {
                 id: config.id,
                 name: config.name,
                 port: config.port,

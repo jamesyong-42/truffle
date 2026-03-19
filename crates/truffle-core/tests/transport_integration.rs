@@ -37,8 +37,6 @@
 //! cargo test --test transport_integration -- --ignored --test-threads=1 --nocapture
 //! ```
 
-#![allow(deprecated)] // Integration tests exercise v2 legacy paths for backward compat verification
-
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;
@@ -181,7 +179,7 @@ async fn test_ws_connection_lifecycle() {
 
     // --- Send a message from client, verify Message event ---
     let payload = serde_json::json!({"namespace": "mesh", "type": "announce", "data": "lifecycle"});
-    let encoded = websocket::encode_message(&payload, false).unwrap();
+    let encoded = websocket::encode_data_frame(&payload, false).unwrap();
     client_ws
         .send(Message::Binary(bytes::Bytes::from(encoded)))
         .await
@@ -277,40 +275,18 @@ async fn test_ws_heartbeat_keeps_connection_alive() {
     )
     .await;
 
-    // Spawn a client-side responder: reads pings, sends pongs back.
+    // Spawn a client-side responder: reads v3 pings, sends v3 pongs back.
     // This keeps the connection alive by providing activity.
-    // Handles both v3 control frame pings and v2 legacy pings.
     let responder = tokio::spawn(async move {
         while let Some(Ok(msg)) = client_ws.next().await {
             if let Message::Binary(data) = &msg {
                 if let Ok(decoded) = websocket::decode_frame(data) {
                     match decoded {
-                        // v3 control frame ping
                         websocket::DecodedFrame::V3Control(
                             truffle_core::protocol::frame::ControlMessage::Ping { timestamp },
                         ) => {
                             let pong = truffle_core::transport::heartbeat::create_v3_pong(timestamp);
                             let encoded = websocket::encode_control_frame(&pong, false).unwrap();
-                            if client_ws
-                                .send(Message::Binary(bytes::Bytes::from(encoded)))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        // v2 legacy ping
-                        websocket::DecodedFrame::Legacy(ref wire_msg)
-                            if wire_msg.payload.get("type").and_then(|t| t.as_str())
-                                == Some("ping") =>
-                        {
-                            let ts = wire_msg
-                                .payload
-                                .get("timestamp")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let pong = truffle_core::transport::heartbeat::create_pong(ts);
-                            let encoded = websocket::encode_message(&pong, false).unwrap();
                             if client_ws
                                 .send(Message::Binary(bytes::Bytes::from(encoded)))
                                 .await
@@ -483,7 +459,7 @@ async fn test_multiple_ws_connections() {
     // Send a message on each client
     for (i, client) in clients.iter_mut().enumerate() {
         let payload = serde_json::json!({"namespace": "test", "type": "msg", "index": i});
-        let encoded = websocket::encode_message(&payload, false).unwrap();
+        let encoded = websocket::encode_data_frame(&payload, false).unwrap();
         client
             .send(Message::Binary(bytes::Bytes::from(encoded)))
             .await
@@ -548,7 +524,7 @@ async fn test_ws_message_roundtrip() {
         "type": "request",
         "payload": {"action": "get_status"}
     });
-    let encoded = websocket::encode_message(&client_msg, true).unwrap(); // JSON mode
+    let encoded = websocket::encode_data_frame(&client_msg, true).unwrap(); // JSON mode
     client_ws
         .send(Message::Binary(bytes::Bytes::from(encoded)))
         .await
@@ -592,14 +568,17 @@ async fn test_ws_message_roundtrip() {
 
     match received {
         Message::Binary(data) => {
-            let decoded = websocket::decode_message(&data).unwrap();
+            let decoded = websocket::decode_frame(&data).unwrap();
+            let (payload, _was_json) = match decoded {
+                websocket::DecodedFrame::V3Data { payload, was_json } => (payload, was_json),
+                other => panic!("expected V3Data, got {other:?}"),
+            };
             assert_eq!(
-                decoded.payload.get("type").unwrap().as_str().unwrap(),
+                payload.get("type").unwrap().as_str().unwrap(),
                 "response"
             );
             assert_eq!(
-                decoded
-                    .payload
+                payload
                     .get("payload")
                     .unwrap()
                     .get("uptime")
@@ -609,7 +588,7 @@ async fn test_ws_message_roundtrip() {
                 12345
             );
             // Default config has debug_json_mode: false, so msgpack
-            assert!(!decoded.was_json);
+            assert!(!_was_json);
         }
         other => panic!("expected binary message, got {:?}", other),
     }
@@ -1100,7 +1079,7 @@ async fn test_edge_empty_binary_message() {
 
     // Send a valid message after to prove the connection survived
     let payload = serde_json::json!({"namespace": "test", "type": "after-empty"});
-    let encoded = websocket::encode_message(&payload, false).unwrap();
+    let encoded = websocket::encode_data_frame(&payload, false).unwrap();
     client_ws
         .send(Message::Binary(bytes::Bytes::from(encoded)))
         .await
@@ -1168,7 +1147,7 @@ async fn test_edge_oversized_message() {
     // Construct a ~10MB payload: flag byte + large JSON
     let big_string = "x".repeat(10 * 1024 * 1024);
     let big_json = serde_json::json!({"namespace": "test", "type": "big", "data": big_string});
-    let encoded = websocket::encode_message(&big_json, true).unwrap();
+    let encoded = websocket::encode_data_frame(&big_json, true).unwrap();
 
     // Send it. This might fail at the WS level due to MAX_MESSAGE_SIZE,
     // but should NOT cause a crash or OOM on the server side.
@@ -1184,7 +1163,7 @@ async fn test_edge_oversized_message() {
     // Send a normal follow-up to verify the connection is still usable
     // (or was gracefully terminated)
     let small_payload = serde_json::json!({"namespace": "test", "type": "after-big"});
-    let small_encoded = websocket::encode_message(&small_payload, false).unwrap();
+    let small_encoded = websocket::encode_data_frame(&small_payload, false).unwrap();
     let _ = client_ws
         .send(Message::Binary(bytes::Bytes::from(small_encoded)))
         .await;
@@ -1243,7 +1222,7 @@ async fn test_edge_non_utf8_binary_message() {
 
     // Send a valid message to prove the connection survived malformed input
     let payload = serde_json::json!({"namespace": "test", "type": "after-garbage"});
-    let encoded = websocket::encode_message(&payload, false).unwrap();
+    let encoded = websocket::encode_data_frame(&payload, false).unwrap();
     client_ws
         .send(Message::Binary(bytes::Bytes::from(encoded)))
         .await
@@ -1313,7 +1292,7 @@ async fn test_edge_rapid_fire_messages() {
     // Send messages in a tight loop
     for i in 0..msg_count {
         let payload = serde_json::json!({"namespace": "test", "type": "rapid", "seq": i});
-        let encoded = websocket::encode_message(&payload, false).unwrap();
+        let encoded = websocket::encode_data_frame(&payload, false).unwrap();
         client_ws
             .send(Message::Binary(bytes::Bytes::from(encoded)))
             .await
@@ -1449,26 +1428,17 @@ async fn test_edge_heartbeat_very_short_interval() {
     )
     .await;
 
-    // Respond to a few pings to keep the connection alive briefly,
+    // Respond to a few v3 pings to keep the connection alive briefly,
     // proving the fast heartbeat doesn't spin or crash.
-    // Handles both v3 control frame pings and v2 legacy pings.
     let responder = tokio::spawn(async move {
         let mut pong_count = 0u32;
         while let Some(Ok(msg)) = client_ws.next().await {
             if let Message::Binary(data) = &msg {
                 if let Ok(decoded) = websocket::decode_frame(data) {
                     let is_ping = match &decoded {
-                        // v3 control frame ping
                         websocket::DecodedFrame::V3Control(
                             truffle_core::protocol::frame::ControlMessage::Ping { timestamp },
                         ) => Some(*timestamp),
-                        // v2 legacy ping
-                        websocket::DecodedFrame::Legacy(wire_msg)
-                            if wire_msg.payload.get("type").and_then(|t| t.as_str())
-                                == Some("ping") =>
-                        {
-                            wire_msg.payload.get("timestamp").and_then(|v| v.as_u64())
-                        }
                         _ => None,
                     };
                     if let Some(ts) = is_ping {

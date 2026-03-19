@@ -2,7 +2,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
 use truffle_core::mesh::node::MeshNodeEvent;
-use truffle_core::reverse_proxy::ProxyEvent;
+use truffle_core::http::proxy::ProxyEvent;
 use truffle_core::types::DeviceRole;
 
 // ═══════════════════════════════════════════════════════════════════════════

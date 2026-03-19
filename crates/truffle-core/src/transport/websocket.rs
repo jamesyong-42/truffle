@@ -12,10 +12,6 @@ use crate::protocol::frame::{ControlMessage, Flags, FrameType, ProtocolError, Wi
 /// Maximum WebSocket message size (16 MB, matching old FrameCodec MAX_MESSAGE_SIZE).
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
-/// 1-byte flags prefix on WS binary payload (v2 protocol).
-pub const FLAG_FORMAT_MSGPACK: u8 = 0x00;
-pub const FLAG_FORMAT_JSON: u8 = 0x02;
-
 /// Errors from WebSocket operations.
 #[derive(Debug, thiserror::Error)]
 pub enum WsError {
@@ -30,9 +26,6 @@ pub enum WsError {
 
     #[error("empty binary frame (missing flags byte)")]
     EmptyBinaryFrame,
-
-    #[error("unknown format flag: 0x{0:02X}")]
-    UnknownFormat(u8),
 
     #[error("MessagePack decode error: {0}")]
     MsgpackDecode(#[from] rmp_serde::decode::Error),
@@ -63,11 +56,9 @@ pub struct WireMessage {
 // v3 frame types (RFC 009 Phase 2)
 // ---------------------------------------------------------------------------
 
-/// A decoded frame from the wire, supporting both v2 (legacy) and v3 formats.
+/// A decoded v3 frame from the wire.
 ///
-/// The `decode_frame` function detects the protocol version by inspecting byte 0:
-/// - `0x01`, `0x02`, `0x03` -> v3 frame (2-byte header + payload)
-/// - Anything else -> v2 legacy frame (1-byte flags + payload)
+/// All frames use the v3 format: 2-byte header (frame type + flags) + payload.
 #[derive(Debug, Clone)]
 pub enum DecodedFrame {
     /// v3 control frame (heartbeat ping/pong, handshake, etc.).
@@ -79,8 +70,6 @@ pub enum DecodedFrame {
     },
     /// v3 error frame (protocol-level error from peer).
     V3Error(ProtocolError),
-    /// Legacy v2 frame (old 1-byte flags format). Backward compatibility.
-    Legacy(WireMessage),
 }
 
 // ---------------------------------------------------------------------------
@@ -137,51 +126,16 @@ pub fn encode_error_frame(error: &ProtocolError, use_json: bool) -> Result<Vec<u
 // v3 decode functions
 // ---------------------------------------------------------------------------
 
-/// Decode a binary WebSocket message, accepting both v2 and v3 formats.
+/// Decode a binary WebSocket message (v3 format only).
 ///
-/// Detection logic:
-/// - If byte 0 is `0x01`, `0x02`, or `0x03` -> v3 frame (2-byte header).
-/// - Otherwise -> v2 legacy frame (1-byte flags).
-///
-/// This allows old v2 nodes and new v3 nodes to coexist during migration.
+/// All frames must use the v3 wire format: `[frame_type, flags, ...payload]`.
+/// The first byte must be a valid `FrameType` (`0x01`, `0x02`, or `0x03`).
 pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, WsError> {
     if data.is_empty() {
         return Err(WsError::EmptyBinaryFrame);
     }
 
-    let first_byte = data[0];
-
-    // v3 detection: byte 0 is a known FrameType (0x01, 0x02, 0x03).
-    // v2 frames use byte 0 as flags where bits 1-2 encode the format:
-    //   0x00 = msgpack, 0x02 = json. Neither 0x01 nor 0x03 are valid v2 flags.
-    // So 0x01 and 0x03 unambiguously indicate v3.
-    // 0x02 is ambiguous (could be v2 JSON or v3 Data frame), but we resolve this
-    // by checking if the frame has at least 2 bytes and byte 1 is a valid v3 Flags
-    // byte (0x00 or 0x01). For v2 JSON, byte 1 would be the start of the JSON
-    // payload (typically '{' = 0x7B), which has reserved bits set and would fail
-    // Flags::from_byte. So we try v3 first for 0x02; if flags parsing fails, fall
-    // back to v2.
-    match first_byte {
-        0x01 | 0x03 => decode_v3_frame(data),
-        0x02 => {
-            // Ambiguous: could be v3 Data or v2 JSON.
-            // Try v3 first — if flags byte (data[1]) passes reserved-bits check,
-            // treat as v3. Otherwise fall back to v2.
-            if data.len() >= 2 {
-                if let Ok(_flags) = Flags::from_byte(data[1]) {
-                    return decode_v3_frame(data);
-                }
-            }
-            // Fall back to v2 legacy decode
-            #[allow(deprecated)]
-            decode_message(data).map(DecodedFrame::Legacy)
-        }
-        _ => {
-            // v2 legacy frame
-            #[allow(deprecated)]
-            decode_message(data).map(DecodedFrame::Legacy)
-        }
-    }
+    decode_v3_frame(data)
 }
 
 /// Decode a v3 frame (assumes byte 0 is a valid FrameType).
@@ -245,58 +199,6 @@ pub fn ws_config() -> WebSocketConfig {
     config
 }
 
-/// Encode a message for sending over WebSocket (v2 legacy format).
-///
-/// Uses 1-byte flags prefix: 0x00 = MessagePack, 0x02 = JSON.
-#[deprecated(note = "Use v3 encode_data_frame / decode_frame instead")]
-pub fn encode_message(value: &serde_json::Value, use_json: bool) -> Result<Vec<u8>, WsError> {
-    if use_json {
-        let json_bytes = serde_json::to_vec(value)?;
-        let mut buf = Vec::with_capacity(1 + json_bytes.len());
-        buf.push(FLAG_FORMAT_JSON);
-        buf.extend_from_slice(&json_bytes);
-        Ok(buf)
-    } else {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let mut buf = Vec::with_capacity(1 + msgpack_bytes.len());
-        buf.push(FLAG_FORMAT_MSGPACK);
-        buf.extend_from_slice(&msgpack_bytes);
-        Ok(buf)
-    }
-}
-
-/// Decode a binary WebSocket message (v2 legacy format).
-///
-/// Reads the 1-byte flags prefix to determine serialization format.
-#[deprecated(note = "Use v3 encode_data_frame / decode_frame instead")]
-pub fn decode_message(data: &[u8]) -> Result<WireMessage, WsError> {
-    if data.is_empty() {
-        return Err(WsError::EmptyBinaryFrame);
-    }
-
-    let flags = data[0];
-    let payload_bytes = &data[1..];
-
-    let format = flags & 0x06; // bits 1-2
-    match format {
-        FLAG_FORMAT_MSGPACK => {
-            let payload: serde_json::Value = rmp_serde::from_slice(payload_bytes)?;
-            Ok(WireMessage {
-                payload,
-                was_json: false,
-            })
-        }
-        FLAG_FORMAT_JSON => {
-            let payload: serde_json::Value = serde_json::from_slice(payload_bytes)?;
-            Ok(WireMessage {
-                payload,
-                was_json: true,
-            })
-        }
-        _ => Err(WsError::UnknownFormat(flags)),
-    }
-}
-
 /// Result of the read pump — why it stopped.
 #[derive(Debug)]
 pub enum ReadPumpExit {
@@ -343,25 +245,9 @@ where
                     }
                 }
             }
-            Some(Ok(Message::Text(text))) => {
-                // RFC 009 Phase 4: text frames are deprecated; log a warning.
-                tracing::warn!("Received text frame — deprecated, use binary frames");
-
-                // Legacy text frames: try to parse as JSON, wrap as Legacy
-                match serde_json::from_str::<serde_json::Value>(&text) {
-                    Ok(payload) => {
-                        let frame = DecodedFrame::Legacy(WireMessage {
-                            payload,
-                            was_json: true,
-                        });
-                        if msg_tx.send(frame).await.is_err() {
-                            return ReadPumpExit::ClosedByLocal;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("failed to parse WS text message: {e}");
-                    }
-                }
+            Some(Ok(Message::Text(_text))) => {
+                // Text frames are not supported in v3; only binary frames are used.
+                tracing::warn!("Received text frame — not supported in v3, ignoring");
             }
             Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
                 // Handled by tokio-tungstenite automatically
@@ -415,63 +301,18 @@ where
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // Tests exercise both v2 legacy and v3 functions
 mod tests {
     use super::*;
     use crate::protocol::frame::{ControlMessage, ErrorCode, Flags, FrameType, ProtocolError};
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // v2 legacy encode/decode tests (existing, preserved)
-    // ═══════════════════════════════════════════════════════════════════════
-
     #[test]
-    fn encode_decode_msgpack_roundtrip() {
-        let value = serde_json::json!({
-            "namespace": "mesh",
-            "type": "announce",
-            "payload": { "deviceId": "abc123" }
-        });
-
-        let encoded = encode_message(&value, false).unwrap();
-        assert_eq!(encoded[0], FLAG_FORMAT_MSGPACK);
-
-        let decoded = decode_message(&encoded).unwrap();
-        assert!(!decoded.was_json);
-        assert_eq!(decoded.payload, value);
+    fn ws_config_max_size() {
+        let config = ws_config();
+        assert_eq!(config.max_message_size, Some(MAX_MESSAGE_SIZE));
     }
 
     #[test]
-    fn encode_decode_json_roundtrip() {
-        let value = serde_json::json!({
-            "namespace": "mesh",
-            "type": "announce",
-            "payload": { "deviceId": "abc123" }
-        });
-
-        let encoded = encode_message(&value, true).unwrap();
-        assert_eq!(encoded[0], FLAG_FORMAT_JSON);
-
-        let decoded = decode_message(&encoded).unwrap();
-        assert!(decoded.was_json);
-        assert_eq!(decoded.payload, value);
-    }
-
-    #[test]
-    fn decode_empty_binary_frame() {
-        let err = decode_message(&[]).unwrap_err();
-        assert!(matches!(err, WsError::EmptyBinaryFrame));
-    }
-
-    #[test]
-    fn decode_unknown_format() {
-        // flags = 0x04 (bits 1-2 = 10, which is reserved)
-        let data = vec![0x04, 0x00];
-        let err = decode_message(&data).unwrap_err();
-        assert!(matches!(err, WsError::UnknownFormat(0x04)));
-    }
-
-    #[test]
-    fn msgpack_smaller_than_json() {
+    fn v3_msgpack_smaller_than_json() {
         let value = serde_json::json!({
             "namespace": "mesh",
             "type": "deviceAnnounce",
@@ -484,8 +325,8 @@ mod tests {
             }
         });
 
-        let msgpack = encode_message(&value, false).unwrap();
-        let json = encode_message(&value, true).unwrap();
+        let msgpack = encode_data_frame(&value, false).unwrap();
+        let json = encode_data_frame(&value, true).unwrap();
 
         assert!(
             msgpack.len() < json.len(),
@@ -493,12 +334,6 @@ mod tests {
             msgpack.len(),
             json.len()
         );
-    }
-
-    #[test]
-    fn ws_config_max_size() {
-        let config = ws_config();
-        assert_eq!(config.max_message_size, Some(MAX_MESSAGE_SIZE));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -711,55 +546,6 @@ mod tests {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // decode_frame backward compatibility: v2 frames decoded as Legacy
-    // ═══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn decode_frame_v2_msgpack_as_legacy() {
-        let value = serde_json::json!({
-            "namespace": "mesh",
-            "type": "announce",
-            "payload": { "deviceId": "abc123" }
-        });
-        // v2 msgpack: byte 0 = 0x00
-        let encoded = encode_message(&value, false).unwrap();
-        assert_eq!(encoded[0], 0x00);
-
-        let decoded = decode_frame(&encoded).unwrap();
-        match decoded {
-            DecodedFrame::Legacy(msg) => {
-                assert!(!msg.was_json);
-                assert_eq!(msg.payload, value);
-            }
-            other => panic!("expected Legacy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decode_frame_v2_json_as_legacy() {
-        let value = serde_json::json!({
-            "namespace": "mesh",
-            "type": "announce",
-            "payload": { "deviceId": "abc123" }
-        });
-        // v2 JSON: byte 0 = 0x02, byte 1 = '{' (0x7B)
-        let encoded = encode_message(&value, true).unwrap();
-        assert_eq!(encoded[0], 0x02);
-        // byte 1 is '{' = 0x7B which has reserved bits set, so Flags::from_byte
-        // will fail, causing decode_frame to fall back to v2 Legacy.
-        assert_eq!(encoded[1], b'{');
-
-        let decoded = decode_frame(&encoded).unwrap();
-        match decoded {
-            DecodedFrame::Legacy(msg) => {
-                assert!(msg.was_json);
-                assert_eq!(msg.payload, value);
-            }
-            other => panic!("expected Legacy for v2 JSON, got {other:?}"),
-        }
-    }
-
     #[test]
     fn decode_frame_empty() {
         let err = decode_frame(&[]).unwrap_err();
@@ -845,30 +631,6 @@ mod tests {
             }
             other => panic!("expected V3Control Ping, got {other:?}"),
         }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Mixed v2/v3 coexistence
-    // ═══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn decode_frame_distinguishes_v2_and_v3() {
-        // v2 msgpack data
-        let v2_value = serde_json::json!({"namespace": "mesh", "type": "test"});
-        let v2_encoded = encode_message(&v2_value, false).unwrap();
-
-        // v3 data frame
-        let v3_value = serde_json::json!({"namespace": "sync", "type": "sync-full"});
-        let v3_encoded = encode_data_frame(&v3_value, false).unwrap();
-
-        // v3 control frame
-        let v3_ping = ControlMessage::Ping { timestamp: 42 };
-        let v3_ctrl = encode_control_frame(&v3_ping, false).unwrap();
-
-        // All should decode correctly
-        assert!(matches!(decode_frame(&v2_encoded).unwrap(), DecodedFrame::Legacy(_)));
-        assert!(matches!(decode_frame(&v3_encoded).unwrap(), DecodedFrame::V3Data { .. }));
-        assert!(matches!(decode_frame(&v3_ctrl).unwrap(), DecodedFrame::V3Control(_)));
     }
 
     #[test]

@@ -56,18 +56,18 @@ pub fn route_to_device(
     RouteDecision::Unroutable
 }
 
-/// Create a route:message envelope that wraps another envelope for routing via primary.
+/// Create a route-message envelope that wraps another envelope for routing via primary.
 pub fn wrap_route_message(target_device_id: &str, envelope: &MeshEnvelope) -> Option<MeshEnvelope> {
     let inner_value = match serde_json::to_value(envelope) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("Failed to serialize inner envelope for route:message: {e}");
+            tracing::error!("Failed to serialize inner envelope for route-message: {e}");
             return None;
         }
     };
     Some(MeshEnvelope::new(
         MESH_NAMESPACE,
-        "route:message",
+        "route-message",
         serde_json::json!({
             "targetDeviceId": target_device_id,
             "envelope": inner_value
@@ -75,18 +75,18 @@ pub fn wrap_route_message(target_device_id: &str, envelope: &MeshEnvelope) -> Op
     ))
 }
 
-/// Create a route:broadcast envelope that wraps another envelope for broadcast via primary.
+/// Create a route-broadcast envelope that wraps another envelope for broadcast via primary.
 pub fn wrap_route_broadcast(envelope: &MeshEnvelope) -> Option<MeshEnvelope> {
     let inner_value = match serde_json::to_value(envelope) {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!("Failed to serialize inner envelope for route:broadcast: {e}");
+            tracing::error!("Failed to serialize inner envelope for route-broadcast: {e}");
             return None;
         }
     };
     Some(MeshEnvelope::new(
         MESH_NAMESPACE,
-        "route:broadcast",
+        "route-broadcast",
         serde_json::json!({
             "envelope": inner_value
         }),
@@ -138,7 +138,7 @@ mod tests {
         let wrapped = wrap_route_message("dev-2", &inner)
             .expect("wrap_route_message must succeed for valid envelope");
         assert_eq!(wrapped.namespace, MESH_NAMESPACE);
-        assert_eq!(wrapped.msg_type, "route:message");
+        assert_eq!(wrapped.msg_type, "route-message");
 
         let payload = &wrapped.payload;
         assert_eq!(
@@ -154,7 +154,7 @@ mod tests {
         let wrapped = wrap_route_broadcast(&inner)
             .expect("wrap_route_broadcast must succeed for valid envelope");
         assert_eq!(wrapped.namespace, MESH_NAMESPACE);
-        assert_eq!(wrapped.msg_type, "route:broadcast");
+        assert_eq!(wrapped.msg_type, "route-broadcast");
         assert!(wrapped.payload.get("envelope").is_some());
     }
 }

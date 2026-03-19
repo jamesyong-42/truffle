@@ -5,10 +5,10 @@ pub const STORE_SYNC_NAMESPACE: &str = "sync";
 
 /// Message types for store synchronization.
 pub mod message_types {
-    pub const SYNC_FULL: &str = "store:sync:full";
-    pub const SYNC_UPDATE: &str = "store:sync:update";
-    pub const SYNC_REQUEST: &str = "store:sync:request";
-    pub const SYNC_CLEAR: &str = "store:sync:clear";
+    pub const SYNC_FULL: &str = "sync-full";
+    pub const SYNC_UPDATE: &str = "sync-update";
+    pub const SYNC_REQUEST: &str = "sync-request";
+    pub const SYNC_CLEAR: &str = "sync-clear";
 }
 
 /// A device-owned slice of data in a store.
@@ -151,10 +151,10 @@ mod tests {
 
     #[test]
     fn message_type_constants() {
-        assert_eq!(message_types::SYNC_FULL, "store:sync:full");
-        assert_eq!(message_types::SYNC_UPDATE, "store:sync:update");
-        assert_eq!(message_types::SYNC_REQUEST, "store:sync:request");
-        assert_eq!(message_types::SYNC_CLEAR, "store:sync:clear");
+        assert_eq!(message_types::SYNC_FULL, "sync-full");
+        assert_eq!(message_types::SYNC_UPDATE, "sync-update");
+        assert_eq!(message_types::SYNC_REQUEST, "sync-request");
+        assert_eq!(message_types::SYNC_CLEAR, "sync-clear");
         assert_eq!(STORE_SYNC_NAMESPACE, "sync");
     }
 }

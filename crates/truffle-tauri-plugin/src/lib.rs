@@ -5,7 +5,7 @@ use tauri::{Manager, Runtime};
 use tokio::sync::RwLock;
 
 use truffle_core::mesh::node::MeshNode;
-use truffle_core::reverse_proxy::ProxyManager;
+use truffle_core::http::proxy::ProxyManager;
 
 pub mod commands;
 pub mod events;

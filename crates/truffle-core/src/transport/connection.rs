@@ -18,7 +18,7 @@ use crate::protocol::frame::ControlMessage;
 
 use super::heartbeat::{self, HeartbeatConfig, HeartbeatTimeout};
 use super::reconnect::ReconnectTarget;
-use super::websocket::{self, DecodedFrame, WireMessage, WsError};
+use super::websocket::{self, DecodedFrame, WsError, WireMessage};
 
 /// Protocol version 2: legacy format (pre-RFC 009). No frame type byte.
 pub const PROTOCOL_V2: u8 = 2;
@@ -485,41 +485,6 @@ impl ConnectionManager {
                             // If fatal, the peer will close. We just log it.
                         }
 
-                        // --- v2 legacy frames ---
-                        DecodedFrame::Legacy(msg) => {
-                            tracing::warn!("Received legacy v2 frame — peer should upgrade to v3");
-
-                            // Check for v2 heartbeat using content inspection
-                            #[allow(deprecated)]
-                            if heartbeat::is_heartbeat_message(&msg.payload) {
-                                if let Some(ts) =
-                                    msg.payload.get("timestamp").and_then(|v| v.as_u64())
-                                {
-                                    if msg.payload.get("type").and_then(|v| v.as_str())
-                                        == Some("ping")
-                                    {
-                                        // Respond with v3 pong (new nodes always
-                                        // respond with v3 control frames)
-                                        let pong = heartbeat::create_v3_pong(ts);
-                                        let conns = connections_for_pong.read().await;
-                                        if let Some(ac) = conns.get(&conn_id_msg) {
-                                            if let Ok(encoded) =
-                                                websocket::encode_control_frame(&pong, false)
-                                            {
-                                                let _ = ac.write_tx.send(encoded).await;
-                                            }
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Forward v2 application message
-                            let _ = event_tx_msg.send(TransportEvent::Message {
-                                connection_id: conn_id_msg.clone(),
-                                message: msg,
-                            });
-                        }
                     }
                 }
             });
@@ -567,9 +532,7 @@ impl ConnectionManager {
 
     /// Send a message to a specific connection.
     ///
-    /// Version-aware (RFC 009 Phase 4): if the connection has been upgraded
-    /// to v3 via handshake, sends a v3 data frame. Otherwise sends a v2
-    /// legacy frame.
+    /// Always uses v3 data frame format (2-byte header + payload).
     pub async fn send(
         &self,
         connection_id: &str,
@@ -578,17 +541,8 @@ impl ConnectionManager {
         let conns = self.connections.read().await;
         let conn = conns.get(connection_id).ok_or(WsError::Closed)?;
 
-        let version = conn.protocol_version.load(Ordering::Acquire);
         let use_json = self.config.debug_json_mode;
-
-        let encoded = if version >= PROTOCOL_V3 {
-            // v3 peer: use 2-byte header data frame
-            websocket::encode_data_frame(value, use_json)?
-        } else {
-            // v2 peer: use 1-byte flags legacy format
-            #[allow(deprecated)]
-            websocket::encode_message(value, use_json)?
-        };
+        let encoded = websocket::encode_data_frame(value, use_json)?;
 
         conn.write_tx
             .send(encoded)
@@ -725,7 +679,6 @@ impl crate::bridge::manager::BridgeHandler for WsOutgoingHandler {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // Tests exercise v2 legacy encode/decode for backward compat verification
 mod tests {
     use super::*;
 
@@ -782,8 +735,8 @@ mod tests {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Send a test message as WS binary with flags prefix
-        let test_msg = websocket::encode_message(
+        // Send a test message as v3 data frame
+        let test_msg = websocket::encode_data_frame(
             &serde_json::json!({"namespace": "test", "type": "hello"}),
             false,
         )
@@ -795,18 +748,20 @@ mod tests {
 
         // Read the echo
         if let Some(Ok(Message::Binary(data))) = read.next().await {
-            let decoded = websocket::decode_message(&data).unwrap();
-            assert_eq!(
-                decoded.payload.get("type").unwrap().as_str().unwrap(),
-                "hello"
-            );
-            assert!(!decoded.was_json);
+            let decoded = websocket::decode_frame(&data).unwrap();
+            match decoded {
+                websocket::DecodedFrame::V3Data { payload, was_json } => {
+                    assert_eq!(payload.get("type").unwrap().as_str().unwrap(), "hello");
+                    assert!(!was_json);
+                }
+                other => panic!("expected V3Data, got {other:?}"),
+            }
         } else {
             panic!("expected binary echo");
         }
 
-        // Send a JSON-mode message
-        let json_msg = websocket::encode_message(
+        // Send a JSON-mode v3 data frame
+        let json_msg = websocket::encode_data_frame(
             &serde_json::json!({"namespace": "mesh", "type": "announce"}),
             true,
         )
@@ -817,12 +772,14 @@ mod tests {
             .unwrap();
 
         if let Some(Ok(Message::Binary(data))) = read.next().await {
-            let decoded = websocket::decode_message(&data).unwrap();
-            assert_eq!(
-                decoded.payload.get("type").unwrap().as_str().unwrap(),
-                "announce"
-            );
-            assert!(decoded.was_json);
+            let decoded = websocket::decode_frame(&data).unwrap();
+            match decoded {
+                websocket::DecodedFrame::V3Data { payload, was_json } => {
+                    assert_eq!(payload.get("type").unwrap().as_str().unwrap(), "announce");
+                    assert!(was_json);
+                }
+                other => panic!("expected V3Data, got {other:?}"),
+            }
         } else {
             panic!("expected binary echo for JSON mode");
         }
@@ -1139,9 +1096,9 @@ mod tests {
         // Consume the Connected event
         let _ = rx.recv().await.unwrap();
 
-        // Send a non-heartbeat message from the client side
+        // Send a message from the client side
         let payload = serde_json::json!({"namespace": "mesh", "type": "announce", "data": "hello"});
-        let encoded = websocket::encode_message(&payload, false).unwrap();
+        let encoded = websocket::encode_data_frame(&payload, false).unwrap();
         client_ws
             .send(Message::Binary(bytes::Bytes::from(encoded)))
             .await
@@ -1535,15 +1492,20 @@ mod tests {
 
         match received {
             Message::Binary(data) => {
-                let decoded = websocket::decode_message(&data).unwrap();
-                assert_eq!(
-                    decoded.payload.get("type").unwrap().as_str().unwrap(),
-                    "state"
-                );
-                assert_eq!(
-                    decoded.payload.get("value").unwrap().as_i64().unwrap(),
-                    42
-                );
+                let decoded = websocket::decode_frame(&data).unwrap();
+                match decoded {
+                    websocket::DecodedFrame::V3Data { payload, .. } => {
+                        assert_eq!(
+                            payload.get("type").unwrap().as_str().unwrap(),
+                            "state"
+                        );
+                        assert_eq!(
+                            payload.get("value").unwrap().as_i64().unwrap(),
+                            42
+                        );
+                    }
+                    other => panic!("expected V3Data, got {other:?}"),
+                }
             }
             other => panic!("expected binary message, got {:?}", other),
         }
@@ -2229,11 +2191,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_version_aware_send_v2() {
+    async fn test_send_always_uses_v3_format() {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::Message;
 
-        // No handshake => v2 mode => send() uses v2 format
+        // send() always uses v3 format regardless of handshake state
         let (manager, _rx) = ConnectionManager::new(test_config());
         let (server_ws, mut client_ws) = duplex_ws_pair().await;
 
@@ -2248,7 +2210,7 @@ mod tests {
 
         let conn_id = "incoming:100.64.0.2:443";
 
-        // Send a message — should use v2 format (1-byte flags header)
+        // Send a message — should always use v3 format (2-byte header)
         let msg = serde_json::json!({"namespace": "mesh", "type": "test"});
         manager.send(conn_id, &msg).await.unwrap();
 
@@ -2260,11 +2222,16 @@ mod tests {
 
         match received {
             Message::Binary(data) => {
-                // v2 format: byte 0 is flags (0x00 = msgpack)
-                assert_eq!(data[0], 0x00, "expected v2 msgpack flag byte");
-                // Verify it decodes as v2 legacy
-                let decoded = websocket::decode_message(&data).unwrap();
-                assert_eq!(decoded.payload["type"], "test");
+                // v3 format: byte 0 is FrameType::Data (0x02)
+                assert_eq!(data[0], 0x02, "expected v3 Data frame type byte");
+                // Verify it decodes as v3 data
+                let decoded = websocket::decode_frame(&data).unwrap();
+                match decoded {
+                    websocket::DecodedFrame::V3Data { payload, .. } => {
+                        assert_eq!(payload["type"], "test");
+                    }
+                    other => panic!("expected V3Data, got {other:?}"),
+                }
             }
             other => panic!("expected binary, got {other:?}"),
         }
@@ -2356,9 +2323,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_bidirectional_handshake() {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-
         // Both sides have handshake enabled
         let config_a = test_config_with_handshake("device-a");
         let config_b = test_config_with_handshake("device-b");

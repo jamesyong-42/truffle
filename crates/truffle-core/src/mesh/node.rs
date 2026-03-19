@@ -622,7 +622,7 @@ impl MeshNode {
             }
         };
         let goodbye = MeshMessage::new(
-            "device:goodbye",
+            "device-goodbye",
             &self.config.device_id,
             goodbye_payload,
         );
@@ -748,7 +748,7 @@ impl MeshNode {
                                 }
                             };
                             let list_msg = MeshMessage::new(
-                                "device:list",
+                                "device-list",
                                 &config_id,
                                 list_payload,
                             );
@@ -899,7 +899,7 @@ impl MeshNode {
                     }
                 };
                 let announce = MeshMessage::new(
-                    "device:announce",
+                    "device-announce",
                     &device_id,
                     announce_payload,
                 );

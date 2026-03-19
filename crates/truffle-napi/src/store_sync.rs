@@ -5,8 +5,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use tokio::sync::mpsc;
 
-use truffle_core::store_sync::adapter::{StoreSyncAdapter as CoreAdapter, StoreSyncAdapterConfig};
-use truffle_core::store_sync::types::{DeviceSlice, OutgoingSyncMessage, SyncMessage};
+use truffle_core::services::store_sync::adapter::{StoreSyncAdapter as CoreAdapter, StoreSyncAdapterConfig};
+use truffle_core::services::store_sync::types::{DeviceSlice, OutgoingSyncMessage, SyncMessage};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAPI object types for store sync

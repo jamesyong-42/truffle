@@ -282,7 +282,7 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
     }
 }
 
-/// Convert a TruffleEvent into a NapiTruffleEvent (same shape as NapiMeshEvent) for delivery to JS.
+/// Convert a TruffleEvent into a NapiMeshEvent (same shape as NapiMeshEvent) for delivery to JS.
 ///
 /// This is the new unified event conversion. All TruffleEvent variants are mapped
 /// to the same { event_type, device_id, payload } shape used by NapiMeshEvent,
@@ -290,29 +290,29 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
 ///
 /// IMPORTANT: This function must NEVER panic. All conversions use
 /// fallible operations with fallback values.
-pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
+pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiMeshEvent {
     match event {
-        TruffleEvent::Started => NapiTruffleEvent {
+        TruffleEvent::Started => NapiMeshEvent {
             event_type: "started".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::Stopped => NapiTruffleEvent {
+        TruffleEvent::Stopped => NapiMeshEvent {
             event_type: "stopped".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::AuthRequired { auth_url } => NapiTruffleEvent {
+        TruffleEvent::AuthRequired { auth_url } => NapiMeshEvent {
             event_type: "authRequired".to_string(),
             device_id: None,
             payload: serde_json::Value::String(auth_url.clone()),
         },
-        TruffleEvent::AuthComplete => NapiTruffleEvent {
+        TruffleEvent::AuthComplete => NapiMeshEvent {
             event_type: "authComplete".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::Online { ip, dns_name } => NapiTruffleEvent {
+        TruffleEvent::Online { ip, dns_name } => NapiMeshEvent {
             event_type: "online".to_string(),
             device_id: None,
             payload: serde_json::json!({
@@ -320,17 +320,17 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
                 "dnsName": dns_name,
             }),
         },
-        TruffleEvent::SidecarStarted => NapiTruffleEvent {
+        TruffleEvent::SidecarStarted => NapiMeshEvent {
             event_type: "sidecarStarted".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::SidecarStopped => NapiTruffleEvent {
+        TruffleEvent::SidecarStopped => NapiMeshEvent {
             event_type: "sidecarStopped".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::SidecarCrashed { exit_code, stderr_tail } => NapiTruffleEvent {
+        TruffleEvent::SidecarCrashed { exit_code, stderr_tail } => NapiMeshEvent {
             event_type: "sidecarCrashed".to_string(),
             device_id: None,
             payload: serde_json::json!({
@@ -338,47 +338,47 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
                 "stderrTail": stderr_tail,
             }),
         },
-        TruffleEvent::SidecarStateChanged { state } => NapiTruffleEvent {
+        TruffleEvent::SidecarStateChanged { state } => NapiMeshEvent {
             event_type: "sidecarStateChanged".to_string(),
             device_id: None,
             payload: serde_json::Value::String(state.clone()),
         },
-        TruffleEvent::SidecarNeedsApproval => NapiTruffleEvent {
+        TruffleEvent::SidecarNeedsApproval => NapiMeshEvent {
             event_type: "sidecarNeedsApproval".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::SidecarKeyExpiring { expires_at } => NapiTruffleEvent {
+        TruffleEvent::SidecarKeyExpiring { expires_at } => NapiMeshEvent {
             event_type: "sidecarKeyExpiring".to_string(),
             device_id: None,
             payload: serde_json::Value::String(expires_at.clone()),
         },
-        TruffleEvent::SidecarHealthWarning { warnings } => NapiTruffleEvent {
+        TruffleEvent::SidecarHealthWarning { warnings } => NapiMeshEvent {
             event_type: "sidecarHealthWarning".to_string(),
             device_id: None,
             payload: serde_json::to_value(warnings).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceDiscovered(device) => NapiTruffleEvent {
+        TruffleEvent::DeviceDiscovered(device) => NapiMeshEvent {
             event_type: "deviceDiscovered".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceUpdated(device) => NapiTruffleEvent {
+        TruffleEvent::DeviceUpdated(device) => NapiMeshEvent {
             event_type: "deviceUpdated".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceOffline(id) => NapiTruffleEvent {
+        TruffleEvent::DeviceOffline(id) => NapiMeshEvent {
             event_type: "deviceOffline".to_string(),
             device_id: Some(id.clone()),
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::DevicesChanged(devices) => NapiTruffleEvent {
+        TruffleEvent::DevicesChanged(devices) => NapiMeshEvent {
             event_type: "devicesChanged".to_string(),
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::RoleChanged { role, is_primary } => NapiTruffleEvent {
+        TruffleEvent::RoleChanged { role, is_primary } => NapiMeshEvent {
             event_type: "roleChanged".to_string(),
             device_id: None,
             payload: serde_json::json!({
@@ -389,7 +389,7 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
                 "isPrimary": is_primary,
             }),
         },
-        TruffleEvent::PrimaryChanged { primary_id } => NapiTruffleEvent {
+        TruffleEvent::PrimaryChanged { primary_id } => NapiMeshEvent {
             event_type: "primaryChanged".to_string(),
             device_id: primary_id.clone(),
             payload: serde_json::Value::Null,
@@ -397,7 +397,7 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
         TruffleEvent::Message(msg) => {
             let ns = normalize_namespace(&msg.namespace);
             let mt = normalize_msg_type(&ns, &msg.msg_type);
-            NapiTruffleEvent {
+            NapiMeshEvent {
                 event_type: "message".to_string(),
                 device_id: msg.from.clone(),
                 payload: serde_json::json!({
@@ -408,7 +408,7 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
                 }),
             }
         },
-        TruffleEvent::Error(err) => NapiTruffleEvent {
+        TruffleEvent::Error(err) => NapiMeshEvent {
             event_type: "error".to_string(),
             device_id: None,
             payload: serde_json::Value::String(err.clone()),
@@ -433,9 +433,6 @@ pub fn napi_peer_to_core(p: &NapiTailnetPeer) -> truffle_core::types::TailnetPee
     }
 }
 
-/// Type alias: NapiMeshEvent is the canonical name, but NapiTruffleEvent
-/// is accepted as an alias for forward-compatibility with RFC 008 Phase 3.
-pub type NapiTruffleEvent = NapiMeshEvent;
 
 #[cfg(test)]
 mod tests {
@@ -475,7 +472,7 @@ mod tests {
 
     #[test]
     fn truffle_event_to_napi_all_variants() {
-        // Every TruffleEvent variant must produce a valid NapiTruffleEvent
+        // Every TruffleEvent variant must produce a valid NapiMeshEvent
         let events: Vec<TruffleEvent> = vec![
             TruffleEvent::Started,
             TruffleEvent::Stopped,
@@ -528,24 +525,17 @@ mod tests {
     }
 
     #[test]
-    fn napi_mesh_event_alias_still_works() {
-        // NapiTruffleEvent type alias must compile and be assignable from NapiMeshEvent
-        let event: NapiTruffleEvent = NapiMeshEvent {
+    fn napi_mesh_event_construction() {
+        let event = NapiMeshEvent {
             event_type: "started".to_string(),
             device_id: None,
             payload: serde_json::Value::Null,
         };
         assert_eq!(event.event_type, "started");
-
-        // Can also use it in function signatures
-        fn accepts_truffle_event(e: &NapiTruffleEvent) -> &str {
-            &e.event_type
-        }
-        assert_eq!(accepts_truffle_event(&event), "started");
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // RFC 009 Phase 5: Namespace/message-type normalization tests
+    // Namespace/message-type normalization tests
     // ═══════════════════════════════════════════════════════════════════
 
     #[test]
@@ -571,19 +561,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_msg_type_mesh_legacy_colon() {
-        assert_eq!(normalize_msg_type("mesh", "device:announce"), "device-announce");
-        assert_eq!(normalize_msg_type("mesh", "device:list"), "device-list");
-        assert_eq!(normalize_msg_type("mesh", "election:start"), "election-start");
-        assert_eq!(normalize_msg_type("mesh", "route:broadcast"), "route-broadcast");
-    }
-
-    #[test]
-    fn normalize_msg_type_sync_legacy_colon() {
-        assert_eq!(normalize_msg_type("sync", "store:sync:full"), "sync-full");
-        assert_eq!(normalize_msg_type("sync", "store:sync:update"), "sync-update");
-        assert_eq!(normalize_msg_type("sync", "store:sync:request"), "sync-request");
-        assert_eq!(normalize_msg_type("sync", "store:sync:clear"), "sync-clear");
+    fn normalize_msg_type_legacy_colon_passthrough() {
+        // Legacy colon-separated names are no longer recognized and pass through unchanged
+        assert_eq!(normalize_msg_type("mesh", "device:announce"), "device:announce");
+        assert_eq!(normalize_msg_type("sync", "store:sync:full"), "store:sync:full");
     }
 
     #[test]
@@ -593,11 +574,10 @@ mod tests {
     }
 
     #[test]
-    fn normalize_msg_type_file_transfer_legacy_screaming() {
-        assert_eq!(normalize_msg_type("file-transfer", "OFFER"), "file-offer");
-        assert_eq!(normalize_msg_type("file-transfer", "ACCEPT"), "file-accept");
-        assert_eq!(normalize_msg_type("file-transfer", "REJECT"), "file-reject");
-        assert_eq!(normalize_msg_type("file-transfer", "CANCEL"), "file-cancel");
+    fn normalize_msg_type_file_transfer_legacy_screaming_passthrough() {
+        // Legacy SCREAMING_CASE names are no longer recognized and pass through unchanged
+        assert_eq!(normalize_msg_type("file-transfer", "OFFER"), "OFFER");
+        assert_eq!(normalize_msg_type("file-transfer", "ACCEPT"), "ACCEPT");
     }
 
     #[test]
@@ -614,13 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn truffle_event_message_uses_kebab_case_namespace() {
-        // Legacy colon-separated names should be normalized in the event payload
+    fn truffle_event_message_uses_kebab_case() {
         let msg = IncomingMeshMessage {
             from: Some("dev-1".to_string()),
             connection_id: "conn-1".to_string(),
             namespace: "mesh".to_string(),
-            msg_type: "device:announce".to_string(),
+            msg_type: "device-announce".to_string(),
             payload: serde_json::json!({"device": {}}),
         };
         let event = TruffleEvent::Message(msg);
@@ -632,12 +611,12 @@ mod tests {
     }
 
     #[test]
-    fn truffle_event_message_normalizes_file_transfer_legacy() {
+    fn truffle_event_message_file_transfer_kebab() {
         let msg = IncomingMeshMessage {
             from: Some("dev-2".to_string()),
             connection_id: "conn-2".to_string(),
             namespace: "file-transfer".to_string(),
-            msg_type: "OFFER".to_string(),
+            msg_type: "file-offer".to_string(),
             payload: serde_json::json!({}),
         };
         let event = TruffleEvent::Message(msg);
@@ -648,12 +627,12 @@ mod tests {
     }
 
     #[test]
-    fn napi_incoming_message_normalizes() {
+    fn napi_incoming_message_kebab_case() {
         let msg = IncomingMeshMessage {
             from: Some("dev-1".to_string()),
             connection_id: "conn-1".to_string(),
             namespace: "sync".to_string(),
-            msg_type: "store:sync:full".to_string(),
+            msg_type: "sync-full".to_string(),
             payload: serde_json::json!({}),
         };
         let napi: NapiIncomingMessage = (&msg).into();
