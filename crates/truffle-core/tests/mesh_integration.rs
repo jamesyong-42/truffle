@@ -856,7 +856,7 @@ async fn test_broadcast_message_reaches_all_nodes() {
     // The primary broadcasts a custom message
     let envelope = MeshEnvelope::new(
         "test-ns",
-        "ping",
+        "broadcast-test",
         serde_json::json!({"msg": "hello from primary"}),
     );
 
