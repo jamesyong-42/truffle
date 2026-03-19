@@ -20,6 +20,8 @@ use crate::bridge::header::Direction;
 use crate::bridge::manager::{BridgeConnection, BridgeManager, ChannelHandler};
 use crate::bridge::shim::{GoShim, ShimConfig, ShimLifecycleEvent};
 use crate::http::proxy::{ProxyTarget, ReverseProxyHandler};
+use crate::http::push::{PushApiHandler, PushManager};
+use crate::http::pwa::{PwaConfig, PwaHandler};
 use crate::http::router::{HttpHandler, HttpRouter, HttpRouterBridgeHandler, RouterError};
 use crate::http::static_site::{StaticFile, StaticHandler};
 use crate::http::ws_handler::WsUpgradeHandler;
@@ -337,6 +339,7 @@ impl TruffleRuntimeBuilder {
             bridge_pending_dials: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             http_router: Arc::new(Mutex::new(None)),
+            push_manager: Arc::new(Mutex::new(None)),
             config: runtime_config,
             ephemeral: self.ephemeral,
             tags: self.tags,
@@ -366,6 +369,8 @@ pub struct TruffleRuntime {
     event_tx: broadcast::Sender<TruffleEvent>,
     /// HTTP router for path-based routing on port 443 (RFC 008 Phase 4).
     http_router: Arc<Mutex<Option<Arc<HttpRouter>>>>,
+    /// Push notification manager (RFC 008 Phase 5).
+    push_manager: Arc<Mutex<Option<Arc<PushManager>>>>,
     /// Stored config for sidecar bootstrap at start() time.
     config: RuntimeConfig,
     /// Whether the tsnet node is ephemeral.
@@ -398,6 +403,7 @@ impl TruffleRuntime {
             bridge_pending_dials: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             http_router: Arc::new(Mutex::new(None)),
+            push_manager: Arc::new(Mutex::new(None)),
             config: RuntimeConfig {
                 mesh: config.mesh.clone(),
                 transport: config.transport.clone(),
@@ -522,7 +528,16 @@ impl TruffleRuntime {
         let guard = self.http_router.lock().await;
         guard.as_ref().map(|router| HttpHandle {
             router: router.clone(),
+            push_state: self.push_manager.clone(),
         })
+    }
+
+    /// Get a reference to the push manager, if PWA/push has been enabled.
+    ///
+    /// Returns `None` if `enable_pwa()` hasn't been called yet.
+    pub async fn push(&self) -> Option<Arc<PushManager>> {
+        let guard = self.push_manager.lock().await;
+        guard.clone()
     }
 
     // ── Event forwarding ───────────────────────────────────────────────
@@ -839,9 +854,12 @@ pub fn mesh_event_to_truffle(event: MeshNodeEvent) -> TruffleEvent {
 /// Handle for managing HTTP routes at runtime.
 ///
 /// Obtained via `runtime.http().await`. Provides a convenient API for
-/// registering reverse proxies, static file handlers, and SPA routes.
+/// registering reverse proxies, static file handlers, SPA routes,
+/// PWA support, and push notification endpoints.
 pub struct HttpHandle {
     router: Arc<HttpRouter>,
+    /// Shared push manager state -- written by `enable_pwa`, read by `push_manager()`.
+    push_state: Arc<Mutex<Option<Arc<PushManager>>>>,
 }
 
 impl HttpHandle {
@@ -922,6 +940,64 @@ impl HttpHandle {
     /// List all registered routes.
     pub async fn routes(&self) -> Vec<crate::http::router::Route> {
         self.router.list_routes().await
+    }
+
+    /// Enable PWA support by registering a PWA handler at the given prefix.
+    ///
+    /// Serves the PWA manifest, service worker, and icons. Optionally sets up
+    /// push notification endpoints if a VAPID key path is provided.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let http = runtime.http().await.unwrap();
+    /// http.enable_pwa(PwaConfig {
+    ///     name: "My App".to_string(),
+    ///     short_name: "MyApp".to_string(),
+    ///     ..PwaConfig::default()
+    /// }, "/pwa", None).await?;
+    /// ```
+    pub async fn enable_pwa(
+        &self,
+        config: PwaConfig,
+        prefix: &str,
+        vapid_key_path: Option<PathBuf>,
+    ) -> Result<Option<Arc<PushManager>>, RouterError> {
+        // Register the PWA handler
+        let pwa_handler: Arc<dyn HttpHandler> = Arc::new(PwaHandler::new(&config, prefix));
+        self.router
+            .add_route(prefix, "PWA", "pwa", pwa_handler)
+            .await?;
+
+        // Optionally set up push notifications
+        if let Some(key_path) = vapid_key_path {
+            let push_manager = PushManager::load_or_create(&key_path)
+                .await
+                .map_err(|e| RouterError::InvalidPrefix(format!("VAPID key error: {e}")))?;
+            let push_manager = Arc::new(push_manager);
+
+            // Register push API endpoints
+            let push_handler: Arc<dyn HttpHandler> =
+                Arc::new(PushApiHandler::new(push_manager.clone(), "/api/push"));
+            self.router
+                .add_route("/api/push", "Push API", "push-api", push_handler)
+                .await?;
+
+            // Store in shared state so runtime.push() works
+            {
+                let mut guard = self.push_state.lock().await;
+                *guard = Some(push_manager.clone());
+            }
+
+            return Ok(Some(push_manager));
+        }
+
+        Ok(None)
+    }
+
+    /// Get a reference to the push manager, if push has been enabled.
+    pub async fn push_manager(&self) -> Option<Arc<PushManager>> {
+        let guard = self.push_state.lock().await;
+        guard.clone()
     }
 }
 
