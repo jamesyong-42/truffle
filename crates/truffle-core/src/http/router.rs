@@ -689,4 +689,218 @@ mod tests {
         let routes = router.list_routes().await;
         assert!(routes.is_empty());
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Adversarial edge cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Register "/api/", request "/api/users". Trailing slash should be
+    /// stripped during normalization so the route matches sub-paths.
+    #[tokio::test]
+    async fn test_trailing_slash_normalization_match() {
+        let router = HttpRouter::new();
+        router
+            .add_route("/api/", "API", "proxy", test_handler())
+            .await
+            .unwrap();
+
+        // Normalized to "/api", should match /api/users
+        let matched = router.match_route("/api/users").await;
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().prefix, "/api");
+
+        // Also matches /api exactly
+        let matched = router.match_route("/api").await;
+        assert!(matched.is_some());
+    }
+
+    /// Register "api" (no leading slash). Should be normalized to "/api".
+    #[tokio::test]
+    async fn test_no_leading_slash_normalized() {
+        let router = HttpRouter::new();
+        router
+            .add_route("api", "API", "proxy", test_handler())
+            .await
+            .unwrap();
+
+        let routes = router.list_routes().await;
+        assert_eq!(routes[0].prefix, "/api");
+
+        let matched = router.match_route("/api/foo").await;
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().prefix, "/api");
+    }
+
+    /// Register "" (empty string). Should normalize to "/" and act as catch-all.
+    #[tokio::test]
+    async fn test_empty_prefix_becomes_root() {
+        let router = HttpRouter::new();
+        router
+            .add_route("", "Root", "static", test_handler())
+            .await
+            .unwrap();
+
+        let routes = router.list_routes().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, "/");
+
+        // Root "/" matches everything
+        let matched = router.match_route("/anything/at/all").await;
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().prefix, "/");
+    }
+
+    /// Remove a route while holding a snapshot of the handler Arc.
+    /// The snapshot should remain valid (Arc keeps the handler alive)
+    /// even after the route is removed from the router. This is the
+    /// same pattern used in `dispatch()` -- it clones the handler Arc
+    /// before releasing the read lock.
+    #[tokio::test]
+    async fn test_route_removal_snapshot_semantics() {
+        let router = HttpRouter::new();
+        let handler = test_handler();
+        let handler_weak = Arc::downgrade(&handler);
+
+        router
+            .add_route("/api", "API", "proxy", handler)
+            .await
+            .unwrap();
+
+        // Simulate what dispatch() does: grab the handler Arc (snapshot)
+        let handler_snapshot = {
+            let routes = router.routes.read().await;
+            routes
+                .iter()
+                .find(|r| r.prefix == "/api")
+                .map(|r| r.handler.clone())
+        };
+
+        assert!(handler_snapshot.is_some());
+        let snapshot = handler_snapshot.unwrap();
+
+        // Remove the route while we hold a snapshot
+        router.remove_route("/api").await.unwrap();
+        assert!(router.list_routes().await.is_empty());
+
+        // The route table no longer references the handler, but our
+        // snapshot Arc keeps it alive
+        assert!(
+            Arc::strong_count(&snapshot) >= 1,
+            "snapshot should keep handler alive"
+        );
+
+        // The weak reference from before registration is still upgradable
+        // only if our snapshot is alive
+        assert!(
+            handler_weak.upgrade().is_some(),
+            "weak ref should still be upgradable via snapshot"
+        );
+
+        // Drop the snapshot -- now the handler should be deallocated
+        drop(snapshot);
+        assert!(
+            handler_weak.upgrade().is_none(),
+            "after dropping snapshot, handler should be deallocated"
+        );
+    }
+
+    /// Register 100 different prefixes, verify all match correctly.
+    #[tokio::test]
+    async fn test_100_routes_registered() {
+        let router = HttpRouter::new();
+
+        for i in 0..100 {
+            let prefix = format!("/route{i:03}");
+            router
+                .add_route(&prefix, &format!("Route {i}"), "handler", test_handler())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(router.list_routes().await.len(), 100);
+
+        // Verify each route matches
+        for i in 0..100 {
+            let path = format!("/route{i:03}/sub");
+            let matched = router.match_route(&path).await;
+            assert!(matched.is_some(), "route{i:03} should match {path}");
+            assert_eq!(matched.unwrap().prefix, format!("/route{i:03}"));
+        }
+
+        // Verify a non-matching path returns None
+        let matched = router.match_route("/nomatch").await;
+        assert!(matched.is_none());
+    }
+
+    /// Request "/api/users?page=2". Query string should not affect routing.
+    #[test]
+    fn test_path_with_query_string() {
+        // path_matches works on path only; the URI parser strips query strings
+        // from `.path()`. Verify the function works on raw paths.
+        assert!(path_matches("/api/users", "/api"));
+        assert!(path_matches("/api", "/api"));
+
+        // Simulate what hyper does: URI.path() returns just the path portion
+        let uri: hyper::Uri = "/api/users?page=2".parse().unwrap();
+        assert_eq!(uri.path(), "/api/users");
+        assert!(path_matches(uri.path(), "/api"));
+    }
+
+    /// Request "/api/users#section". Fragment should not affect routing.
+    #[test]
+    fn test_path_with_fragment() {
+        // Fragments are stripped by URI parsers before reaching the server.
+        // Hyper's URI parser also strips them. Verify the path still matches.
+        let uri: hyper::Uri = "/api/users".parse().unwrap();
+        assert!(path_matches(uri.path(), "/api"));
+
+        // Note: HTTP spec says fragments are never sent to the server.
+        // Hyper strips them during parsing. This test documents that behavior.
+    }
+
+    /// Request "//api//users" (double slashes). Should not cause a panic.
+    #[test]
+    fn test_double_slash_in_path() {
+        // Double slashes should not crash path_matches
+        assert!(!path_matches("//api//users", "/api"));  // won't match /api prefix
+        assert!(path_matches("//api//users", "/"));       // root catches all
+        assert!(path_matches("//api//users", "//api"));   // exact prefix matches
+
+        // Normalization doesn't collapse double slashes (intentionally)
+        let normalized = normalize_prefix("//api");
+        assert_eq!(normalized, "//api");
+    }
+
+    /// Request "/api/users%2Fadmin" (encoded slash). Verify it doesn't
+    /// bypass prefix matching by injecting path separators.
+    #[test]
+    fn test_encoded_path_segments() {
+        // %2F is an encoded `/`. In the raw path, it's a literal string.
+        // path_matches works on the raw path, so %2F won't be treated as `/`.
+        let path = "/api/users%2Fadmin";
+
+        // This matches /api because the path starts with "/api/"
+        assert!(path_matches(path, "/api"));
+
+        // But critically, it should NOT match a deeper prefix like "/api/users/admin"
+        // because %2F is not a real path separator
+        assert!(!path_matches(path, "/api/users/admin"));
+
+        // The encoded slash stays encoded in the prefix match
+        assert!(path_matches(path, "/api/users%2Fadmin"));
+    }
+
+    /// Path matching with prefix that is a substring of a longer segment
+    /// should NOT match (e.g., /api should NOT match /apis).
+    #[test]
+    fn test_path_boundary_enforcement() {
+        assert!(!path_matches("/apis", "/api"));
+        assert!(!path_matches("/apis/v1", "/api"));
+        assert!(!path_matches("/apiary", "/api"));
+        assert!(!path_matches("/api-v2", "/api"));
+
+        // But these should match
+        assert!(path_matches("/api/v2", "/api"));
+        assert!(path_matches("/api", "/api"));
+    }
 }

@@ -281,4 +281,130 @@ mod tests {
 
         assert!(result.is_ok(), "should exit cleanly when channel closes");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Adversarial edge case tests for heartbeat
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    #[should_panic(expected = "must be non-zero")]
+    async fn heartbeat_loop_zero_interval_panics() {
+        // Edge case: 0ms ping interval triggers a panic in
+        // tokio::time::interval(Duration::ZERO). This test documents
+        // that callers MUST use a non-zero interval.
+        let config = HeartbeatConfig {
+            ping_interval: Duration::from_millis(0),
+            timeout: Duration::from_millis(50),
+        };
+
+        let (write_tx, _write_rx) = mpsc::channel(256);
+        let (_activity_tx, activity_rx) = mpsc::channel(16);
+
+        // This will panic: "period must be non-zero"
+        let _ = heartbeat_loop(config, write_tx, activity_rx).await;
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_very_short_interval_no_spin() {
+        // Edge case #12 (unit test version): 1ms ping interval should not
+        // cause an infinite busy-loop or CPU spin. Verify it times out
+        // quickly and sends pings without hanging.
+        let config = HeartbeatConfig {
+            ping_interval: Duration::from_millis(1),
+            timeout: Duration::from_millis(50),
+        };
+
+        let (write_tx, mut write_rx) = mpsc::channel(256);
+        let (_activity_tx, activity_rx) = mpsc::channel(16);
+
+        // Should timeout fairly quickly (50ms)
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            heartbeat_loop(config, write_tx, activity_rx),
+        )
+        .await
+        .expect("heartbeat_loop with 1ms interval should not hang");
+
+        assert!(
+            result.is_err(),
+            "should have detected heartbeat timeout"
+        );
+
+        // Verify that at least some pings were sent (proves the loop ran)
+        let mut ping_count = 0;
+        while write_rx.try_recv().is_ok() {
+            ping_count += 1;
+        }
+        assert!(
+            ping_count > 0,
+            "with 1ms interval, should have sent at least some pings"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_write_channel_closed_exits_cleanly() {
+        // Edge case: The write channel is closed (connection torn down)
+        // while the heartbeat loop is trying to send a ping. Should exit
+        // with Ok(()) rather than hanging.
+        let config = HeartbeatConfig {
+            ping_interval: Duration::from_millis(10),
+            timeout: Duration::from_secs(60),
+        };
+
+        let (write_tx, write_rx) = mpsc::channel(16);
+        let (_activity_tx, activity_rx) = mpsc::channel(16);
+
+        // Drop the write receiver to simulate the write pump being gone
+        drop(write_rx);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            heartbeat_loop(config, write_tx, activity_rx),
+        )
+        .await
+        .expect("should not timeout — write channel closure should cause exit");
+
+        assert!(
+            result.is_ok(),
+            "heartbeat_loop should exit Ok when write channel is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_loop_activity_prevents_timeout() {
+        // Verify that continuous activity prevents timeout even with
+        // a short timeout window.
+        let config = HeartbeatConfig {
+            ping_interval: Duration::from_millis(50),
+            timeout: Duration::from_millis(200),
+        };
+
+        let (write_tx, _write_rx) = mpsc::channel(256);
+        let (activity_tx, activity_rx) = mpsc::channel(64);
+
+        // Spawn the heartbeat loop
+        let hb_handle = tokio::spawn(heartbeat_loop(config, write_tx, activity_rx));
+
+        // Send activity signals faster than the timeout
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if activity_tx.send(()).await.is_err() {
+                break;
+            }
+        }
+
+        // Drop activity sender to let the loop exit cleanly
+        drop(activity_tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), hb_handle)
+            .await
+            .expect("should not hang")
+            .expect("task should not panic");
+
+        // Should exit Ok (activity channel closed) rather than Err (timeout)
+        assert!(
+            result.is_ok(),
+            "heartbeat should not have timed out with continuous activity"
+        );
+    }
 }

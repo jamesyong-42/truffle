@@ -1388,4 +1388,355 @@ mod tests {
         let conns = manager.get_connections().await;
         assert_eq!(conns[0].id, "dial:10.0.0.1:443");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Adversarial edge case tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_client_drops_immediately_after_connect() {
+        // Edge case #1: WebSocket upgrade completes, client drops before
+        // any message. Verify Disconnected event fires quickly.
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.99:1111".into(),
+                "drop-fast.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Consume Connected
+        let ev = rx.recv().await.unwrap();
+        assert!(matches!(ev, TransportEvent::Connected(_)));
+
+        // Drop client immediately — no messages sent
+        drop(client_ws);
+
+        // Disconnected should fire within a short window
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for Disconnected after immediate drop")
+            .expect("channel closed");
+
+        match event {
+            TransportEvent::Disconnected {
+                connection_id,
+                reason,
+            } => {
+                assert_eq!(connection_id, "incoming:100.64.0.99:1111");
+                assert!(
+                    reason.contains("remote_closed") || reason.contains("error"),
+                    "unexpected reason after immediate drop: {reason}"
+                );
+            }
+            other => panic!("expected Disconnected, got {:?}", other),
+        }
+
+        // Connection should be cleaned up
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(manager.get_connections().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_to_closed_connection_returns_error() {
+        // Edge case #2: Connection established, client drops. Server calls
+        // send(). Verify it returns an error (not panic).
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.88:2222".into(),
+                "send-closed.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Consume Connected
+        let _ = rx.recv().await.unwrap();
+        let conn_id = "incoming:100.64.0.88:2222";
+
+        // Drop client
+        drop(client_ws);
+
+        // Wait for Disconnected to be processed
+        let _disc = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        // Now try to send — should return error, not panic
+        let result = manager
+            .send(conn_id, &serde_json::json!({"type": "test"}))
+            .await;
+        assert!(result.is_err(), "send to closed connection should fail");
+    }
+
+    #[tokio::test]
+    async fn test_rapid_connect_disconnect_cycles() {
+        // Edge case #3: Connect 10 times in rapid succession, each drops
+        // immediately. Verify no resource leaks (get_connections returns
+        // empty after all drop).
+        let (manager, mut _rx) = ConnectionManager::new(test_config());
+
+        for i in 0..10u16 {
+            let (server_ws, client_ws) = duplex_ws_pair().await;
+            manager
+                .handle_ws_stream(
+                    server_ws,
+                    format!("100.64.0.{}:{}", i / 256, 3000 + i),
+                    format!("rapid-{i}.ts.net"),
+                    Direction::Incoming,
+                )
+                .await;
+            // Drop client immediately
+            drop(client_ws);
+        }
+
+        // Give spawned tasks time to clean up
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let conns = manager.get_connections().await;
+        assert!(
+            conns.is_empty(),
+            "expected all connections cleaned up after rapid connect/disconnect, got {} remaining",
+            conns.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_device_id_on_closed_connection() {
+        // Edge case #4: Connection closes, then set_device_id is called.
+        // Verify graceful handling (no panic).
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.77:4444".into(),
+                "closed-device.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let _ = rx.recv().await.unwrap(); // Connected
+        let conn_id = "incoming:100.64.0.77:4444";
+
+        // Close the connection
+        drop(client_ws);
+        // Wait for disconnect to be processed
+        let _disc = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        // Wait a bit for cleanup
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // This should not panic — the connection is gone
+        manager
+            .set_device_id(conn_id, "ghost-device".into())
+            .await;
+
+        // The device should NOT be in the index since the connection is gone
+        assert!(manager
+            .get_connection_by_device("ghost-device")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_device_id_twice_updates_correctly() {
+        // Edge case #5: Call set_device_id("dev-a"), then set_device_id("dev-b")
+        // on same connection. Verify device index is updated correctly
+        // (old mapping removed, new one works).
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.66:5555".into(),
+                "double-id.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.66:5555";
+
+        // Set first device ID
+        manager.set_device_id(conn_id, "dev-a".into()).await;
+        assert!(manager.get_connection_by_device("dev-a").await.is_some());
+
+        // Set second device ID — should replace first
+        manager.set_device_id(conn_id, "dev-b".into()).await;
+
+        // Old device_id removed
+        assert!(
+            manager.get_connection_by_device("dev-a").await.is_none(),
+            "old device_id 'dev-a' should be removed from index"
+        );
+        // New device_id works
+        let found = manager
+            .get_connection_by_device("dev-b")
+            .await
+            .expect("new device_id 'dev-b' should resolve");
+        assert_eq!(found.id, conn_id);
+        assert_eq!(found.device_id.as_deref(), Some("dev-b"));
+    }
+
+    #[tokio::test]
+    async fn test_two_connections_same_device_id() {
+        // Edge case #6: Two connections both get set_device_id("dev-1").
+        // Verify get_connection_by_device returns the latest one.
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        let (ws1, _c1) = duplex_ws_pair().await;
+        let (ws2, _c2) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                ws1,
+                "100.64.0.55:6001".into(),
+                "dup-dev-1.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+        manager
+            .handle_ws_stream(
+                ws2,
+                "100.64.0.55:6002".into(),
+                "dup-dev-2.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn1_id = "incoming:100.64.0.55:6001";
+        let conn2_id = "incoming:100.64.0.55:6002";
+
+        // First connection claims "dev-1"
+        manager.set_device_id(conn1_id, "dev-1".into()).await;
+        let found = manager.get_connection_by_device("dev-1").await.unwrap();
+        assert_eq!(found.id, conn1_id);
+
+        // Second connection also claims "dev-1" — should win
+        manager.set_device_id(conn2_id, "dev-1".into()).await;
+        let found = manager.get_connection_by_device("dev-1").await.unwrap();
+        assert_eq!(
+            found.id, conn2_id,
+            "latest set_device_id should win the device index"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_all_with_no_connections() {
+        // Edge case #14: Call close_all() on empty manager. Verify no panic.
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        assert!(manager.get_connections().await.is_empty());
+
+        // This should not panic
+        manager.close_all().await;
+
+        assert!(manager.get_connections().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_connection_by_device_with_no_devices_bound() {
+        // Edge case #15: No set_device_id called. Verify returns None.
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.44:7777".into(),
+                "no-device.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Connection exists but no device_id was set
+        assert!(manager
+            .get_connection_by_device("any-device")
+            .await
+            .is_none());
+        assert!(manager
+            .get_connection_by_device("")
+            .await
+            .is_none());
+        assert!(manager
+            .get_connection_by_device("incoming:100.64.0.44:7777")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_subscribe_and_event() {
+        // Edge case #16: Subscribe while events are being emitted.
+        // Verify subscriber eventually gets events (no missed channel).
+        let (manager, _initial_rx) = ConnectionManager::new(test_config());
+
+        // Subscribe before any events
+        let mut sub = manager.subscribe();
+
+        // Generate events rapidly
+        let mut _clients = Vec::new();
+        for i in 0..5u8 {
+            let (server_ws, client_ws) = duplex_ws_pair().await;
+            _clients.push(client_ws);
+            manager
+                .handle_ws_stream(
+                    server_ws,
+                    format!("100.64.0.{}:8888", 30 + i),
+                    format!("concurrent-{i}.ts.net"),
+                    Direction::Incoming,
+                )
+                .await;
+        }
+
+        // Subscribe a second receiver mid-stream
+        let mut sub2 = manager.subscribe();
+
+        // Generate more events
+        for i in 0..5u8 {
+            let (server_ws, client_ws) = duplex_ws_pair().await;
+            _clients.push(client_ws);
+            manager
+                .handle_ws_stream(
+                    server_ws,
+                    format!("100.64.0.{}:9999", 40 + i),
+                    format!("concurrent-late-{i}.ts.net"),
+                    Direction::Incoming,
+                )
+                .await;
+        }
+
+        // First subscriber should have all 10 Connected events
+        let mut count1 = 0;
+        while let Ok(ev) = sub.try_recv() {
+            if matches!(ev, TransportEvent::Connected(_)) {
+                count1 += 1;
+            }
+        }
+        assert_eq!(count1, 10, "first subscriber should have all 10 events");
+
+        // Second subscriber should have the 5 events after it subscribed
+        let mut count2 = 0;
+        while let Ok(ev) = sub2.try_recv() {
+            if matches!(ev, TransportEvent::Connected(_)) {
+                count2 += 1;
+            }
+        }
+        assert_eq!(
+            count2, 5,
+            "second subscriber should have 5 events (subscribed mid-stream)"
+        );
+    }
 }

@@ -871,4 +871,288 @@ mod tests {
         assert_eq!(canonical.last_seen, Some("2026-03-18T12:00:00Z".to_string()));
         assert_eq!(canonical.key_expiry, Some("2026-04-18T12:00:00Z".to_string()));
     }
+
+    // ── Adversarial edge case tests ─────────────────────────────────────
+
+    /// Edge case 16: Unknown event type — parses as ShimEvent envelope
+    /// and the data is accessible, even though we don't have a handler for it.
+    #[test]
+    fn adversarial_unknown_event_type() {
+        let json = r#"{"event":"tsnet:unknown","data":{"foo":"bar","baz":42}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:unknown");
+        // Data is preserved as generic JSON
+        assert_eq!(event.data["foo"], "bar");
+        assert_eq!(event.data["baz"], 42);
+    }
+
+    /// Edge case 16b: Completely novel event namespace.
+    #[test]
+    fn adversarial_novel_event_namespace() {
+        let json = r#"{"event":"custom:myEvent","data":{}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "custom:myEvent");
+    }
+
+    /// Edge case 17: Missing "data" field entirely — should default to null.
+    #[test]
+    fn adversarial_missing_data_field() {
+        let json = r#"{"event":"tsnet:status"}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:status");
+        assert!(event.data.is_null(), "missing data field should default to null");
+    }
+
+    /// Edge case 17b: Explicit null data field.
+    #[test]
+    fn adversarial_explicit_null_data() {
+        let json = r#"{"event":"tsnet:stopped","data":null}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:stopped");
+        assert!(event.data.is_null());
+    }
+
+    /// Edge case 18: Extra unexpected fields in the event envelope — ignored by serde.
+    #[test]
+    fn adversarial_extra_fields_in_event() {
+        let json = r#"{"event":"tsnet:status","data":{"state":"running"},"extra":"ignored","version":99,"nested":{"a":1}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:status");
+        // The extra fields are silently ignored
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "running");
+    }
+
+    /// Edge case 18b: Extra fields in StatusEventData — also ignored.
+    #[test]
+    fn adversarial_extra_fields_in_status_data() {
+        let json = r#"{"state":"running","hostname":"n","dnsName":"n.ts","tailscaleIP":"100.64.0.1","unexpectedField":"surprise","anotherOne":123}"#;
+        let data: StatusEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.state, "running");
+        assert_eq!(data.hostname, "n");
+        // Extra fields silently ignored
+    }
+
+    /// Edge case 19: Nested JSON in status data — extra nested objects
+    /// should not break deserialization.
+    #[test]
+    fn adversarial_nested_json_in_status() {
+        let json = r#"{"state":"running","hostname":"n","dnsName":"n.ts","tailscaleIP":"100.64.0.1","deeplyNested":{"level1":{"level2":{"value":true}}}}"#;
+        let data: StatusEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.state, "running");
+    }
+
+    /// Edge case 19b: Extra fields in PeersEventData.
+    #[test]
+    fn adversarial_extra_fields_in_peers_data() {
+        let json = r#"{"peers":[{"id":"p1","hostname":"h","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true,"unknownPeerField":"whatever"}],"extraTopLevel":"ignored"}"#;
+        let data: PeersEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.peers.len(), 1);
+        assert_eq!(data.peers[0].id, "p1");
+    }
+
+    /// Edge case 20: Very long hostname (1000 characters) in a peer.
+    #[test]
+    fn adversarial_very_long_hostname() {
+        let long_hostname = "a".repeat(1000);
+        let json = format!(
+            r#"{{"id":"p1","hostname":"{}","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true}}"#,
+            long_hostname
+        );
+        let peer: BridgeTailnetPeer = serde_json::from_str(&json).unwrap();
+        assert_eq!(peer.hostname.len(), 1000);
+        assert_eq!(peer.hostname, long_hostname);
+
+        // Verify canonical conversion doesn't truncate
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.hostname.len(), 1000);
+    }
+
+    /// Edge case 20b: Very long dns_name (1000 characters).
+    #[test]
+    fn adversarial_very_long_dns_name() {
+        let long_dns = format!("{}.ts.net", "b".repeat(990));
+        let json = format!(
+            r#"{{"id":"p1","hostname":"h","dnsName":"{}","tailscaleIPs":["100.64.0.2"],"online":true}}"#,
+            long_dns
+        );
+        let peer: BridgeTailnetPeer = serde_json::from_str(&json).unwrap();
+        assert_eq!(peer.dns_name, long_dns);
+    }
+
+    /// Edge case 21: Unicode in hostname and dns_name fields.
+    #[test]
+    fn adversarial_unicode_in_peer_fields() {
+        let json = r#"{"id":"p1","hostname":"node-\u00e9\u00e8\u00ea","dnsName":"n\u00f6de.\u00fc.ts.net","tailscaleIPs":["100.64.0.2"],"online":true}"#;
+        let peer: BridgeTailnetPeer = serde_json::from_str(json).unwrap();
+        assert!(peer.hostname.contains('\u{00e9}'), "should contain e-acute");
+        assert!(peer.dns_name.contains('\u{00f6}'), "should contain o-umlaut");
+
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.hostname, peer.hostname, "unicode must roundtrip");
+        assert_eq!(canonical.dns_name, peer.dns_name, "unicode must roundtrip");
+    }
+
+    /// Edge case 21b: Unicode in PeerIdentity fields.
+    #[test]
+    fn adversarial_unicode_in_peer_identity() {
+        let json = r#"{"dnsName":"n\u00f6de.ts.net","loginName":"user@\u00e9xample.com","displayName":"\u4f60\u597d World","profilePicUrl":"https://example.com/pic.jpg","nodeId":"stable-1"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert!(identity.login_name.contains('\u{00e9}'));
+        assert!(identity.display_name.contains('\u{4f60}'), "should contain CJK character");
+
+        // Verify roundtrip through serialize + deserialize
+        let serialized = serde_json::to_string(&identity).unwrap();
+        let roundtripped: PeerIdentity = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(roundtripped.display_name, identity.display_name);
+        assert_eq!(roundtripped.login_name, identity.login_name);
+    }
+
+    /// Edge case 21c: Emoji in fields.
+    #[test]
+    fn adversarial_emoji_in_fields() {
+        let json = r#"{"dnsName":"rocket.ts.net","loginName":"user@example.com","displayName":"Rocket \ud83d\ude80 Node","profilePicUrl":"","nodeId":"n1"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert!(identity.display_name.contains('\u{1F680}'), "should contain rocket emoji");
+    }
+
+    /// Edge case: Event with data as a string instead of object — StatusEventData
+    /// deserialization should fail gracefully.
+    #[test]
+    fn adversarial_data_is_string_not_object() {
+        let json = r#"{"event":"tsnet:status","data":"not an object"}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:status");
+        // Trying to parse data as StatusEventData should fail
+        let result = serde_json::from_value::<StatusEventData>(event.data);
+        assert!(result.is_err(), "string data should not deserialize as StatusEventData");
+    }
+
+    /// Edge case: Event with data as an array instead of object.
+    #[test]
+    fn adversarial_data_is_array_not_object() {
+        let json = r#"{"event":"tsnet:peers","data":[1,2,3]}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let result = serde_json::from_value::<PeersEventData>(event.data);
+        assert!(result.is_err(), "array data should not deserialize as PeersEventData");
+    }
+
+    /// Edge case: Event with empty string event type.
+    #[test]
+    fn adversarial_empty_event_type() {
+        let json = r#"{"event":"","data":null}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "");
+    }
+
+    /// Edge case: DialResultEventData with extremely long error message.
+    #[test]
+    fn adversarial_dial_result_very_long_error() {
+        let long_error = "x".repeat(10_000);
+        let json = format!(
+            r#"{{"requestId":"r1","success":false,"error":"{}"}}"#,
+            long_error
+        );
+        let data: DialResultEventData = serde_json::from_str(&json).unwrap();
+        assert!(!data.success);
+        assert_eq!(data.error.len(), 10_000);
+    }
+
+    /// Edge case: StatusEventData with very long state string.
+    #[test]
+    fn adversarial_status_very_long_state() {
+        let long_state = "s".repeat(5_000);
+        let json = format!(r#"{{"state":"{}"}}"#, long_state);
+        let data: StatusEventData = serde_json::from_str(&json).unwrap();
+        assert_eq!(data.state.len(), 5_000);
+    }
+
+    /// Edge case: HealthWarningEventData with many warnings.
+    #[test]
+    fn adversarial_health_warning_many_entries() {
+        let warnings: Vec<String> = (0..100)
+            .map(|i| format!("warning-{i}: something went wrong"))
+            .collect();
+        let json = serde_json::json!({ "warnings": warnings });
+        let data: HealthWarningEventData = serde_json::from_value(json).unwrap();
+        assert_eq!(data.warnings.len(), 100);
+    }
+
+    /// Edge case: Peer with 100 tailscale IPs (unlikely but valid JSON).
+    #[test]
+    fn adversarial_peer_many_ips() {
+        let ips: Vec<String> = (0..100)
+            .map(|i| format!("100.64.{}.{}", i / 256, i % 256))
+            .collect();
+        let json = serde_json::json!({
+            "id": "p1",
+            "hostname": "h",
+            "dnsName": "h.ts.net",
+            "tailscaleIPs": ips,
+            "online": true,
+        });
+        let peer: BridgeTailnetPeer = serde_json::from_value(json).unwrap();
+        assert_eq!(peer.tailscale_ips.len(), 100);
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.tailscale_ips.len(), 100);
+    }
+
+    /// Edge case: Completely empty peers list in PeersEventData
+    /// (already tested, but verify canonical conversion of empty list).
+    #[test]
+    fn adversarial_empty_peers_to_canonical() {
+        let json = r#"{"peers":[]}"#;
+        let data: PeersEventData = serde_json::from_str(json).unwrap();
+        assert!(data.peers.is_empty());
+    }
+
+    /// Edge case: KeyExpiringEventData with negative expires_in_secs
+    /// (clock skew scenario).
+    #[test]
+    fn adversarial_key_expiring_negative_seconds() {
+        let json = r#"{"expiresAt":"2025-01-01T00:00:00Z","expiresInSecs":-3600}"#;
+        let data: KeyExpiringEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.expires_in_secs, -3600);
+        assert_eq!(data.expires_at, "2025-01-01T00:00:00Z");
+    }
+
+    /// Edge case: ErrorEventData with empty code and message.
+    #[test]
+    fn adversarial_error_event_empty_fields() {
+        let json = r#"{"code":"","message":""}"#;
+        let data: ErrorEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.code, "");
+        assert_eq!(data.message, "");
+    }
+
+    /// Edge case: PeerIdentity roundtrip — serialize then deserialize.
+    #[test]
+    fn adversarial_peer_identity_roundtrip() {
+        let identity = PeerIdentity {
+            dns_name: "node.example.ts.net".to_string(),
+            login_name: "alice@example.com".to_string(),
+            display_name: "Alice Smith".to_string(),
+            profile_pic_url: "https://example.com/very/long/path/to/picture.jpg?token=abc123&size=large".to_string(),
+            node_id: "nStableXYZ123".to_string(),
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        let roundtripped: PeerIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.dns_name, identity.dns_name);
+        assert_eq!(roundtripped.login_name, identity.login_name);
+        assert_eq!(roundtripped.display_name, identity.display_name);
+        assert_eq!(roundtripped.profile_pic_url, identity.profile_pic_url);
+        assert_eq!(roundtripped.node_id, identity.node_id);
+    }
+
+    /// Edge case: PeerIdentity with empty fields.
+    #[test]
+    fn adversarial_peer_identity_all_empty() {
+        let json = r#"{}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.dns_name, "");
+        assert_eq!(identity.login_name, "");
+        assert_eq!(identity.display_name, "");
+        assert_eq!(identity.profile_pic_url, "");
+        assert_eq!(identity.node_id, "");
+    }
 }

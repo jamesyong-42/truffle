@@ -632,4 +632,523 @@ mod tests {
         let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
         assert_eq!(parsed, header);
     }
+
+    // ── Adversarial edge case tests ─────────────────────────────────────
+
+    /// Edge case 1: Truncated header — only magic bytes, nothing else.
+    /// Must return an I/O error (UnexpectedEof), never panic.
+    #[tokio::test]
+    async fn adversarial_truncated_header_only_magic() {
+        let buf = MAGIC.to_be_bytes().to_vec();
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case 1b: Truncated header — magic + version + partial token (10 bytes of 32).
+    #[tokio::test]
+    async fn adversarial_truncated_header_partial_token() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0xAA; 10]); // only 10 of 32 token bytes
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case 1c: Truncated header — everything correct up to the service port,
+    /// but missing the length fields.
+    #[tokio::test]
+    async fn adversarial_truncated_header_missing_length_fields() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]); // token
+        buf.push(0x01); // direction incoming
+        buf.extend_from_slice(&443u16.to_be_bytes()); // service port
+        // missing: request_id_len, remote_addr_len, remote_dns_name_len
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case 1d: Empty input — zero bytes.
+    #[tokio::test]
+    async fn adversarial_empty_input() {
+        let buf: Vec<u8> = vec![];
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case 2: Zero-length request_id with outgoing direction.
+    /// This is valid — outgoing connections can have empty request_id.
+    #[tokio::test]
+    async fn adversarial_zero_length_request_id_outgoing() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: String::new(), // zero-length
+            remote_addr: "10.0.0.1:80".to_string(),
+            remote_dns_name: String::new(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(parsed.request_id, "");
+        assert_eq!(parsed.direction, Direction::Outgoing);
+    }
+
+    /// Edge case 3: Request ID at exactly MAX_LEN (128 bytes).
+    #[tokio::test]
+    async fn adversarial_request_id_exactly_max_len() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: "x".repeat(MAX_REQUEST_ID_LEN as usize),
+            remote_addr: String::new(),
+            remote_dns_name: String::new(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(parsed.request_id.len(), MAX_REQUEST_ID_LEN as usize);
+    }
+
+    /// Edge case 3b: Remote addr at exactly MAX_LEN (256 bytes).
+    #[tokio::test]
+    async fn adversarial_remote_addr_exactly_max_len() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: "a".repeat(MAX_REMOTE_ADDR_LEN as usize),
+            remote_dns_name: String::new(),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(parsed.remote_addr.len(), MAX_REMOTE_ADDR_LEN as usize);
+    }
+
+    /// Edge case 3c: Remote DNS name at exactly MAX_LEN (512 bytes).
+    #[tokio::test]
+    async fn adversarial_remote_dns_name_exactly_max_len() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: String::new(),
+            remote_dns_name: "d".repeat(MAX_REMOTE_DNS_NAME_LEN as usize),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(parsed.remote_dns_name.len(), MAX_REMOTE_DNS_NAME_LEN as usize);
+    }
+
+    /// Edge case 4: Request ID one byte over MAX_LEN — rejected on read.
+    #[tokio::test]
+    async fn adversarial_request_id_one_over_max() {
+        let over_len = (MAX_REQUEST_ID_LEN + 1) as u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x02); // outgoing
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&over_len.to_be_bytes());
+        // Don't need actual data — the length check fires first
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::RequestIdTooLong(len) if len == over_len),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 4b: Remote addr one byte over MAX_LEN — rejected on read.
+    #[tokio::test]
+    async fn adversarial_remote_addr_one_over_max() {
+        let over_len = (MAX_REMOTE_ADDR_LEN + 1) as u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01); // incoming
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes()); // request_id_len = 0
+        buf.extend_from_slice(&over_len.to_be_bytes()); // remote_addr_len one over
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::RemoteAddrTooLong(len) if len == over_len),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 4c: Remote DNS name one byte over MAX_LEN — rejected on read.
+    #[tokio::test]
+    async fn adversarial_remote_dns_name_one_over_max() {
+        let over_len = (MAX_REMOTE_DNS_NAME_LEN + 1) as u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01); // incoming
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes()); // request_id_len = 0
+        buf.extend_from_slice(&0u16.to_be_bytes()); // remote_addr_len = 0
+        buf.extend_from_slice(&over_len.to_be_bytes()); // remote_dns_name_len one over
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::RemoteDnsNameTooLong(len) if len == over_len),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 4d: Write rejects request_id one byte over MAX_LEN.
+    #[tokio::test]
+    async fn adversarial_write_rejects_request_id_one_over_max() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: "x".repeat(MAX_REQUEST_ID_LEN as usize + 1),
+            remote_addr: String::new(),
+            remote_dns_name: String::new(),
+        };
+        let mut buf = Vec::new();
+        let err = header.write_to(&mut buf).await.unwrap_err();
+        assert!(matches!(err, HeaderError::RequestIdTooLong(_)), "got: {err:?}");
+    }
+
+    /// Edge case 4e: Write rejects remote_addr one byte over MAX_LEN.
+    #[tokio::test]
+    async fn adversarial_write_rejects_remote_addr_one_over_max() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: "x".repeat(MAX_REMOTE_ADDR_LEN as usize + 1),
+            remote_dns_name: String::new(),
+        };
+        let mut buf = Vec::new();
+        let err = header.write_to(&mut buf).await.unwrap_err();
+        assert!(matches!(err, HeaderError::RemoteAddrTooLong(_)), "got: {err:?}");
+    }
+
+    /// Edge case 4f: Write rejects remote_dns_name one byte over MAX_LEN.
+    #[tokio::test]
+    async fn adversarial_write_rejects_remote_dns_name_one_over_max() {
+        let header = BridgeHeader {
+            session_token: test_token(),
+            direction: Direction::Incoming,
+            service_port: 443,
+            request_id: String::new(),
+            remote_addr: String::new(),
+            remote_dns_name: "x".repeat(MAX_REMOTE_DNS_NAME_LEN as usize + 1),
+        };
+        let mut buf = Vec::new();
+        let err = header.write_to(&mut buf).await.unwrap_err();
+        assert!(matches!(err, HeaderError::RemoteDnsNameTooLong(_)), "got: {err:?}");
+    }
+
+    /// Edge case 5: Wrong magic bytes "TRFG" (0x54524647) instead of "TRFF" (0x54524646).
+    #[tokio::test]
+    async fn adversarial_wrong_magic_trfg() {
+        let wrong_magic: u32 = 0x5452_4647; // "TRFG"
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&wrong_magic.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidMagic(0x5452_4647)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 6: Wrong version 0x02 instead of 0x01.
+    #[tokio::test]
+    async fn adversarial_wrong_version_0x02() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(0x02); // wrong version
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::UnsupportedVersion(2)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 6b: Wrong version 0x00.
+    #[tokio::test]
+    async fn adversarial_wrong_version_0x00() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::UnsupportedVersion(0)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 6c: Wrong version 0xFF.
+    #[tokio::test]
+    async fn adversarial_wrong_version_0xff() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(0xFF);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::UnsupportedVersion(0xFF)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 7: Direction byte 0x00 (invalid — neither incoming nor outgoing).
+    #[tokio::test]
+    async fn adversarial_direction_0x00() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x00); // invalid direction
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidDirection(0x00)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case 8: Direction byte 0xFF (out of range).
+    #[tokio::test]
+    async fn adversarial_direction_0xff() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0xFF); // out of range direction
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidDirection(0xFF)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case: Direction byte 0x03 (adjacent to valid range).
+    #[tokio::test]
+    async fn adversarial_direction_0x03() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x03);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidDirection(0x03)),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case: Header claims a request_id_len but the data is truncated
+    /// (declared length exceeds available bytes).
+    #[tokio::test]
+    async fn adversarial_request_id_declared_but_truncated() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x02); // outgoing
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&50u16.to_be_bytes()); // claims 50 bytes
+        buf.extend_from_slice(b"short"); // only 5 bytes
+        // EOF after 5 bytes
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case: Invalid UTF-8 in the request_id field.
+    #[tokio::test]
+    async fn adversarial_invalid_utf8_in_request_id() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x02); // outgoing
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&4u16.to_be_bytes()); // 4 bytes
+        buf.extend_from_slice(&[0xFF, 0xFE, 0xFD, 0xFC]); // invalid UTF-8
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidUtf8 { field: "RequestId", .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case: Invalid UTF-8 in the remote_addr field.
+    #[tokio::test]
+    async fn adversarial_invalid_utf8_in_remote_addr() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01); // incoming
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes()); // request_id_len = 0
+        buf.extend_from_slice(&3u16.to_be_bytes()); // remote_addr_len = 3
+        buf.extend_from_slice(&[0x80, 0x81, 0x82]); // invalid UTF-8
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidUtf8 { field: "RemoteAddr", .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case: Invalid UTF-8 in the remote_dns_name field.
+    #[tokio::test]
+    async fn adversarial_invalid_utf8_in_remote_dns_name() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01); // incoming
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes()); // request_id_len = 0
+        buf.extend_from_slice(&0u16.to_be_bytes()); // remote_addr_len = 0
+        buf.extend_from_slice(&2u16.to_be_bytes()); // remote_dns_name_len = 2
+        buf.extend_from_slice(&[0xC0, 0x01]); // invalid UTF-8
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(
+            matches!(err, HeaderError::InvalidUtf8 { field: "RemoteDNSName", .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Edge case: All-zero magic bytes (0x00000000).
+    #[tokio::test]
+    async fn adversarial_all_zero_magic() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]);
+        buf.push(0x01);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        buf.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::InvalidMagic(0)), "got: {err:?}");
+    }
+
+    /// Edge case: Single byte input.
+    #[tokio::test]
+    async fn adversarial_single_byte_input() {
+        let buf = vec![0x54]; // just the first byte of "TRFF"
+        let mut cursor = Cursor::new(&buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::Io(_)), "got: {err:?}");
+    }
+
+    /// Edge case: Maximum possible field lengths simultaneously (all at max).
+    /// Verify write + read roundtrip.
+    #[tokio::test]
+    async fn adversarial_all_fields_at_max_simultaneously() {
+        let header = BridgeHeader {
+            session_token: [0xFF; 32],
+            direction: Direction::Outgoing,
+            service_port: u16::MAX,
+            request_id: "R".repeat(MAX_REQUEST_ID_LEN as usize),
+            remote_addr: "A".repeat(MAX_REMOTE_ADDR_LEN as usize),
+            remote_dns_name: "D".repeat(MAX_REMOTE_DNS_NAME_LEN as usize),
+        };
+        let mut buf = Vec::new();
+        header.write_to(&mut buf).await.unwrap();
+
+        let expected_len = MIN_HEADER_SIZE
+            + MAX_REQUEST_ID_LEN as usize
+            + MAX_REMOTE_ADDR_LEN as usize
+            + MAX_REMOTE_DNS_NAME_LEN as usize;
+        assert_eq!(buf.len(), expected_len);
+
+        let mut cursor = Cursor::new(&buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(parsed, header);
+    }
 }

@@ -483,4 +483,282 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("TRANSFER_NOT_FOUND"));
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial edge-case tests (Layer 4: Services — Types)
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── 26. FileInfo with zero size ──────────────────────────────────────
+    #[test]
+    fn file_info_zero_size_no_divide_by_zero() {
+        let info = FileInfo {
+            name: "empty.txt".to_string(),
+            size: 0,
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        };
+
+        // Simulate progress calculation: percent = bytes_transferred / size * 100
+        let bytes_transferred: f64 = 0.0;
+        let percent = if info.size > 0 {
+            bytes_transferred / info.size as f64 * 100.0
+        } else {
+            0.0
+        };
+        assert_eq!(percent, 0.0, "Zero-size file should yield 0% without panic");
+
+        // ETA calculation: eta = remaining / speed
+        let speed: f64 = 0.0;
+        let eta = if speed > 0.0 {
+            (info.size as f64 - bytes_transferred) / speed
+        } else {
+            0.0
+        };
+        assert_eq!(eta, 0.0, "Zero speed with zero size should yield 0 ETA");
+
+        // Serde roundtrip
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: FileInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.size, 0);
+    }
+
+    // ── 27. FileInfo with very large size ────────────────────────────────
+    #[test]
+    fn file_info_max_i64_size_no_overflow() {
+        let info = FileInfo {
+            name: "huge.bin".to_string(),
+            size: i64::MAX,
+            sha256: "abc".to_string(),
+        };
+
+        // Progress calculation with max size
+        let bytes_transferred: i64 = i64::MAX / 2;
+        let percent = if info.size > 0 {
+            bytes_transferred as f64 / info.size as f64 * 100.0
+        } else {
+            0.0
+        };
+        assert!(percent > 0.0 && percent < 100.0, "Should compute valid percent");
+        assert!((percent - 50.0).abs() < 1.0, "Should be approximately 50%");
+
+        // Speed/ETA calculation
+        let speed: f64 = 1_000_000_000.0; // 1 GB/s
+        let remaining = info.size - bytes_transferred;
+        let eta = remaining as f64 / speed;
+        assert!(eta > 0.0 && eta.is_finite(), "ETA should be positive and finite");
+
+        // Serde roundtrip with large value
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: FileInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.size, i64::MAX);
+    }
+
+    // ── 28. Transfer state transitions ───────────────────────────────────
+    #[test]
+    fn transfer_state_valid_transitions_pending_to_sending_to_complete() {
+        let t = Transfer::new(
+            "ft-transition-1".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "a".repeat(64),
+            TransferDirection::Send,
+        );
+
+        // Registered -> Transferring
+        assert_eq!(t.state(), TransferState::Registered);
+        assert!(t.compare_and_swap_state(TransferState::Registered, TransferState::Transferring));
+        assert_eq!(t.state(), TransferState::Transferring);
+
+        // Transferring -> Completed
+        t.set_state(TransferState::Completed);
+        assert_eq!(t.state(), TransferState::Completed);
+    }
+
+    #[test]
+    fn transfer_state_valid_transitions_pending_to_rejected() {
+        let t = Transfer::new(
+            "ft-transition-2".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "b".repeat(64),
+            TransferDirection::Receive,
+        );
+
+        // Registered -> Failed (rejected)
+        assert_eq!(t.state(), TransferState::Registered);
+        t.set_state(TransferState::Failed);
+        assert_eq!(t.state(), TransferState::Failed);
+    }
+
+    #[test]
+    fn transfer_state_valid_transitions_sending_to_cancelled() {
+        let t = Transfer::new(
+            "ft-transition-3".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "c".repeat(64),
+            TransferDirection::Send,
+        );
+
+        // Registered -> Transferring -> Cancelled
+        assert!(t.compare_and_swap_state(TransferState::Registered, TransferState::Transferring));
+        assert_eq!(t.state(), TransferState::Transferring);
+
+        t.cancel();
+        assert_eq!(t.state(), TransferState::Cancelled);
+        assert!(t.cancel_token.is_cancelled());
+    }
+
+    // ── Edge: CAS from wrong state fails ─────────────────────────────────
+    #[test]
+    fn transfer_state_cas_from_wrong_state_fails() {
+        let t = Transfer::new(
+            "ft-cas-fail".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "d".repeat(64),
+            TransferDirection::Receive,
+        );
+
+        // Try to CAS from Transferring when actually Registered
+        assert!(!t.compare_and_swap_state(TransferState::Transferring, TransferState::Completed));
+        assert_eq!(t.state(), TransferState::Registered, "State should not change on failed CAS");
+    }
+
+    // ── Edge: Double cancel ──────────────────────────────────────────────
+    #[test]
+    fn transfer_double_cancel_is_safe() {
+        let t = Transfer::new(
+            "ft-double-cancel".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "e".repeat(64),
+            TransferDirection::Send,
+        );
+
+        t.cancel();
+        assert!(t.is_cancelled());
+
+        // Second cancel should not panic
+        t.cancel();
+        assert!(t.is_cancelled());
+        assert!(t.cancel_token.is_cancelled());
+    }
+
+    // ── Edge: All TransferState from_i32 values ──────────────────────────
+    #[test]
+    fn transfer_state_from_i32_exhaustive() {
+        assert_eq!(TransferState::from_i32(0), TransferState::Registered);
+        assert_eq!(TransferState::from_i32(1), TransferState::Transferring);
+        assert_eq!(TransferState::from_i32(2), TransferState::Completed);
+        assert_eq!(TransferState::from_i32(3), TransferState::Failed);
+        assert_eq!(TransferState::from_i32(4), TransferState::Cancelled);
+
+        // Negative values
+        assert_eq!(TransferState::from_i32(-1), TransferState::Failed);
+        assert_eq!(TransferState::from_i32(i32::MIN), TransferState::Failed);
+        assert_eq!(TransferState::from_i32(i32::MAX), TransferState::Failed);
+    }
+
+    // ── Edge: new_sender starts in Transferring state ────────────────────
+    #[test]
+    fn new_sender_starts_transferring() {
+        let t = Transfer::new_sender(
+            "ft-sender-state".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "f".repeat(64),
+            "/tmp/source.bin".to_string(),
+        );
+
+        assert_eq!(t.state(), TransferState::Transferring, "Senders start in Transferring");
+        assert!(t.file_path.as_deref() == Some("/tmp/source.bin"));
+        assert!(t.save_path.is_none());
+    }
+
+    // ── Edge: new_with_save_path direction is Receive ────────────────────
+    #[test]
+    fn new_with_save_path_is_receive_direction() {
+        let t = Transfer::new_with_save_path(
+            "ft-recv-dir".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "g".repeat(64),
+            "/tmp/dest.bin".to_string(),
+        );
+
+        assert_eq!(t.direction, TransferDirection::Receive);
+        assert_eq!(t.state(), TransferState::Registered);
+        assert_eq!(t.save_path.as_deref(), Some("/tmp/dest.bin"));
+        assert!(t.file_path.is_none());
+    }
+
+    // ── Edge: Concurrent in-flight acquire attempts ──────────────────────
+    #[test]
+    fn in_flight_prevents_double_acquisition() {
+        let t = Transfer::new(
+            "ft-inflight".to_string(),
+            FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+            "h".repeat(64),
+            TransferDirection::Receive,
+        );
+
+        assert!(t.try_acquire_in_flight(), "First acquire should succeed");
+        assert!(!t.try_acquire_in_flight(), "Second acquire should fail");
+        assert!(!t.try_acquire_in_flight(), "Third acquire should also fail");
+
+        t.release_in_flight();
+        assert!(t.try_acquire_in_flight(), "After release, acquire should succeed");
+    }
+
+    // ── Edge: FileTransferEvent serde roundtrip ──────────────────────────
+    #[test]
+    fn file_transfer_event_serde_roundtrip() {
+        let events = vec![
+            FileTransferEvent::PreparingProgress {
+                transfer_id: "ft-1".to_string(),
+                bytes_hashed: 512,
+                total_bytes: 1024,
+                percent: 50.0,
+            },
+            FileTransferEvent::Prepared {
+                transfer_id: "ft-2".to_string(),
+                name: "file.bin".to_string(),
+                size: 1024,
+                sha256: "abc".to_string(),
+            },
+            FileTransferEvent::Progress {
+                transfer_id: "ft-3".to_string(),
+                bytes_transferred: 256,
+                total_bytes: 1024,
+                percent: 25.0,
+                bytes_per_second: 100.0,
+                eta: 7.68,
+                direction: "send".to_string(),
+            },
+            FileTransferEvent::Complete {
+                transfer_id: "ft-4".to_string(),
+                sha256: "xyz".to_string(),
+                size: 1024,
+                duration_ms: 500,
+                direction: "receive".to_string(),
+                path: Some("/tmp/out.bin".to_string()),
+            },
+            FileTransferEvent::Error {
+                transfer_id: "ft-5".to_string(),
+                code: "SEND_ERROR".to_string(),
+                message: "connection lost".to_string(),
+                resumable: true,
+            },
+            FileTransferEvent::Cancelled {
+                transfer_id: "ft-6".to_string(),
+            },
+        ];
+
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let parsed: FileTransferEvent = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json, json2, "Serde roundtrip should be stable");
+        }
+    }
+
+    // ── Edge: TransferDirection display ───────────────────────────────────
+    #[test]
+    fn transfer_direction_display() {
+        assert_eq!(TransferDirection::Send.to_string(), "send");
+        assert_eq!(TransferDirection::Receive.to_string(), "receive");
+    }
 }

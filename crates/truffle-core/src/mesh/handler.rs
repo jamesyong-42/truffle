@@ -1315,4 +1315,329 @@ mod tests {
             "route:broadcast without envelope field must be a no-op"
         );
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial / edge-case tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// 18. Malformed device:announce payload: announce message with invalid JSON
+    ///     in payload. Must not panic, must not add a device.
+    #[tokio::test]
+    async fn malformed_device_announce_no_panic_no_device() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // Create a device:announce message but with a broken payload
+        // (not a valid DeviceAnnouncePayload)
+        let msg = MeshMessage::new(
+            "device:announce",
+            "remote-1",
+            serde_json::json!({"totally": "wrong", "not_a_device": true}),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let dm = handler.device_manager.read().await;
+        assert!(dm.device_by_id("remote-1").is_none(),
+            "Malformed device:announce must not add any device");
+
+        // No device events should have been emitted
+        assert!(dev_rx.try_recv().is_err(),
+            "Malformed device:announce must not emit any DeviceEvents");
+    }
+
+    /// 19. device:list with empty devices array. Must not crash, no devices added.
+    #[tokio::test]
+    async fn device_list_empty_devices_array() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let msg = MeshMessage::new(
+            "device:list",
+            "primary-node",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![],
+                primary_id: "primary-node".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let dm = handler.device_manager.read().await;
+        assert!(dm.devices().is_empty(),
+            "device:list with empty devices array must not add any devices");
+
+        // Election should still set primary from the list
+        let election = handler.election.read().await;
+        assert_eq!(election.primary_id(), Some("primary-node"),
+            "device:list with non-empty primary_id should still set election primary");
+    }
+
+    /// 20. route:broadcast from self: primary receives a broadcast where
+    ///     from_device_id is itself. Must deliver locally but not forward to self.
+    #[tokio::test]
+    async fn route_broadcast_from_self_delivers_locally() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        let inner_envelope = MeshEnvelope::new(
+            "test-ns",
+            "from-self",
+            serde_json::json!({"origin": "local"}),
+        );
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        // from_device_id = "local-dev" (self)
+        handler
+            .handle_route_envelope("conn-local", Some("local-dev"), &route_envelope)
+            .await;
+
+        // Should still deliver locally
+        let mut found_local_delivery = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let MeshNodeEvent::Message(incoming) = event {
+                if incoming.namespace == "test-ns" && incoming.msg_type == "from-self" {
+                    found_local_delivery = true;
+                }
+            }
+        }
+        assert!(found_local_delivery,
+            "route:broadcast from self must still deliver locally");
+    }
+
+    /// 21. Deeply nested envelope: route:broadcast containing another
+    ///     route:broadcast inside. Must not recurse infinitely (the inner
+    ///     envelope is delivered as an app message, not re-routed).
+    #[tokio::test]
+    async fn nested_route_broadcast_no_infinite_recursion() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // Inner envelope that happens to be another route:broadcast (but in a
+        // non-mesh namespace, so it won't be treated as a route)
+        let inner_inner = MeshEnvelope::new("app-ns", "data", serde_json::json!({"level": 2}));
+        let inner_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: serde_json::json!({
+                "envelope": serde_json::to_value(&inner_inner).unwrap(),
+            }),
+            timestamp: Some(1000),
+        };
+
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        // This should complete without hanging or panicking
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        // The inner envelope is delivered as a Message event (local delivery)
+        let mut found = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let MeshNodeEvent::Message(incoming) = event {
+                // The delivered message is the inner envelope, which has mesh namespace
+                found = true;
+                _ = incoming; // just verify it was delivered
+            }
+        }
+        assert!(found,
+            "Nested route:broadcast must deliver the inner envelope locally without infinite recursion");
+    }
+
+    /// 22. route:message targeting a device that is offline. Must not panic,
+    ///     message should be silently dropped (no connection found).
+    #[tokio::test]
+    async fn route_message_to_offline_device_graceful() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // Add device and mark it offline
+        let device = make_device("target-dev", "Target");
+        handler.dispatch_mesh_message(&make_announce_msg(&device)).await;
+        {
+            let mut dm = handler.device_manager.write().await;
+            dm.mark_device_offline("target-dev");
+        }
+
+        // Try to route a message to the offline device
+        let inner_envelope = MeshEnvelope::new("app", "data", serde_json::json!({}));
+        let route_payload = serde_json::json!({
+            "targetDeviceId": "target-dev",
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:message".to_string(),
+            payload: route_payload,
+            timestamp: Some(1000),
+        };
+
+        // Should not panic — the send will just fail silently (no connection)
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+    }
+
+    /// 23. Massive payload: MeshMessage with a large JSON payload.
+    ///     Must be handled without panic.
+    #[tokio::test]
+    async fn massive_payload_no_panic() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Build a ~1MB JSON payload
+        let large_string = "x".repeat(1_000_000);
+        let msg = MeshMessage::new(
+            "device:announce",
+            "remote-big",
+            serde_json::json!({"data": large_string}),
+        );
+
+        // This will fail to parse as DeviceAnnouncePayload but must not panic
+        handler.dispatch_mesh_message(&msg).await;
+
+        // No device added (malformed payload)
+        let dm = handler.device_manager.read().await;
+        assert!(dm.device_by_id("remote-big").is_none(),
+            "Massive payload that fails deserialization must not add a device");
+    }
+
+    /// Malformed election:candidate payload: must not panic, candidate not added.
+    #[tokio::test]
+    async fn malformed_election_candidate_no_panic() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.start_election();
+        }
+
+        let msg = MeshMessage::new(
+            "election:candidate",
+            "remote-1",
+            serde_json::json!({"garbage": "not a candidate payload"}),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // Election should still be collecting, no panic
+        let election = handler.election.read().await;
+        assert_eq!(election.phase(), ElectionPhase::Collecting,
+            "Malformed election:candidate must not change phase");
+    }
+
+    /// Malformed election:result payload: must not panic, primary not changed.
+    #[tokio::test]
+    async fn malformed_election_result_no_panic() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+        }
+
+        let msg = MeshMessage::new(
+            "election:result",
+            "remote-1",
+            serde_json::json!({"not_valid": "payload"}),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let election = handler.election.read().await;
+        assert!(election.primary_id().is_none(),
+            "Malformed election:result must not set primary");
+    }
+
+    /// handle_message with completely invalid (non-object) JSON.
+    #[tokio::test]
+    async fn handle_message_non_object_json_ignored() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Array instead of object
+        let payload = serde_json::json!([1, 2, 3]);
+        handler.handle_message("conn-1", &payload).await;
+
+        // String value
+        let payload = serde_json::json!("just a string");
+        handler.handle_message("conn-1", &payload).await;
+
+        // Null value
+        let payload = serde_json::json!(null);
+        handler.handle_message("conn-1", &payload).await;
+
+        // None of these should produce events
+        assert!(event_rx.try_recv().is_err(),
+            "Non-object JSON payloads must be silently ignored");
+    }
+
+    /// Multiple device announces in rapid succession: all should be processed.
+    #[tokio::test]
+    async fn rapid_multiple_announces_all_processed() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        for i in 0..10 {
+            let device = make_device(&format!("dev-{i}"), &format!("Device {i}"));
+            let msg = make_announce_msg(&device);
+            handler.dispatch_mesh_message(&msg).await;
+        }
+
+        let dm = handler.device_manager.read().await;
+        assert_eq!(dm.devices().len(), 10,
+            "All 10 rapid announces should be processed and added");
+    }
 }

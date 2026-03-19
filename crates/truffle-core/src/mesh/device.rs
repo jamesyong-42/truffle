@@ -790,4 +790,360 @@ mod tests {
         }
         assert!(found, "mark_device_offline on primary must emit PrimaryChanged(None)");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial / edge-case tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn make_peer(hostname: &str, online: bool) -> TailnetPeer {
+        TailnetPeer {
+            id: format!("ts-{hostname}"),
+            hostname: hostname.to_string(),
+            dns_name: format!("{hostname}.ts.net"),
+            tailscale_ips: vec![format!("100.64.0.{}", hostname.len())],
+            online,
+            os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        }
+    }
+
+    /// 12. Rapid announce/offline/announce cycle: device announces, goes offline,
+    ///     then announces again. Final state must be online.
+    #[test]
+    fn rapid_announce_offline_announce_cycle() {
+        let (mut mgr, _rx) = make_manager();
+
+        let device = BaseDevice {
+            id: "remote-1".to_string(),
+            device_type: "mobile".to_string(),
+            name: "Phone".to_string(),
+            tailscale_hostname: "app-mobile-remote-1".to_string(),
+            tailscale_dns_name: None,
+            tailscale_ip: Some("100.64.0.5".to_string()),
+            role: None,
+            status: DeviceStatus::Online,
+            capabilities: vec![],
+            metadata: None,
+            last_seen: None,
+            started_at: Some(500),
+            os: None,
+            latency_ms: None,
+        };
+
+        // First announce
+        let payload = DeviceAnnouncePayload {
+            device: device.clone(),
+            protocol_version: 2,
+        };
+        mgr.handle_device_announce("remote-1", &payload);
+        assert_eq!(mgr.device_by_id("remote-1").unwrap().status, DeviceStatus::Online,
+            "After first announce, device should be online");
+
+        // Device goes offline
+        mgr.handle_device_goodbye("remote-1");
+        assert_eq!(mgr.device_by_id("remote-1").unwrap().status, DeviceStatus::Offline,
+            "After goodbye, device should be offline");
+
+        // Device announces again (came back)
+        mgr.handle_device_announce("remote-1", &payload);
+        assert_eq!(mgr.device_by_id("remote-1").unwrap().status, DeviceStatus::Online,
+            "After re-announce, device should be online again");
+    }
+
+    /// 13. Device with same ID but different info: second announce with same ID
+    ///     but different name must update, not duplicate.
+    #[test]
+    fn same_id_different_info_updates_not_duplicates() {
+        let (mut mgr, mut rx) = make_manager();
+
+        let device_v1 = BaseDevice {
+            id: "dev-1".to_string(),
+            device_type: "desktop".to_string(),
+            name: "Alice".to_string(),
+            tailscale_hostname: "app-desktop-dev-1".to_string(),
+            tailscale_dns_name: None,
+            tailscale_ip: Some("100.64.0.2".to_string()),
+            role: None,
+            status: DeviceStatus::Online,
+            capabilities: vec![],
+            metadata: None,
+            last_seen: None,
+            started_at: Some(1000),
+            os: None,
+            latency_ms: None,
+        };
+
+        let payload_v1 = DeviceAnnouncePayload {
+            device: device_v1.clone(),
+            protocol_version: 2,
+        };
+        mgr.handle_device_announce("dev-1", &payload_v1);
+        while rx.try_recv().is_ok() {} // drain
+
+        // Same ID, different name
+        let mut device_v2 = device_v1.clone();
+        device_v2.name = "Bob".to_string();
+        let payload_v2 = DeviceAnnouncePayload {
+            device: device_v2,
+            protocol_version: 2,
+        };
+        mgr.handle_device_announce("dev-1", &payload_v2);
+
+        // Should still have exactly one device
+        assert_eq!(mgr.devices().len(), 1,
+            "Same ID announced twice must not create duplicate entries");
+        assert_eq!(mgr.device_by_id("dev-1").unwrap().name, "Bob",
+            "Second announce must update the device name");
+
+        // Should emit DeviceUpdated (not DeviceDiscovered)
+        let mut found_updated = false;
+        while let Ok(event) = rx.try_recv() {
+            if let DeviceEvent::DeviceUpdated(d) = event {
+                if d.id == "dev-1" && d.name == "Bob" {
+                    found_updated = true;
+                }
+            }
+        }
+        assert!(found_updated,
+            "Second announce with same ID must emit DeviceUpdated");
+    }
+
+    /// 14. handle_device_list with local device: if device:list includes the
+    ///     local node's own ID, it must be skipped (not added as a remote device).
+    #[test]
+    fn device_list_skips_local_device_id() {
+        let (mut mgr, _rx) = make_manager();
+
+        let local_device = BaseDevice {
+            id: "local-1".to_string(), // same as test_identity().id
+            device_type: "desktop".to_string(),
+            name: "Local Clone".to_string(),
+            tailscale_hostname: "app-desktop-local-1".to_string(),
+            tailscale_dns_name: None,
+            tailscale_ip: Some("100.64.0.1".to_string()),
+            role: Some(DeviceRole::Primary),
+            status: DeviceStatus::Online,
+            capabilities: vec![],
+            metadata: None,
+            last_seen: None,
+            started_at: Some(1000),
+            os: None,
+            latency_ms: None,
+        };
+
+        let remote_device = BaseDevice {
+            id: "remote-1".to_string(),
+            device_type: "desktop".to_string(),
+            name: "Remote".to_string(),
+            tailscale_hostname: "app-desktop-remote-1".to_string(),
+            tailscale_dns_name: None,
+            tailscale_ip: None,
+            role: None,
+            status: DeviceStatus::Online,
+            capabilities: vec![],
+            metadata: None,
+            last_seen: None,
+            started_at: None,
+            os: None,
+            latency_ms: None,
+        };
+
+        let payload = DeviceListPayload {
+            devices: vec![local_device, remote_device],
+            primary_id: "local-1".to_string(),
+        };
+
+        mgr.handle_device_list("remote-1", &payload);
+
+        // Only the remote device should be in the devices map
+        assert_eq!(mgr.devices().len(), 1,
+            "device:list must skip the local node's own device_id");
+        assert!(mgr.device_by_id("remote-1").is_some(),
+            "Remote device must be present");
+        // device_by_id("local-1") returns the local device (not a remote entry)
+        let local = mgr.device_by_id("local-1").unwrap();
+        assert_eq!(local.name, "My Desktop",
+            "Local device returned by device_by_id must be the actual local device, not the one from the list");
+    }
+
+    /// 15. Online devices filter: 5 devices total, 3 online, 2 offline.
+    ///     online_devices() must return exactly the 3 online ones.
+    #[test]
+    fn online_devices_returns_exactly_online_ones() {
+        let (mut mgr, _rx) = make_manager();
+
+        let hostnames = [
+            ("app-desktop-d1", true),
+            ("app-desktop-d2", true),
+            ("app-desktop-d3", false),
+            ("app-desktop-d4", true),
+            ("app-desktop-d5", false),
+        ];
+
+        for (hostname, online) in &hostnames {
+            let peer = make_peer(hostname, *online);
+            mgr.add_discovered_peer(&peer);
+        }
+
+        let online = mgr.online_devices();
+        assert_eq!(online.len(), 3,
+            "online_devices must return exactly 3 devices out of 5 (3 online, 2 offline)");
+        for d in &online {
+            assert_eq!(d.status, DeviceStatus::Online,
+                "Every device from online_devices() must have Online status");
+        }
+
+        let offline_count = mgr.devices().iter().filter(|d| d.status == DeviceStatus::Offline).count();
+        assert_eq!(offline_count, 2,
+            "There should be exactly 2 offline devices in the full list");
+    }
+
+    /// 16. Primary device goes offline triggers PrimaryChanged(None).
+    ///     Verified via DeviceEvent stream.
+    #[test]
+    fn primary_goes_offline_emits_primary_changed_none() {
+        let (mut mgr, mut rx) = make_manager();
+
+        let peer = make_peer("app-desktop-dev2", true);
+        mgr.add_discovered_peer(&peer);
+        mgr.set_device_role("dev2", DeviceRole::Primary);
+        assert_eq!(mgr.primary_id(), Some("dev2"));
+        while rx.try_recv().is_ok() {} // drain
+
+        mgr.mark_device_offline("dev2");
+
+        assert!(mgr.primary_id().is_none(),
+            "primary_id must be None after primary goes offline");
+
+        let mut found_primary_none = false;
+        let mut found_device_offline = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                DeviceEvent::PrimaryChanged(None) => found_primary_none = true,
+                DeviceEvent::DeviceOffline(id) if id == "dev2" => found_device_offline = true,
+                _ => {}
+            }
+        }
+        assert!(found_primary_none,
+            "Primary going offline must emit PrimaryChanged(None)");
+        assert!(found_device_offline,
+            "Primary going offline must emit DeviceOffline");
+    }
+
+    /// 17. set_device_role for a nonexistent device_id: must not panic.
+    #[test]
+    fn set_role_on_nonexistent_device_no_panic() {
+        let (mut mgr, _rx) = make_manager();
+
+        // This should be a silent no-op
+        mgr.set_device_role("nonexistent-device", DeviceRole::Primary);
+
+        // Verify no side effects
+        assert!(mgr.primary_id().is_none(),
+            "set_device_role on nonexistent device must not set primary_id");
+        assert!(mgr.devices().is_empty(),
+            "set_device_role on nonexistent device must not create entries");
+    }
+
+    /// mark_device_offline on nonexistent device: must not panic.
+    #[test]
+    fn mark_offline_nonexistent_device_no_panic() {
+        let (mut mgr, _rx) = make_manager();
+
+        // Should not panic
+        mgr.mark_device_offline("ghost-device");
+        mgr.handle_device_goodbye("ghost-device");
+
+        // No devices should exist
+        assert!(mgr.devices().is_empty());
+    }
+
+    /// clear() emits DevicesChanged with empty list.
+    #[test]
+    fn clear_emits_devices_changed_empty() {
+        let (mut mgr, mut rx) = make_manager();
+
+        let peer = make_peer("app-desktop-d1", true);
+        mgr.add_discovered_peer(&peer);
+        while rx.try_recv().is_ok() {} // drain
+
+        mgr.clear();
+
+        let mut found_empty_list = false;
+        while let Ok(event) = rx.try_recv() {
+            if let DeviceEvent::DevicesChanged(devs) = event {
+                if devs.is_empty() {
+                    found_empty_list = true;
+                }
+            }
+        }
+        assert!(found_empty_list,
+            "clear() must emit DevicesChanged with empty device list");
+    }
+
+    /// device_list with empty primary_id: does not set primary.
+    #[test]
+    fn device_list_empty_primary_id_no_primary_set() {
+        let (mut mgr, _rx) = make_manager();
+
+        let payload = DeviceListPayload {
+            devices: vec![],
+            primary_id: String::new(),
+        };
+
+        mgr.handle_device_list("remote-1", &payload);
+
+        assert!(mgr.primary_id().is_none(),
+            "device:list with empty primary_id must not set a primary");
+    }
+
+    /// add_discovered_peer updates existing device (doesn't duplicate).
+    #[test]
+    fn add_discovered_peer_updates_existing() {
+        let (mut mgr, _rx) = make_manager();
+
+        let peer_v1 = TailnetPeer {
+            id: "p".to_string(),
+            hostname: "app-desktop-dev2".to_string(),
+            dns_name: "app-desktop-dev2.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.2".to_string()],
+            online: true,
+            os: Some("linux".to_string()),
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        };
+        mgr.add_discovered_peer(&peer_v1);
+        assert_eq!(mgr.devices().len(), 1);
+
+        // Same hostname, different IP, now offline
+        let peer_v2 = TailnetPeer {
+            id: "p".to_string(),
+            hostname: "app-desktop-dev2".to_string(),
+            dns_name: "app-desktop-dev2.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.99".to_string()],
+            online: false,
+            os: Some("linux".to_string()),
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        };
+        mgr.add_discovered_peer(&peer_v2);
+
+        assert_eq!(mgr.devices().len(), 1,
+            "Re-discovering same peer must update, not duplicate");
+        let dev = mgr.device_by_id("dev2").unwrap();
+        assert_eq!(dev.status, DeviceStatus::Offline,
+            "Updated peer should reflect new online status");
+        assert_eq!(dev.tailscale_ip.as_deref(), Some("100.64.0.99"),
+            "Updated peer should reflect new IP");
+    }
 }

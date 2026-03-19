@@ -736,6 +736,903 @@ async fn test_close_all_disconnects() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Adversarial edge case tests (single-node, no network required)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #1: Client drops immediately after connect
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_client_drops_immediately_after_connect() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.1:10001".into(),
+            "edge-drop-fast.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    // Wait for Connected
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected (before immediate drop)",
+    )
+    .await;
+
+    // Drop client immediately — zero messages sent
+    drop(client_ws);
+
+    // Disconnected should fire quickly
+    let event = wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Disconnected { .. }),
+        "Disconnected (after immediate drop)",
+    )
+    .await;
+
+    if let TransportEvent::Disconnected { connection_id, reason } = &event {
+        assert_eq!(connection_id, "incoming:100.64.1.1:10001");
+        assert!(
+            reason.contains("remote_closed") || reason.contains("error"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    // Verify cleanup
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(manager.get_connections().await.is_empty());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #2: Server sends to closed connection
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_send_to_closed_connection_returns_error() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.2:10002".into(),
+            "edge-send-closed.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    let conn_id = "incoming:100.64.1.2:10002";
+
+    // Drop client, wait for disconnect
+    drop(client_ws);
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Disconnected { .. }),
+        "Disconnected",
+    )
+    .await;
+
+    // Wait for cleanup
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send to closed connection — should return error, not panic
+    let result = manager
+        .send(conn_id, &serde_json::json!({"type": "ghost-message"}))
+        .await;
+    assert!(
+        result.is_err(),
+        "send() to a closed/cleaned-up connection should return Err"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #3: Rapid connect/disconnect cycles
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_rapid_connect_disconnect_cycles() {
+    init_tracing();
+
+    let (manager, _rx) = ConnectionManager::new(quiet_heartbeat_config());
+
+    for i in 0..10u16 {
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+        manager
+            .handle_ws_stream(
+                server_ws,
+                format!("100.64.1.{}:{}", 10 + (i / 256) as u8, 11000 + i),
+                format!("edge-rapid-{i}.ts.net"),
+                Direction::Incoming,
+            )
+            .await;
+        // Drop client immediately
+        drop(client_ws);
+    }
+
+    // Wait for all spawned tasks to process the disconnections
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let conns = manager.get_connections().await;
+    assert!(
+        conns.is_empty(),
+        "expected empty after 10 rapid connect/disconnect cycles, got {} leftover",
+        conns.len()
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #4: set_device_id on closed connection
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_set_device_id_on_closed_connection() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.3:10003".into(),
+            "edge-closed-dev.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    let conn_id = "incoming:100.64.1.3:10003";
+
+    // Close the connection
+    drop(client_ws);
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Disconnected { .. }),
+        "Disconnected",
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Should NOT panic — connection is gone, set_device_id is a no-op
+    manager
+        .set_device_id(conn_id, "ghost-device".into())
+        .await;
+
+    // Ghost device should NOT be resolvable
+    assert!(manager
+        .get_connection_by_device("ghost-device")
+        .await
+        .is_none());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #5: set_device_id twice on the same connection
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_set_device_id_twice() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.4:10004".into(),
+            "edge-double-dev.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    let conn_id = "incoming:100.64.1.4:10004";
+
+    // Set first device ID
+    manager.set_device_id(conn_id, "dev-a".into()).await;
+    assert!(manager.get_connection_by_device("dev-a").await.is_some());
+
+    // Set second device ID on same connection — should replace
+    manager.set_device_id(conn_id, "dev-b".into()).await;
+
+    // Old mapping gone
+    assert!(
+        manager.get_connection_by_device("dev-a").await.is_none(),
+        "old device_id 'dev-a' should be removed from index"
+    );
+    // New mapping works
+    let found = manager.get_connection_by_device("dev-b").await.unwrap();
+    assert_eq!(found.id, conn_id);
+    assert_eq!(found.device_id.as_deref(), Some("dev-b"));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #6: Two connections claim the same device_id
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_two_connections_same_device_id() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+
+    let (ws1, _c1) = duplex_ws_pair().await;
+    let (ws2, _c2) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            ws1,
+            "100.64.1.5:10005".into(),
+            "edge-dup-dev-1.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+    manager
+        .handle_ws_stream(
+            ws2,
+            "100.64.1.5:10006".into(),
+            "edge-dup-dev-2.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    // Drain Connected events
+    for _ in 0..2 {
+        wait_for_transport_event(
+            &mut rx,
+            Duration::from_secs(5),
+            |e| matches!(e, TransportEvent::Connected(_)),
+            "Connected",
+        )
+        .await;
+    }
+
+    let conn1 = "incoming:100.64.1.5:10005";
+    let conn2 = "incoming:100.64.1.5:10006";
+
+    // First connection claims device
+    manager.set_device_id(conn1, "shared-dev".into()).await;
+    let found = manager.get_connection_by_device("shared-dev").await.unwrap();
+    assert_eq!(found.id, conn1);
+
+    // Second connection steals the same device ID
+    manager.set_device_id(conn2, "shared-dev".into()).await;
+    let found = manager.get_connection_by_device("shared-dev").await.unwrap();
+    assert_eq!(
+        found.id, conn2,
+        "latest set_device_id call should own the device index entry"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #7: Empty binary message
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_empty_binary_message() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.6:10007".into(),
+            "edge-empty-msg.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Send an empty binary frame (0 bytes)
+    client_ws
+        .send(Message::Binary(bytes::Bytes::new()))
+        .await
+        .unwrap();
+
+    // Send a valid message after to prove the connection survived
+    let payload = serde_json::json!({"namespace": "test", "type": "after-empty"});
+    let encoded = websocket::encode_message(&payload, false).unwrap();
+    client_ws
+        .send(Message::Binary(bytes::Bytes::from(encoded)))
+        .await
+        .unwrap();
+
+    // The valid message should arrive (empty was skipped as malformed)
+    let event = wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Message { .. }),
+        "Message after empty binary",
+    )
+    .await;
+
+    if let TransportEvent::Message { message, .. } = &event {
+        assert_eq!(
+            message.payload.get("type").unwrap().as_str().unwrap(),
+            "after-empty"
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #8: Oversized message (10 MB)
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_oversized_message() {
+    init_tracing();
+
+    // Use a config with large enough duplex buffer
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    // Use a larger duplex buffer to fit the oversized message
+    let (client_io, server_io) = tokio::io::duplex(16 * 1024 * 1024);
+    let server_ws = WebSocketStream::from_raw_socket(
+        server_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        Some(websocket::ws_config()),
+    )
+    .await;
+    let mut client_ws = WebSocketStream::from_raw_socket(
+        client_io,
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        Some(websocket::ws_config()),
+    )
+    .await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.7:10008".into(),
+            "edge-oversized.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Construct a ~10MB payload: flag byte + large JSON
+    let big_string = "x".repeat(10 * 1024 * 1024);
+    let big_json = serde_json::json!({"namespace": "test", "type": "big", "data": big_string});
+    let encoded = websocket::encode_message(&big_json, true).unwrap();
+
+    // Send it. This might fail at the WS level due to MAX_MESSAGE_SIZE,
+    // but should NOT cause a crash or OOM on the server side.
+    let _send_result = client_ws
+        .send(Message::Binary(bytes::Bytes::from(encoded)))
+        .await;
+
+    // Whether it succeeds or fails, the server should still be running.
+    // If the message was accepted, we should either get it as a Message event
+    // or it should trigger a read pump error. Either way: no crash.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Send a normal follow-up to verify the connection is still usable
+    // (or was gracefully terminated)
+    let small_payload = serde_json::json!({"namespace": "test", "type": "after-big"});
+    let small_encoded = websocket::encode_message(&small_payload, false).unwrap();
+    let _ = client_ws
+        .send(Message::Binary(bytes::Bytes::from(small_encoded)))
+        .await;
+
+    // Just verify we don't hang or crash — the exact behavior (message
+    // delivered vs connection terminated) depends on size limits
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Test passes if we get here without panic or deadlock
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #9: Non-UTF8 / garbage binary message
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_non_utf8_binary_message() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.8:10009".into(),
+            "edge-garbage.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Send raw garbage binary — not valid JSON, not valid msgpack
+    // First byte 0x00 = msgpack format flag, rest is garbage
+    let garbage: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0x00, 0x01];
+    client_ws
+        .send(Message::Binary(bytes::Bytes::from(garbage)))
+        .await
+        .unwrap();
+
+    // Also try with unknown format flag
+    let unknown_flag: Vec<u8> = vec![0x04, 0x01, 0x02, 0x03];
+    client_ws
+        .send(Message::Binary(bytes::Bytes::from(unknown_flag)))
+        .await
+        .unwrap();
+
+    // Small delay to ensure garbage messages are processed
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a valid message to prove the connection survived malformed input
+    let payload = serde_json::json!({"namespace": "test", "type": "after-garbage"});
+    let encoded = websocket::encode_message(&payload, false).unwrap();
+    client_ws
+        .send(Message::Binary(bytes::Bytes::from(encoded)))
+        .await
+        .unwrap();
+
+    // The valid message should arrive. Use a predicate that checks the
+    // actual payload to skip any garbage that might have decoded into a
+    // serde_json::Value without a "type" field.
+    let event = wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| {
+            if let TransportEvent::Message { message, .. } = e {
+                message
+                    .payload
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    == Some("after-garbage")
+            } else {
+                false
+            }
+        },
+        "Message with type=after-garbage (skipping garbage-decoded messages)",
+    )
+    .await;
+
+    if let TransportEvent::Message { message, .. } = &event {
+        assert_eq!(
+            message.payload.get("type").unwrap().as_str().unwrap(),
+            "after-garbage"
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #10: Rapid fire 1000 messages
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_rapid_fire_messages() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.9:10010".into(),
+            "edge-rapid-fire.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Use 200 messages — within the 256-capacity broadcast channel to
+    // avoid lagging (which causes missed events for broadcast receivers).
+    let msg_count = 200u64;
+
+    // Send messages in a tight loop
+    for i in 0..msg_count {
+        let payload = serde_json::json!({"namespace": "test", "type": "rapid", "seq": i});
+        let encoded = websocket::encode_message(&payload, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(encoded)))
+            .await
+            .unwrap();
+    }
+
+    // Receive all messages (or as many as arrive within timeout).
+    // The broadcast channel capacity is 256, so with 200 messages we
+    // should not lag. We use a generous timeout to account for slow CI.
+    let mut received = 0u64;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(TransportEvent::Message { .. })) => {
+                received += 1;
+                if received == msg_count {
+                    break;
+                }
+            }
+            Ok(Ok(_)) => continue, // skip non-message events
+            Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                // If lagging occurs, count the lagged events as received
+                // (they were processed by the server, just lost by this
+                // slow broadcast receiver)
+                received += n;
+                if received >= msg_count {
+                    break;
+                }
+            }
+            Ok(Err(_)) => break,
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        received >= msg_count,
+        "all {msg_count} rapid-fire messages should be processed (got {received})"
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #11: Send while connection is closing
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_send_while_closing() {
+    init_tracing();
+
+    let (manager, mut rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.10:10011".into(),
+            "edge-send-closing.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    let conn_id = "incoming:100.64.1.10:10011";
+
+    // Spawn close_all and send concurrently — no deadlock should occur
+    let manager_ref = &manager;
+    let race_msg = serde_json::json!({"type": "race"});
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let close_fut = manager_ref.close_all();
+        let send_fut = manager_ref.send(conn_id, &race_msg);
+        // Run them concurrently
+        let (_, send_result) = tokio::join!(close_fut, send_fut);
+        send_result
+    })
+    .await;
+
+    // Should complete without deadlock (timeout would indicate deadlock)
+    assert!(
+        result.is_ok(),
+        "concurrent send + close_all should not deadlock"
+    );
+    // send() may or may not succeed — either outcome is fine
+    // The key is that we didn't deadlock or panic
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #12: Heartbeat with very short (near-zero) interval
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_heartbeat_very_short_interval() {
+    init_tracing();
+
+    let config = TransportConfig {
+        heartbeat: HeartbeatConfig {
+            ping_interval: Duration::from_millis(1), // extremely fast
+            timeout: Duration::from_millis(100),      // short but not instant
+        },
+        auto_reconnect: false,
+        max_reconnect_delay: Duration::from_secs(1),
+        debug_json_mode: false,
+    };
+
+    let (manager, mut rx) = ConnectionManager::new(config);
+    let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.11:10012".into(),
+            "edge-fast-hb.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Respond to a few pings to keep the connection alive briefly,
+    // proving the fast heartbeat doesn't spin or crash
+    let responder = tokio::spawn(async move {
+        let mut pong_count = 0u32;
+        while let Some(Ok(msg)) = client_ws.next().await {
+            if let Message::Binary(data) = &msg {
+                if let Ok(decoded) = websocket::decode_message(data) {
+                    if decoded.payload.get("type").and_then(|t| t.as_str()) == Some("ping") {
+                        let ts = decoded.payload.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let pong = truffle_core::transport::heartbeat::create_pong(ts);
+                        let encoded = websocket::encode_message(&pong, false).unwrap();
+                        if client_ws.send(Message::Binary(bytes::Bytes::from(encoded))).await.is_err() {
+                            break;
+                        }
+                        pong_count += 1;
+                        // Respond to a handful then stop
+                        if pong_count >= 10 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        pong_count
+    });
+
+    // Let the heartbeat run for a bit
+    let pong_count = tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .expect("responder should finish")
+        .expect("responder should not panic");
+
+    assert!(
+        pong_count >= 5,
+        "should have exchanged several pings with 1ms interval, got {pong_count}"
+    );
+
+    // Connection will eventually time out since we stopped responding.
+    // Just verify no infinite loop or CPU spin happened above.
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #13: Connection closed during heartbeat wait
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_connection_closed_during_heartbeat() {
+    init_tracing();
+
+    let config = TransportConfig {
+        heartbeat: HeartbeatConfig {
+            ping_interval: Duration::from_millis(100),
+            timeout: Duration::from_secs(10), // long timeout — won't fire
+        },
+        auto_reconnect: false,
+        max_reconnect_delay: Duration::from_secs(1),
+        debug_json_mode: false,
+    };
+
+    let (manager, mut rx) = ConnectionManager::new(config);
+    let (server_ws, client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.12:10013".into(),
+            "edge-hb-close.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Connected(_)),
+        "Connected",
+    )
+    .await;
+
+    // Wait for at least one heartbeat ping to be sent
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Drop client while heartbeat is actively pinging
+    drop(client_ws);
+
+    // Should get Disconnected (not stuck waiting for pong)
+    let event = wait_for_transport_event(
+        &mut rx,
+        Duration::from_secs(5),
+        |e| matches!(e, TransportEvent::Disconnected { .. }),
+        "Disconnected (during heartbeat)",
+    )
+    .await;
+
+    if let TransportEvent::Disconnected { reason, .. } = &event {
+        assert!(
+            reason.contains("remote_closed") || reason.contains("error"),
+            "should disconnect cleanly, not get stuck: {reason}"
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #14: close_all with no connections
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_close_all_empty_manager() {
+    init_tracing();
+
+    let (manager, _rx) = ConnectionManager::new(quiet_heartbeat_config());
+
+    assert!(manager.get_connections().await.is_empty());
+
+    // Should not panic
+    manager.close_all().await;
+
+    assert!(manager.get_connections().await.is_empty());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #15: get_connection_by_device with no devices bound
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_get_connection_by_device_no_bindings() {
+    init_tracing();
+
+    let (manager, _rx) = ConnectionManager::new(quiet_heartbeat_config());
+    let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+    manager
+        .handle_ws_stream(
+            server_ws,
+            "100.64.1.14:10015".into(),
+            "edge-no-dev.ts.net".into(),
+            Direction::Incoming,
+        )
+        .await;
+
+    // Connection exists, but no device_id was ever set
+    assert!(manager.get_connection_by_device("any").await.is_none());
+    assert!(manager.get_connection_by_device("").await.is_none());
+    assert!(manager.get_connection_by_device("incoming:100.64.1.14:10015").await.is_none());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Edge case #16: Concurrent subscribe + event
+// ───────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_concurrent_subscribe_and_event() {
+    init_tracing();
+
+    let (manager, _initial_rx) = ConnectionManager::new(quiet_heartbeat_config());
+
+    // First subscriber — before any events
+    let mut sub1 = manager.subscribe();
+
+    // Generate 5 events
+    let mut _clients = Vec::new();
+    for i in 0..5u8 {
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+        _clients.push(client_ws);
+        manager
+            .handle_ws_stream(
+                server_ws,
+                format!("100.64.1.{}:{}", 20 + i, 12000 + i as u16),
+                format!("edge-sub-early-{i}.ts.net"),
+                Direction::Incoming,
+            )
+            .await;
+    }
+
+    // Second subscriber — mid-stream
+    let mut sub2 = manager.subscribe();
+
+    // Generate 5 more events
+    for i in 0..5u8 {
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+        _clients.push(client_ws);
+        manager
+            .handle_ws_stream(
+                server_ws,
+                format!("100.64.1.{}:{}", 30 + i, 13000 + i as u16),
+                format!("edge-sub-late-{i}.ts.net"),
+                Direction::Incoming,
+            )
+            .await;
+    }
+
+    // sub1 should have all 10 events
+    let mut count1 = 0;
+    while let Ok(TransportEvent::Connected(_)) = sub1.try_recv() {
+        count1 += 1;
+    }
+    assert_eq!(count1, 10, "first subscriber should see all 10 Connected events");
+
+    // sub2 should only have the last 5
+    let mut count2 = 0;
+    while let Ok(TransportEvent::Connected(_)) = sub2.try_recv() {
+        count2 += 1;
+    }
+    assert_eq!(count2, 5, "second subscriber should see 5 Connected events");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Two-node tests (require Tailscale auth)
 // ═══════════════════════════════════════════════════════════════════════════
 

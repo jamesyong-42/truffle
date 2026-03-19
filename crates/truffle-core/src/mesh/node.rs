@@ -1222,4 +1222,292 @@ mod tests {
         let ns = bus.subscribed_namespaces().await;
         assert!(ns.is_empty(), "New message bus should have no subscriptions");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial / edge-case tests
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// 24. Start while already running: second start() must be a no-op (no
+    ///     panic, no duplicate event loops). Verify only one Started event.
+    #[tokio::test]
+    async fn start_while_running_is_noop() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        node.start().await;
+        let event = event_rx.recv().await.unwrap();
+        assert!(matches!(event, MeshNodeEvent::Started),
+            "First start must emit Started");
+
+        // Second start while running
+        node.start().await;
+        assert!(node.is_running().await);
+
+        // Give a brief window for any spurious events
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Should NOT receive a second Started event
+        match event_rx.try_recv() {
+            Ok(MeshNodeEvent::Started) => {
+                panic!("start() while already running must NOT emit a second Started event");
+            }
+            _ => {} // Expected: no event or a different event
+        }
+
+        node.stop().await;
+    }
+
+    /// 25. Stop while not started: must not panic.
+    #[tokio::test]
+    async fn stop_while_not_started_no_panic() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        assert!(!node.is_running().await);
+
+        // Stop on never-started node: should be a silent no-op
+        node.stop().await;
+
+        assert!(!node.is_running().await);
+
+        // Should not emit Stopped (was never started)
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(event_rx.try_recv().is_err(),
+            "stop() on never-started node must not emit Stopped event");
+    }
+
+    /// 26. Subscribe before start: subscriber created before start() should
+    ///     receive events emitted after start.
+    #[tokio::test]
+    async fn subscribe_before_start_receives_events() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, _default_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        // Subscribe BEFORE start
+        let mut pre_start_sub = node.subscribe_events();
+
+        node.start().await;
+
+        // The pre-start subscriber should receive Started
+        let event = pre_start_sub.recv().await.unwrap();
+        assert!(matches!(event, MeshNodeEvent::Started),
+            "Pre-start subscriber must receive Started event");
+
+        node.stop().await;
+
+        let event = pre_start_sub.recv().await.unwrap();
+        assert!(matches!(event, MeshNodeEvent::Stopped),
+            "Pre-start subscriber must receive Stopped event");
+    }
+
+    /// 27. Many subscribers: 100 subscribers all receive the same event.
+    #[tokio::test]
+    async fn many_subscribers_all_receive_events() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, _default_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        // Create 100 subscribers
+        let mut subscribers: Vec<broadcast::Receiver<MeshNodeEvent>> = (0..100)
+            .map(|_| node.subscribe_events())
+            .collect();
+
+        node.start().await;
+
+        // All 100 should receive Started
+        for (i, sub) in subscribers.iter_mut().enumerate() {
+            let event = tokio::time::timeout(Duration::from_secs(2), sub.recv()).await;
+            match event {
+                Ok(Ok(MeshNodeEvent::Started)) => {} // expected
+                other => panic!(
+                    "Subscriber {i} did not receive Started event: {other:?}"
+                ),
+            }
+        }
+
+        node.stop().await;
+    }
+
+    /// 28. Event channel capacity: emit many events rapidly (channel capacity
+    ///     is 256). Subscriber that falls behind gets Lagged, not a deadlock.
+    #[tokio::test]
+    async fn event_channel_capacity_no_deadlock() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, _default_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        // Subscribe but DON'T read from it (will fall behind)
+        let mut slow_sub = node.subscribe_events();
+
+        node.start().await;
+
+        // Emit 300 events rapidly (channel capacity is 256)
+        for i in 0..300 {
+            node.emit_event(MeshNodeEvent::Error(format!("test-event-{i}")));
+        }
+
+        // Give time for events to propagate
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Now try to read from the slow subscriber.
+        // It should get Lagged errors but NOT deadlock.
+        let mut lagged = false;
+        let mut received_count = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            match slow_sub.try_recv() {
+                Ok(_) => received_count += 1,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    lagged = true;
+                    // After Lagged, we can still receive subsequent events
+                    let _ = n;
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+
+        // The subscriber should have experienced lag (300 events > 256 capacity)
+        assert!(lagged || received_count > 0,
+            "Slow subscriber must either receive events or get Lagged, not deadlock. lagged={lagged}, received={received_count}");
+
+        node.stop().await;
+    }
+
+    /// emit_event works without start() — events are delivered to existing subscribers.
+    #[tokio::test]
+    async fn emit_event_without_start() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        // emit_event without start() — should not panic
+        node.emit_event(MeshNodeEvent::Error("test error".to_string()));
+
+        let event = event_rx.recv().await.unwrap();
+        match event {
+            MeshNodeEvent::Error(msg) => assert_eq!(msg, "test error"),
+            other => panic!("Expected Error event, got: {other:?}"),
+        }
+    }
+
+    /// Multiple start/stop cycles: verify each cycle produces correct events.
+    #[tokio::test]
+    async fn multiple_start_stop_cycles() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        for cycle in 0..3 {
+            node.start().await;
+
+            // Drain events until we find Started (stop may emit cleanup events
+            // that the event loop forwards before Started arrives)
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut found_started = false;
+            while tokio::time::Instant::now() < deadline {
+                match tokio::time::timeout(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    event_rx.recv(),
+                ).await {
+                    Ok(Ok(MeshNodeEvent::Started)) => { found_started = true; break; }
+                    Ok(Ok(_)) => continue, // other events (DevicesChanged, etc.)
+                    Ok(Err(_)) => break,
+                    Err(_) => break,
+                }
+            }
+            assert!(found_started, "Cycle {cycle}: start must emit Started");
+            assert!(node.is_running().await);
+
+            node.stop().await;
+
+            // Drain events until we find Stopped
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut found_stopped = false;
+            while tokio::time::Instant::now() < deadline {
+                match tokio::time::timeout(
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                    event_rx.recv(),
+                ).await {
+                    Ok(Ok(MeshNodeEvent::Stopped)) => { found_stopped = true; break; }
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(_)) => break,
+                    Err(_) => break,
+                }
+            }
+            assert!(found_stopped, "Cycle {cycle}: stop must emit Stopped");
+            assert!(!node.is_running().await);
+        }
+    }
+
+    /// After stop, local device is reset to offline, election is cleared.
+    #[tokio::test]
+    async fn stop_fully_resets_state() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        node.start().await;
+        let _ = event_rx.recv().await; // Started
+
+        // Set some state
+        node.set_local_online("100.64.0.1", Some("app.ts.net")).await;
+        node.set_auth_required("https://auth.test").await;
+
+        node.stop().await;
+        let _ = event_rx.recv().await; // Stopped (or AuthRequired from set_auth_required)
+
+        // Verify everything is reset
+        assert!(!node.is_running().await);
+        assert!(!node.is_primary().await);
+        assert!(node.primary_id().await.is_none());
+        assert_eq!(node.auth_status().await, AuthStatus::Unknown);
+        assert!(node.auth_url().await.is_none());
+
+        let device = node.local_device().await;
+        assert_eq!(device.status, crate::types::DeviceStatus::Offline);
+    }
+
+    /// send_envelope to unknown device returns false (no connection).
+    #[tokio::test]
+    async fn send_envelope_to_unknown_device_returns_false() {
+        let transport_config = TransportConfig::default();
+        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
+        let conn_mgr = Arc::new(conn_mgr);
+
+        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
+
+        node.start().await;
+        let _ = event_rx.recv().await; // Started
+
+        let envelope = MeshEnvelope::new("test", "msg", serde_json::json!({}));
+        let result = node.send_envelope("nonexistent-device", &envelope).await;
+        assert!(!result,
+            "send_envelope to unknown device with no connection should return false");
+
+        node.stop().await;
+    }
 }

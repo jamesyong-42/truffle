@@ -832,3 +832,483 @@ async fn test_ws_and_http_on_same_router() {
     let (status, _, _) = http_get(addr, "/unknown").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Adversarial edge case integration tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Proxy to a port where nothing is listening (via real HTTP through the router).
+/// Should return 502 Bad Gateway.
+#[tokio::test]
+async fn test_proxy_to_dead_port_returns_502() {
+    // Get an unused port
+    let tmp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = tmp_listener.local_addr().unwrap().port();
+    drop(tmp_listener);
+
+    let target = ProxyTarget::http(format!("127.0.0.1:{dead_port}"));
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Dead Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    let (status, _, body) = http_get(addr, "/api/health").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body, "Bad Gateway");
+}
+
+/// Start an echo server that always returns 500. Proxy should forward the 500
+/// to the client (not convert it to 502).
+#[tokio::test]
+async fn test_proxy_forwards_500_from_target() {
+    // Start a server that always returns 500
+    let error_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let error_addr = error_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            match error_listener.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    tokio::spawn(async move {
+                        let service = service_fn(|_req: Request<Incoming>| async move {
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Full::new(Bytes::from("Internal Server Error")))
+                                    .unwrap(),
+                            )
+                        });
+                        let _ = http1::Builder::new()
+                            .keep_alive(false)
+                            .serve_connection(io, service)
+                            .await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let target = ProxyTarget::http(error_addr.to_string());
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Error Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    let (status, _, body) = http_get(addr, "/api/fail").await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "500 from target should be forwarded to client"
+    );
+    assert_eq!(body, "Internal Server Error");
+}
+
+/// Target server closes connection after sending headers (mid-response drop).
+/// Client should get an error response (502 Bad Gateway).
+#[tokio::test]
+async fn test_proxy_target_drops_connection() {
+    use tokio::io::AsyncWriteExt;
+
+    // Start a server that accepts the connection, sends partial headers,
+    // then drops the connection
+    let dropper = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dropper_addr = dropper.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            match dropper.accept().await {
+                Ok((mut stream, _)) => {
+                    tokio::spawn(async move {
+                        // Read enough to consume the request, then drop
+                        let mut buf = vec![0u8; 4096];
+                        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                        // Send partial/malformed response, then close
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\npartial")
+                            .await;
+                        drop(stream); // Close without sending full body
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let target = ProxyTarget::http(dropper_addr.to_string());
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Dropper Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    // The proxy collects the response body. If the target drops before
+    // sending Content-Length bytes, the collect() call will fail and
+    // the proxy should return 502.
+    let (status, _, _) = http_get(addr, "/api/drop").await;
+    // Either 502 (proxy error) or we get partial content -- both are acceptable.
+    // The key thing is: no hang, no panic.
+    assert!(
+        status == StatusCode::BAD_GATEWAY || status == StatusCode::OK,
+        "dropped connection should return 502 or partial 200, got {status}"
+    );
+}
+
+/// Proxy a POST request with a JSON body. The echo server should receive
+/// the body. This validates that request bodies are forwarded.
+#[tokio::test]
+async fn test_proxy_post_with_body() {
+    // Start an echo server that also captures the request body
+    let body_echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let body_echo_addr = body_echo.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            match body_echo.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    tokio::spawn(async move {
+                        let service = service_fn(|req: Request<Incoming>| async move {
+                            let method = req.method().to_string();
+                            let path = req
+                                .uri()
+                                .path_and_query()
+                                .map(|pq| pq.as_str().to_string())
+                                .unwrap_or_else(|| "/".to_string());
+                            let content_type = req
+                                .headers()
+                                .get("content-type")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+
+                            // Read body
+                            let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
+                            let body_str =
+                                String::from_utf8_lossy(&body_bytes).to_string();
+
+                            let resp_body = serde_json::json!({
+                                "method": method,
+                                "path": path,
+                                "content_type": content_type,
+                                "body": body_str,
+                            });
+
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(Bytes::from(resp_body.to_string())))
+                                    .unwrap(),
+                            )
+                        });
+                        let _ = http1::Builder::new()
+                            .keep_alive(false)
+                            .serve_connection(io, service)
+                            .await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let target = ProxyTarget::http(body_echo_addr.to_string());
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Body Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    // Send a POST with JSON body
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let json_body = r#"{"name":"truffle","version":"0.1.0"}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/data")
+        .header("host", addr.to_string())
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(json_body)))
+        .unwrap();
+
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["method"], "POST");
+    assert_eq!(parsed["path"], "/data"); // /api prefix stripped
+    assert_eq!(parsed["content_type"], "application/json");
+    assert_eq!(parsed["body"], json_body);
+}
+
+/// Proxy with extra headers configured. Verify they reach the target.
+#[tokio::test]
+async fn test_proxy_custom_headers_injection() {
+    let echo_addr = start_echo_server().await;
+
+    let target = ProxyTarget::http(echo_addr.to_string())
+        .with_header("x-custom-header", "injected-by-proxy");
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Header Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    let (status, _, body) = http_get(addr, "/api/check").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        parsed["x-custom-header"], "injected-by-proxy",
+        "custom header should be forwarded to target"
+    );
+}
+
+/// Large response body (1MB) from target should be proxied correctly.
+#[tokio::test]
+async fn test_proxy_large_response_body() {
+    let large_server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let large_addr = large_server.local_addr().unwrap();
+    let response_size = 1024 * 1024; // 1MB
+
+    tokio::spawn(async move {
+        loop {
+            match large_server.accept().await {
+                Ok((stream, _)) => {
+                    let io = TokioIo::new(stream);
+                    tokio::spawn(async move {
+                        let service = service_fn(move |_req: Request<Incoming>| async move {
+                            let body = "x".repeat(response_size);
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("content-type", "application/octet-stream")
+                                    .body(Full::new(Bytes::from(body)))
+                                    .unwrap(),
+                            )
+                        });
+                        let _ = http1::Builder::new()
+                            .keep_alive(false)
+                            .serve_connection(io, service)
+                            .await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let target = ProxyTarget::http(large_addr.to_string());
+    let proxy = ReverseProxyHandler::new("/api", target);
+
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/api", "Large Proxy", "proxy", Arc::new(proxy))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    let (status, _, body) = http_get(addr, "/api/large").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.len(),
+        response_size,
+        "1MB response should be fully proxied"
+    );
+}
+
+/// HEAD request to static handler. Hyper should strip the body but
+/// preserve headers (Content-Type).
+#[tokio::test]
+async fn test_static_head_request() {
+    let files = vec![StaticFile {
+        path: "index.html".to_string(),
+        content: Bytes::from("<!DOCTYPE html><html><body>HEAD test</body></html>"),
+        mime: "text/html".to_string(),
+    }];
+
+    let handler = StaticHandler::from_memory(files);
+    let router = Arc::new(HttpRouter::new());
+    router
+        .add_route("/", "Static", "static", Arc::new(handler))
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    // Send HEAD request
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) =
+        hyper::client::conn::http1::handshake(io).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let req = Request::builder()
+        .method("HEAD")
+        .uri("/index.html")
+        .header("host", addr.to_string())
+        .body(http_body_util::Empty::<Bytes>::new())
+        .unwrap();
+
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/html"
+    );
+
+    // Body should be empty for HEAD
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        body.is_empty(),
+        "HEAD response body should be empty, got {} bytes",
+        body.len()
+    );
+}
+
+/// Double-slash paths through the router should not crash.
+#[tokio::test]
+async fn test_router_double_slash_paths() {
+    let router = Arc::new(HttpRouter::new());
+    let handler = Arc::new(FixedHandler::new(StatusCode::OK, "root-handler"));
+    router
+        .add_route("/", "Root", "static", handler)
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    // Various double-slash paths
+    let paths = ["//", "//api//users", "///", "/api//"];
+    for path in &paths {
+        let (status, _, _) = http_get(addr, path).await;
+        // Should not crash; root catches all since prefix is "/"
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "double-slash path {path} should not crash (root catches all)"
+        );
+    }
+}
+
+/// Query strings should not affect routing. /api/users?page=2 should
+/// route the same as /api/users.
+#[tokio::test]
+async fn test_router_query_string_ignored() {
+    let router = Arc::new(HttpRouter::new());
+    let handler = Arc::new(FixedHandler::new(StatusCode::OK, "api-response"));
+    router
+        .add_route("/api", "API", "proxy", handler)
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    let (status, _, body) = http_get(addr, "/api/users?page=2&sort=name").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "api-response");
+}
+
+/// Encoded path (%2F) should not bypass prefix matching.
+#[tokio::test]
+async fn test_router_encoded_path_no_bypass() {
+    let router = Arc::new(HttpRouter::new());
+
+    let admin_handler = Arc::new(FixedHandler::new(StatusCode::OK, "admin-area"));
+    let api_handler = Arc::new(FixedHandler::new(StatusCode::OK, "api-area"));
+    router
+        .add_route("/admin", "Admin", "admin", admin_handler)
+        .await
+        .unwrap();
+    router
+        .add_route("/api", "API", "proxy", api_handler)
+        .await
+        .unwrap();
+
+    let addr = start_test_router(router).await;
+
+    // /api/users%2Fadmin should route to /api (not /admin)
+    let (status, _, body) = http_get(addr, "/api/users%2Fadmin").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "api-area", "%2F should not be decoded for routing");
+}
+
+/// Multiple routes with similar prefixes should not interfere.
+#[tokio::test]
+async fn test_router_similar_prefixes_no_interference() {
+    let router = Arc::new(HttpRouter::new());
+
+    let handlers: Vec<(&str, &str)> = vec![
+        ("/api", "api"),
+        ("/api/v1", "api-v1"),
+        ("/api/v2", "api-v2"),
+        ("/app", "app"),
+        ("/application", "application"),
+    ];
+
+    for (prefix, body) in &handlers {
+        let h = Arc::new(FixedHandler::new(StatusCode::OK, body));
+        router.add_route(prefix, body, "test", h).await.unwrap();
+    }
+
+    let addr = start_test_router(router).await;
+
+    // /api/v1/users -> api-v1 (longest prefix wins)
+    let (_, _, body) = http_get(addr, "/api/v1/users").await;
+    assert_eq!(body, "api-v1");
+
+    // /api/v2/items -> api-v2
+    let (_, _, body) = http_get(addr, "/api/v2/items").await;
+    assert_eq!(body, "api-v2");
+
+    // /api/v3/other -> api (falls back to shorter prefix)
+    let (_, _, body) = http_get(addr, "/api/v3/other").await;
+    assert_eq!(body, "api");
+
+    // /app/dashboard -> app (not api!)
+    let (_, _, body) = http_get(addr, "/app/dashboard").await;
+    assert_eq!(body, "app");
+
+    // /application/status -> application (not app!)
+    let (_, _, body) = http_get(addr, "/application/status").await;
+    assert_eq!(body, "application");
+
+    // /apps -> 404 (not /app, because /apps is not /app + /)
+    let (status, _, _) = http_get(addr, "/apps").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

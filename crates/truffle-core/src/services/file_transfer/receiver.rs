@@ -332,4 +332,69 @@ mod tests {
         assert!(parse_content_range("bytes abc-def/ghi").is_err());
         assert!(parse_content_range("bytes 0-99").is_err());
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial edge-case tests (Layer 4: Services — Receiver)
+    // ══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_content_range_missing_bytes_prefix() {
+        assert!(parse_content_range("0-99/100").is_err());
+    }
+
+    #[test]
+    fn parse_content_range_empty_string() {
+        assert!(parse_content_range("").is_err());
+    }
+
+    #[test]
+    fn parse_content_range_negative_values() {
+        // parse will fail because i64 parse on "-1" in the start position
+        // is actually ambiguous — "bytes -1-99/100" splits on first '-'
+        assert!(parse_content_range("bytes -1-99/100").is_err());
+    }
+
+    #[test]
+    fn parse_content_range_very_large_values() {
+        let result = parse_content_range("bytes 0-9223372036854775806/9223372036854775807");
+        assert!(result.is_ok());
+        let (start, end, total) = result.unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, i64::MAX - 1);
+        assert_eq!(total, i64::MAX);
+    }
+
+    #[test]
+    fn parse_content_range_single_byte() {
+        let (start, end, total) = parse_content_range("bytes 0-0/1").unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn parse_content_range_extra_spaces() {
+        // Should fail - strict parsing expects "bytes " prefix
+        assert!(parse_content_range("bytes  0-99/100").is_err());
+    }
+
+    #[test]
+    fn parse_content_range_no_slash() {
+        assert!(parse_content_range("bytes 0-99").is_err());
+    }
+
+    #[test]
+    fn parse_content_range_no_dash() {
+        assert!(parse_content_range("bytes 099/100").is_err());
+    }
+
+    #[test]
+    fn json_error_produces_valid_response() {
+        let resp = json_error(StatusCode::NOT_FOUND, "TEST_ERROR", "test message");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+    }
 }

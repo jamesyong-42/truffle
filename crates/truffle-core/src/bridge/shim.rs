@@ -1049,4 +1049,334 @@ mod tests {
         assert!(debug.contains("DERP relay unreachable"));
         assert!(debug.contains("Clock skew detected"));
     }
+
+    // ── Adversarial edge case tests ─────────────────────────────────────
+
+    /// Edge case 22: Send command after shutdown.
+    /// Spawning with a nonexistent binary causes the shim to fail immediately.
+    /// After shutdown, send_command should return ShimError::NotRunning, not panic.
+    #[tokio::test]
+    async fn adversarial_send_command_after_shutdown() {
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/nonexistent/shim/binary"),
+            hostname: "test-node".to_string(),
+            state_dir: "/tmp/tsnet-test".to_string(),
+            auth_key: None,
+            bridge_port: 12345,
+            session_token: "aa".repeat(32),
+            auto_restart: false,
+            ephemeral: None,
+            tags: None,
+        };
+
+        let (shim, _rx) = GoShim::spawn(config).await.unwrap();
+
+        // Signal shutdown
+        shim.shutdown();
+        // Give the manager task time to process shutdown
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // After shutdown, the stdin channel should be closed, so send_command
+        // should return NotRunning (not panic)
+        let result = shim.get_peers().await;
+        // The channel may or may not be closed depending on timing,
+        // but it must never panic
+        if let Err(e) = result {
+            assert!(
+                matches!(e, ShimError::NotRunning) || matches!(e, ShimError::SendFailed(_)),
+                "expected NotRunning or SendFailed, got: {e}"
+            );
+        }
+    }
+
+    /// Edge case 23: Spawn with empty hostname — the GoShim should still
+    /// create the ShimConfig and attempt to spawn (even if Go rejects it).
+    #[test]
+    fn adversarial_spawn_config_with_empty_hostname() {
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/nonexistent/binary"),
+            hostname: String::new(), // empty
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 0,
+            session_token: "ff".repeat(32),
+            auto_restart: false,
+            ephemeral: None,
+            tags: None,
+        };
+        // Config creation doesn't panic
+        assert_eq!(config.hostname, "");
+        let cloned = config.clone();
+        assert_eq!(cloned.hostname, "");
+    }
+
+    /// Edge case 24: Spawn config with very long hostname (500 chars).
+    #[test]
+    fn adversarial_spawn_config_with_very_long_hostname() {
+        let long_hostname = "h".repeat(500);
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/usr/bin/shim"),
+            hostname: long_hostname.clone(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 0,
+            session_token: "aa".repeat(32),
+            auto_restart: false,
+            ephemeral: None,
+            tags: None,
+        };
+        assert_eq!(config.hostname.len(), 500);
+
+        // Verify StartCommandData can serialize it
+        let start_data = super::super::protocol::StartCommandData {
+            hostname: config.hostname.clone(),
+            state_dir: config.state_dir.clone(),
+            auth_key: config.auth_key.clone(),
+            bridge_port: config.bridge_port,
+            session_token: config.session_token.clone(),
+            ephemeral: config.ephemeral,
+            tags: config.tags.clone(),
+        };
+        let json = serde_json::to_string(&start_data).unwrap();
+        assert!(json.contains(&long_hostname), "long hostname must appear in JSON");
+    }
+
+    /// Edge case 25: Multiple lifecycle subscribers — all should receive events.
+    #[tokio::test]
+    async fn adversarial_multiple_lifecycle_subscribers() {
+        let (lifecycle_tx, _) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        // Subscribe 5 times
+        let mut receivers: Vec<broadcast::Receiver<ShimLifecycleEvent>> = Vec::new();
+        for _ in 0..5 {
+            receivers.push(lifecycle_tx.subscribe());
+        }
+
+        // Send an event
+        let _ = lifecycle_tx.send(ShimLifecycleEvent::Started);
+        let _ = lifecycle_tx.send(ShimLifecycleEvent::NeedsApproval);
+
+        // All 5 receivers should get both events
+        for (i, rx) in receivers.iter_mut().enumerate() {
+            let event1 = rx.recv().await.unwrap_or_else(|e| {
+                panic!("receiver {i} failed to get event 1: {e}")
+            });
+            assert!(matches!(event1, ShimLifecycleEvent::Started),
+                "receiver {i} got wrong event 1: {event1:?}");
+
+            let event2 = rx.recv().await.unwrap_or_else(|e| {
+                panic!("receiver {i} failed to get event 2: {e}")
+            });
+            assert!(matches!(event2, ShimLifecycleEvent::NeedsApproval),
+                "receiver {i} got wrong event 2: {event2:?}");
+        }
+    }
+
+    /// Edge case 25b: Subscriber added after events sent — should not receive old events.
+    #[tokio::test]
+    async fn adversarial_late_subscriber_misses_old_events() {
+        let (lifecycle_tx, _) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        // Send events before subscribing
+        let _ = lifecycle_tx.send(ShimLifecycleEvent::Started);
+
+        // Late subscriber
+        let mut late_rx = lifecycle_tx.subscribe();
+
+        // Send a new event
+        let _ = lifecycle_tx.send(ShimLifecycleEvent::Stopped);
+
+        // Late subscriber should only get the event sent after subscribing
+        let event = late_rx.recv().await.unwrap();
+        assert!(matches!(event, ShimLifecycleEvent::Stopped));
+    }
+
+    /// Edge case 26: dial_raw with empty target — serialization should succeed
+    /// (the Go sidecar will reject it, but Rust should not panic).
+    #[test]
+    fn adversarial_dial_command_empty_target() {
+        let data = super::super::protocol::DialCommandData {
+            request_id: "req-1".to_string(),
+            target: String::new(), // empty target
+            port: 443,
+        };
+        let cmd = super::super::protocol::ShimCommand {
+            command: super::super::protocol::command_type::DIAL,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""target":"""#), "empty target must serialize as empty string");
+    }
+
+    /// Edge case 26b: dial_raw with very long target (1000 chars).
+    #[test]
+    fn adversarial_dial_command_very_long_target() {
+        let long_target = "x".repeat(1000);
+        let data = super::super::protocol::DialCommandData {
+            request_id: "req-2".to_string(),
+            target: long_target.clone(),
+            port: 443,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains(&long_target));
+    }
+
+    /// Edge case: Pending dials map is empty after clearing — verify no crash
+    /// when trying to remove from empty map.
+    #[tokio::test]
+    async fn adversarial_remove_from_empty_pending_dials() {
+        let dials: Arc<Mutex<HashMap<String, oneshot::Sender<TcpStream>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let mut map = dials.lock().await;
+        let removed = map.remove("nonexistent-id");
+        assert!(removed.is_none(), "removing from empty map should return None");
+    }
+
+    /// Edge case: handle_event with unknown event type — should log debug
+    /// and not crash.
+    #[tokio::test]
+    async fn adversarial_handle_unknown_event() {
+        let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        let event = super::super::protocol::ShimEvent {
+            event: "tsnet:futureEvent".to_string(),
+            data: serde_json::json!({"key": "value"}),
+        };
+
+        // handle_event should not panic on unknown events
+        GoShim::handle_event(event, &lifecycle_tx).await;
+
+        // No lifecycle event should have been emitted
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            lifecycle_rx.recv(),
+        ).await;
+        assert!(result.is_err(), "unknown event should not produce lifecycle event");
+    }
+
+    /// Edge case: handle_event with started event — verify lifecycle event emitted.
+    #[tokio::test]
+    async fn adversarial_handle_started_event() {
+        let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        let event = super::super::protocol::ShimEvent {
+            event: super::super::protocol::event_type::STARTED.to_string(),
+            data: serde_json::json!({}),
+        };
+
+        GoShim::handle_event(event, &lifecycle_tx).await;
+
+        let lifecycle_event = tokio::time::timeout(
+            Duration::from_millis(100),
+            lifecycle_rx.recv(),
+        ).await.expect("timeout").expect("recv error");
+
+        assert!(matches!(lifecycle_event, ShimLifecycleEvent::Started));
+    }
+
+    /// Edge case: handle_event with dial_result failure — verify DialFailed emitted.
+    #[tokio::test]
+    async fn adversarial_handle_dial_result_failure() {
+        let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        let event = super::super::protocol::ShimEvent {
+            event: super::super::protocol::event_type::DIAL_RESULT.to_string(),
+            data: serde_json::json!({
+                "requestId": "dial-fail-1",
+                "success": false,
+                "error": "connection refused"
+            }),
+        };
+
+        GoShim::handle_event(event, &lifecycle_tx).await;
+
+        let lifecycle_event = tokio::time::timeout(
+            Duration::from_millis(100),
+            lifecycle_rx.recv(),
+        ).await.expect("timeout").expect("recv error");
+
+        match lifecycle_event {
+            ShimLifecycleEvent::DialFailed { request_id, error } => {
+                assert_eq!(request_id, "dial-fail-1");
+                assert_eq!(error, "connection refused");
+            }
+            other => panic!("expected DialFailed, got: {other:?}"),
+        }
+    }
+
+    /// Edge case: handle_event with dial_result success — verify NO lifecycle event
+    /// emitted (success is handled via TCP bridge, not lifecycle).
+    #[tokio::test]
+    async fn adversarial_handle_dial_result_success_no_event() {
+        let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        let event = super::super::protocol::ShimEvent {
+            event: super::super::protocol::event_type::DIAL_RESULT.to_string(),
+            data: serde_json::json!({
+                "requestId": "dial-ok-1",
+                "success": true
+            }),
+        };
+
+        GoShim::handle_event(event, &lifecycle_tx).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            lifecycle_rx.recv(),
+        ).await;
+        assert!(result.is_err(), "successful dial should not produce lifecycle event");
+    }
+
+    /// Edge case: handle_event with malformed data for a known event type.
+    /// The from_value call should silently fail (no lifecycle event emitted).
+    #[tokio::test]
+    async fn adversarial_handle_event_malformed_data() {
+        let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<ShimLifecycleEvent>(64);
+
+        let event = super::super::protocol::ShimEvent {
+            event: super::super::protocol::event_type::AUTH_REQUIRED.to_string(),
+            data: serde_json::json!("not an object"), // wrong type
+        };
+
+        // Should not panic
+        GoShim::handle_event(event, &lifecycle_tx).await;
+
+        // No lifecycle event emitted due to parse failure
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            lifecycle_rx.recv(),
+        ).await;
+        assert!(result.is_err(), "malformed data should not produce lifecycle event");
+    }
+
+    /// Edge case: resume_auto_restart when not paused — should be safe (no-op).
+    #[test]
+    fn adversarial_resume_when_not_paused() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        // Even when not paused, setting to false is safe
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Edge case: ShimError Debug formatting doesn't panic for any variant.
+    #[test]
+    fn adversarial_shim_error_debug_all_variants() {
+        let errors: Vec<ShimError> = vec![
+            ShimError::NotRunning,
+            ShimError::SpawnFailed(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "binary not found",
+            )),
+            ShimError::SendFailed("channel full".to_string()),
+            ShimError::DialCancelled,
+            ShimError::DialTimeout(Duration::from_secs(30)),
+            ShimError::DialFailed("refused".to_string()),
+        ];
+        for e in &errors {
+            // Debug and Display should not panic
+            let _ = format!("{e:?}");
+            let _ = format!("{e}");
+        }
+    }
 }

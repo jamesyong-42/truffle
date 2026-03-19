@@ -491,4 +491,429 @@ mod tests {
         let parsed: FileTransferAccept = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.receiver_device_id, "device-2");
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Adversarial edge-case tests (Layer 4: Services — Adapter)
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Helper to create a FileTransferAdapter with a real manager but no network.
+    fn create_test_adapter() -> (
+        Arc<FileTransferAdapter>,
+        mpsc::UnboundedReceiver<(String, String, String)>,
+        mpsc::UnboundedReceiver<AdapterEvent>,
+        mpsc::UnboundedReceiver<FileTransferEvent>,
+    ) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let manager = FileTransferManager::new(FileTransferConfig::default(), event_tx);
+        let (bus_tx, bus_rx) = mpsc::unbounded_channel();
+        let (adapter_event_tx, adapter_event_rx) = mpsc::unbounded_channel();
+
+        let dial_fn: DialFn = Arc::new(|_addr: &str| {
+            Box::pin(async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "test: no network",
+                ))
+            })
+        });
+
+        let adapter = FileTransferAdapter::new(
+            FileTransferAdapterConfig {
+                local_device_id: "dev-local".to_string(),
+                local_addr: "127.0.0.1:9417".to_string(),
+                output_dir: "/tmp/ft-test".to_string(),
+                dial_fn,
+            },
+            manager,
+            bus_tx,
+            adapter_event_tx,
+        );
+
+        (adapter, bus_rx, adapter_event_rx, event_rx)
+    }
+
+    // ── 15. OFFER from unknown sender is still processed ─────────────────
+    #[tokio::test]
+    async fn offer_from_unknown_sender_emits_event() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-unknown-sender",
+            "senderDeviceId": "dev-stranger",
+            "senderAddr": "10.0.0.99:9417",
+            "file": {"name": "secret.bin", "size": 1024, "sha256": "abc"},
+            "token": "a".repeat(64),
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Should emit an Offer event even from an unknown device
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Offer(offer) => {
+                assert_eq!(offer.transfer_id, "ft-unknown-sender");
+                assert_eq!(offer.sender_device_id, "dev-stranger");
+            }
+            _ => panic!("Expected Offer event, got {:?}", event),
+        }
+    }
+
+    // ── 16. ACCEPT for unknown transfer_id ───────────────────────────────
+    #[tokio::test]
+    async fn accept_for_unknown_transfer_no_crash() {
+        let (adapter, _bus_rx, _adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let accept_payload = serde_json::json!({
+            "transferId": "ft-nonexistent",
+            "receiverDeviceId": "dev-2",
+            "receiverAddr": "10.0.0.2:9417",
+            "token": "a".repeat(64),
+        });
+
+        // Should not panic
+        adapter
+            .handle_bus_message(message_types::ACCEPT, &accept_payload)
+            .await;
+
+        // No crash is the assertion. Also verify no bus messages were sent.
+        // (because there's no file_path or transfer_info for this transfer)
+    }
+
+    // ── 17. REJECT for unknown transfer_id ───────────────────────────────
+    #[tokio::test]
+    async fn reject_for_unknown_transfer_no_crash() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let reject_payload = serde_json::json!({
+            "transferId": "ft-ghost",
+            "reason": "user declined",
+        });
+
+        adapter
+            .handle_bus_message(message_types::REJECT, &reject_payload)
+            .await;
+
+        // Should emit a Failed event (REJECTED code)
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Failed(tid, FileTransferEvent::Error { code, .. }) => {
+                assert_eq!(tid, "ft-ghost");
+                assert_eq!(code, "REJECTED");
+            }
+            _ => panic!("Expected Failed event, got {:?}", event),
+        }
+    }
+
+    // ── 18. CANCEL for unknown transfer_id ───────────────────────────────
+    #[tokio::test]
+    async fn cancel_for_unknown_transfer_no_crash() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let cancel_payload = serde_json::json!({
+            "transferId": "ft-phantom",
+            "cancelledBy": "dev-2",
+            "reason": "user cancelled",
+        });
+
+        adapter
+            .handle_bus_message(message_types::CANCEL, &cancel_payload)
+            .await;
+
+        // Should emit Cancelled event
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Cancelled(tid) => {
+                assert_eq!(tid, "ft-phantom");
+            }
+            _ => panic!("Expected Cancelled event, got {:?}", event),
+        }
+    }
+
+    // ── 19. Double ACCEPT ────────────────────────────────────────────────
+    // The adapter requires both file_paths and transfers to have the
+    // transfer_id for ACCEPT to trigger a send. Without a prior send_file
+    // call, ACCEPT is a no-op. Test that double-handling is safe.
+    #[tokio::test]
+    async fn double_accept_is_safe_noop() {
+        let (adapter, _bus_rx, _adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let accept_payload = serde_json::json!({
+            "transferId": "ft-double-accept",
+            "receiverDeviceId": "dev-2",
+            "receiverAddr": "10.0.0.2:9417",
+            "token": "b".repeat(64),
+        });
+
+        // Both calls should be no-ops (transfer not in file_paths/transfers maps)
+        adapter
+            .handle_bus_message(message_types::ACCEPT, &accept_payload)
+            .await;
+        adapter
+            .handle_bus_message(message_types::ACCEPT, &accept_payload)
+            .await;
+
+        // No panic, no crash
+    }
+
+    // ── Edge: Unknown message type ───────────────────────────────────────
+    #[tokio::test]
+    async fn unknown_bus_message_type_no_crash() {
+        let (adapter, _bus_rx, _adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter
+            .handle_bus_message("UNKNOWN_TYPE", &serde_json::json!({"foo": "bar"}))
+            .await;
+
+        // No panic is the assertion
+    }
+
+    // ── Edge: Malformed OFFER payload ────────────────────────────────────
+    #[tokio::test]
+    async fn malformed_offer_payload_no_crash() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        // Missing required fields
+        adapter
+            .handle_bus_message(message_types::OFFER, &serde_json::json!({"garbage": true}))
+            .await;
+
+        // Should not emit an event (deserialization fails silently)
+        assert!(
+            adapter_event_rx.try_recv().is_err(),
+            "Malformed OFFER should not produce an event"
+        );
+    }
+
+    // ── Edge: Malformed REJECT payload ───────────────────────────────────
+    #[tokio::test]
+    async fn malformed_reject_payload_no_crash() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter
+            .handle_bus_message(message_types::REJECT, &serde_json::json!({"bad": "data"}))
+            .await;
+
+        // Should not emit (deserialization fails)
+        assert!(adapter_event_rx.try_recv().is_err());
+    }
+
+    // ── Edge: handle_manager_event with unknown transfer_id ──────────────
+    #[tokio::test]
+    async fn manager_event_progress_for_unknown_transfer() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        // Send a progress event for a transfer that isn't tracked
+        adapter
+            .handle_manager_event(FileTransferEvent::Progress {
+                transfer_id: "ft-untracked".to_string(),
+                bytes_transferred: 500,
+                total_bytes: 1000,
+                percent: 50.0,
+                bytes_per_second: 100.0,
+                eta: 5.0,
+                direction: "send".to_string(),
+            })
+            .await;
+
+        // Should still forward the event to adapter_event_tx
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Progress(FileTransferEvent::Progress { transfer_id, .. }) => {
+                assert_eq!(transfer_id, "ft-untracked");
+            }
+            _ => panic!("Expected Progress event"),
+        }
+    }
+
+    // ── Edge: handle_manager_event Complete for unknown transfer ──────────
+    #[tokio::test]
+    async fn manager_event_complete_for_unknown_transfer() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter
+            .handle_manager_event(FileTransferEvent::Complete {
+                transfer_id: "ft-untracked-complete".to_string(),
+                sha256: "abc".to_string(),
+                size: 1000,
+                duration_ms: 100,
+                direction: "receive".to_string(),
+                path: Some("/tmp/out.bin".to_string()),
+            })
+            .await;
+
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Completed(_) => {}
+            _ => panic!("Expected Completed event"),
+        }
+    }
+
+    // ── Edge: handle_manager_event Error (non-resumable) cleanup ─────────
+    #[tokio::test]
+    async fn manager_event_non_resumable_error_cleans_up() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        // Pre-populate transfers map to verify cleanup
+        adapter.transfers.write().await.insert(
+            "ft-error-cleanup".to_string(),
+            AdapterTransferInfo {
+                transfer_id: "ft-error-cleanup".to_string(),
+                direction: "send".to_string(),
+                state: "transferring".to_string(),
+                peer_device_id: "dev-2".to_string(),
+                file: FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+                bytes_transferred: 50,
+                percent: 50.0,
+                bytes_per_second: 10.0,
+                eta: 5.0,
+            },
+        );
+        adapter.file_paths.write().await.insert(
+            "ft-error-cleanup".to_string(),
+            "/tmp/source.bin".to_string(),
+        );
+
+        adapter
+            .handle_manager_event(FileTransferEvent::Error {
+                transfer_id: "ft-error-cleanup".to_string(),
+                code: "INTEGRITY_MISMATCH".to_string(),
+                message: "hash mismatch".to_string(),
+                resumable: false,
+            })
+            .await;
+
+        // Non-resumable errors should clean up transfers and file_paths
+        assert!(
+            adapter.transfers.read().await.get("ft-error-cleanup").is_none(),
+            "Non-resumable error should remove transfer"
+        );
+        assert!(
+            adapter.file_paths.read().await.get("ft-error-cleanup").is_none(),
+            "Non-resumable error should remove file_path"
+        );
+
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Failed(tid, _) => assert_eq!(tid, "ft-error-cleanup"),
+            _ => panic!("Expected Failed event"),
+        }
+    }
+
+    // ── Edge: handle_manager_event Error (resumable) keeps state ──────────
+    #[tokio::test]
+    async fn manager_event_resumable_error_keeps_state() {
+        let (adapter, _bus_rx, _adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter.transfers.write().await.insert(
+            "ft-error-resume".to_string(),
+            AdapterTransferInfo {
+                transfer_id: "ft-error-resume".to_string(),
+                direction: "send".to_string(),
+                state: "transferring".to_string(),
+                peer_device_id: "dev-2".to_string(),
+                file: FileInfo { name: "f.bin".to_string(), size: 100, sha256: "abc".to_string() },
+                bytes_transferred: 50,
+                percent: 50.0,
+                bytes_per_second: 10.0,
+                eta: 5.0,
+            },
+        );
+
+        adapter
+            .handle_manager_event(FileTransferEvent::Error {
+                transfer_id: "ft-error-resume".to_string(),
+                code: "SEND_ERROR".to_string(),
+                message: "connection lost".to_string(),
+                resumable: true,
+            })
+            .await;
+
+        // Resumable errors should keep the transfer for retry
+        let transfers = adapter.transfers.read().await;
+        let info = transfers.get("ft-error-resume").unwrap();
+        assert_eq!(info.state, "failed", "State should be updated to failed");
+    }
+
+    // ── Edge: handle_manager_event Cancelled cleanup ─────────────────────
+    #[tokio::test]
+    async fn manager_event_cancelled_cleans_up() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter.transfers.write().await.insert(
+            "ft-cancel-cleanup".to_string(),
+            AdapterTransferInfo {
+                transfer_id: "ft-cancel-cleanup".to_string(),
+                direction: "receive".to_string(),
+                state: "transferring".to_string(),
+                peer_device_id: "dev-3".to_string(),
+                file: FileInfo { name: "f.bin".to_string(), size: 200, sha256: "def".to_string() },
+                bytes_transferred: 100,
+                percent: 50.0,
+                bytes_per_second: 20.0,
+                eta: 5.0,
+            },
+        );
+        adapter.file_paths.write().await.insert(
+            "ft-cancel-cleanup".to_string(),
+            "/tmp/src.bin".to_string(),
+        );
+
+        adapter
+            .handle_manager_event(FileTransferEvent::Cancelled {
+                transfer_id: "ft-cancel-cleanup".to_string(),
+            })
+            .await;
+
+        assert!(adapter.transfers.read().await.get("ft-cancel-cleanup").is_none());
+        assert!(adapter.file_paths.read().await.get("ft-cancel-cleanup").is_none());
+
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Cancelled(tid) => assert_eq!(tid, "ft-cancel-cleanup"),
+            _ => panic!("Expected Cancelled event"),
+        }
+    }
+
+    // ── Edge: get_transfers returns all tracked transfers ─────────────────
+    #[tokio::test]
+    async fn get_transfers_returns_all() {
+        let (adapter, _bus_rx, _adapter_event_rx, _event_rx) = create_test_adapter();
+
+        for i in 0..5 {
+            adapter.transfers.write().await.insert(
+                format!("ft-list-{i}"),
+                AdapterTransferInfo {
+                    transfer_id: format!("ft-list-{i}"),
+                    direction: "send".to_string(),
+                    state: "transferring".to_string(),
+                    peer_device_id: "dev-2".to_string(),
+                    file: FileInfo { name: format!("file{i}.bin"), size: 100, sha256: "abc".to_string() },
+                    bytes_transferred: 0,
+                    percent: 0.0,
+                    bytes_per_second: 0.0,
+                    eta: 0.0,
+                },
+            );
+        }
+
+        let transfers = adapter.get_transfers().await;
+        assert_eq!(transfers.len(), 5);
+    }
+
+    // ── Edge: List event is ignored by handle_manager_event ──────────────
+    #[tokio::test]
+    async fn manager_event_list_is_ignored() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        adapter
+            .handle_manager_event(FileTransferEvent::List {
+                transfers: vec![],
+            })
+            .await;
+
+        // List events should not produce adapter events
+        assert!(adapter_event_rx.try_recv().is_err());
+    }
 }

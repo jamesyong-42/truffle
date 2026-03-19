@@ -1048,4 +1048,140 @@ mod tests {
         let handler = ReverseProxyHandler::new("api/", target);
         assert_eq!(handler.prefix, "/api");
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Adversarial edge cases
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// ProxyTarget with scheme "https". Verify it builds correctly.
+    #[test]
+    fn test_proxy_target_https_scheme() {
+        let target = ProxyTarget::https("127.0.0.1:8443");
+        assert_eq!(target.scheme, "https");
+        assert_eq!(target.addr, "127.0.0.1:8443");
+        assert!(target.strip_prefix);
+    }
+
+    /// ProxyTarget with extra headers. Verify they're stored correctly.
+    #[test]
+    fn test_proxy_target_extra_headers() {
+        let target = ProxyTarget::http("127.0.0.1:3000")
+            .with_header("X-Forwarded-For", "10.0.0.1")
+            .with_header("X-Request-Id", "abc123")
+            .with_header("Authorization", "Bearer token");
+
+        assert_eq!(target.headers.len(), 3);
+        assert_eq!(target.headers.get("X-Forwarded-For").unwrap(), "10.0.0.1");
+        assert_eq!(target.headers.get("X-Request-Id").unwrap(), "abc123");
+        assert_eq!(target.headers.get("Authorization").unwrap(), "Bearer token");
+    }
+
+    /// strip_path_prefix with edge cases.
+    #[test]
+    fn test_strip_path_prefix_edge_cases() {
+        // Root prefix: path stays as-is (no stripping for root)
+        assert_eq!(strip_path_prefix("/", "/foo/bar"), "/foo/bar");
+
+        // Empty prefix: returns original
+        assert_eq!(strip_path_prefix("", "/foo/bar"), "/foo/bar");
+
+        // Prefix longer than path: returns original
+        assert_eq!(strip_path_prefix("/api/v2/long", "/api"), "/api");
+
+        // Prefix with trailing content that's not a path boundary
+        assert_eq!(strip_path_prefix("/api", "/api2/data"), "/api2/data");
+
+        // Deeply nested exact match
+        assert_eq!(strip_path_prefix("/a/b/c/d", "/a/b/c/d"), "/");
+
+        // Deeply nested with sub-path
+        assert_eq!(strip_path_prefix("/a/b/c", "/a/b/c/d/e"), "/d/e");
+    }
+
+    /// is_websocket_upgrade with partial headers.
+    #[test]
+    fn test_websocket_detection_partial_headers() {
+        // Connection: upgrade but no Upgrade header
+        let req = Request::builder()
+            .header("connection", "upgrade")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+
+        // Upgrade: websocket but no Connection header
+        let req = Request::builder()
+            .header("upgrade", "websocket")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+
+        // Connection: keep-alive (not upgrade) with Upgrade: websocket
+        let req = Request::builder()
+            .header("connection", "keep-alive")
+            .header("upgrade", "websocket")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+
+        // Upgrade: h2c (not websocket) with Connection: upgrade
+        let req = Request::builder()
+            .header("connection", "upgrade")
+            .header("upgrade", "h2c")
+            .body(())
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+    }
+
+    /// Multiple headers with Connection containing multiple values.
+    #[test]
+    fn test_websocket_detection_multi_value_connection() {
+        // Connection header can contain multiple values: "keep-alive, upgrade"
+        let req = Request::builder()
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(())
+            .unwrap();
+        assert!(is_websocket_upgrade(&req));
+    }
+
+    /// ProxyManager: config_for_port returns None for empty manager.
+    #[tokio::test]
+    async fn test_config_for_port_empty_manager() {
+        let (tx, _rx) = mpsc::channel(16);
+        let manager = ProxyManager::new(tx);
+        assert!(manager.config_for_port(443).await.is_none());
+        assert!(manager.config_for_port(0).await.is_none());
+        assert!(manager.config_for_port(65535).await.is_none());
+    }
+
+    /// ProxyManager: close_all on empty manager doesn't panic.
+    #[tokio::test]
+    async fn test_close_all_empty_manager() {
+        let (tx, _rx) = mpsc::channel(16);
+        let manager = ProxyManager::new(tx);
+        manager.close_all().await; // Should not panic
+        assert!(manager.list().await.is_empty());
+    }
+
+    /// ProxyManager: add and remove same proxy multiple times.
+    #[tokio::test]
+    async fn test_add_remove_cycle() {
+        let (tx, _rx) = mpsc::channel(64);
+        let manager = ProxyManager::new(tx);
+
+        for i in 0..5 {
+            manager.add(ProxyConfig {
+                id: "recycled".to_string(),
+                name: format!("Attempt {i}"),
+                port: 8443,
+                target_port: 5173,
+                target_scheme: "http".to_string(),
+            }).await.unwrap();
+
+            assert_eq!(manager.list().await.len(), 1);
+
+            manager.remove("recycled").await.unwrap();
+            assert!(manager.list().await.is_empty());
+        }
+    }
 }

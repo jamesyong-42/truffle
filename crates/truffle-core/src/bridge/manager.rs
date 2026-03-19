@@ -1024,4 +1024,430 @@ mod tests {
 
         manager_handle.abort();
     }
+
+    // ── Adversarial edge case tests ─────────────────────────────────────
+
+    /// Edge case 9: Connection with wrong session token — verify rejected
+    /// and handler never receives it.
+    #[tokio::test]
+    async fn adversarial_wrong_token_rejected() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(
+            443,
+            Direction::Incoming,
+            Arc::new(ChannelHandler::new(tx)),
+        );
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Try three different wrong tokens
+        for bad_token in [[0xFFu8; 32], [0x00u8; 32], [0x01u8; 32]] {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+            let header = BridgeHeader {
+                session_token: bad_token,
+                direction: Direction::Incoming,
+                service_port: 443,
+                request_id: String::new(),
+                remote_addr: "1.2.3.4:80".to_string(),
+                remote_dns_name: String::new(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        // None should have been delivered
+        let result = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(result.is_err(), "all wrong-token connections should be rejected");
+
+        // Manager still alive
+        assert!(!manager_handle.is_finished());
+        manager_handle.abort();
+    }
+
+    /// Edge case 10: Partial header write — only first 10 bytes, then close.
+    /// Verify no hang, no crash. Manager should timeout the header read.
+    #[tokio::test]
+    async fn adversarial_partial_header_then_close() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Send only the first 10 bytes of a valid header, then close
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // magic(4) + version(1) + 5 bytes of token = 10 bytes
+        let mut partial = Vec::new();
+        partial.extend_from_slice(&crate::bridge::header::MAGIC.to_be_bytes());
+        partial.push(crate::bridge::header::VERSION);
+        partial.extend_from_slice(&[0xAA; 5]);
+        stream.write_all(&partial).await.unwrap();
+        drop(stream); // close the connection immediately
+
+        // Wait for the header timeout (2s) + margin
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        // Manager should still be alive
+        assert!(!manager_handle.is_finished(), "manager must not hang on partial header");
+        manager_handle.abort();
+    }
+
+    /// Edge case 11: Valid header but connection drops immediately after.
+    /// Verify handler gets a stream that errors on read.
+    #[tokio::test]
+    async fn adversarial_valid_header_then_immediate_drop() {
+        use tokio::io::AsyncReadExt;
+
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(
+            443,
+            Direction::Incoming,
+            Arc::new(ChannelHandler::new(tx)),
+        );
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Write a complete valid header, then immediately close TCP
+        {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Incoming,
+                service_port: 443,
+                request_id: String::new(),
+                remote_addr: "100.64.0.2:443".to_string(),
+                remote_dns_name: "peer.ts.net".to_string(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+            // stream drops here — TCP connection closed
+        }
+
+        // Handler should still receive the connection
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert_eq!(conn.header.service_port, 443);
+
+        // Reading from the stream should get 0 bytes (EOF) or an error
+        let mut buf = [0u8; 64];
+        let mut stream = conn.stream;
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        assert_eq!(n, 0, "reading from dropped connection should yield EOF");
+
+        manager_handle.abort();
+    }
+
+    /// Edge case 12: Two connections arrive with the same request_id.
+    /// First should be delivered, second should be handled gracefully (logged + dropped).
+    #[tokio::test]
+    async fn adversarial_duplicate_request_id() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+        let pending_dials = manager.pending_dials().clone();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Register a single pending dial for "dup-abc"
+        let (tx, rx) = oneshot::channel::<BridgeConnection>();
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.insert("dup-abc".to_string(), tx);
+        }
+
+        // Send first connection with request_id "dup-abc"
+        let mut stream1 = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let header1 = BridgeHeader {
+            session_token: token,
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: "dup-abc".to_string(),
+            remote_addr: "100.64.0.2:443".to_string(),
+            remote_dns_name: "first.ts.net".to_string(),
+        };
+        header1.write_to(&mut stream1).await.unwrap();
+
+        // Wait for the first to be consumed
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("timeout")
+            .expect("channel error");
+        assert_eq!(conn.header.remote_dns_name, "first.ts.net");
+
+        // Send second connection with the same request_id
+        let mut stream2 = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let header2 = BridgeHeader {
+            session_token: token,
+            direction: Direction::Outgoing,
+            service_port: 443,
+            request_id: "dup-abc".to_string(),
+            remote_addr: "100.64.0.3:443".to_string(),
+            remote_dns_name: "second.ts.net".to_string(),
+        };
+        header2.write_to(&mut stream2).await.unwrap();
+
+        // Give manager time to process the second one
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Manager should still be alive (second was dropped, not crashed)
+        assert!(!manager_handle.is_finished(),
+            "manager must handle duplicate request_id gracefully");
+
+        // Pending dials should be empty (both consumed/dropped)
+        let dials = pending_dials.lock().await;
+        assert!(!dials.contains_key("dup-abc"));
+
+        manager_handle.abort();
+    }
+
+    /// Edge case 13: Pending dial timeout — register a pending dial, never fulfill it.
+    /// Verify the receiver gets a RecvError when the sender is dropped.
+    #[tokio::test]
+    async fn adversarial_pending_dial_never_fulfilled() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let pending_dials = manager.pending_dials().clone();
+
+        // Register a pending dial
+        let (tx, rx) = oneshot::channel::<BridgeConnection>();
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.insert("orphan-dial".to_string(), tx);
+        }
+
+        // Simulate cleanup: drop the sender by removing from the map
+        {
+            let mut dials = pending_dials.lock().await;
+            dials.remove("orphan-dial");
+        }
+
+        // The receiver should get an error (sender dropped)
+        let result = rx.await;
+        assert!(result.is_err(), "unfulfilled dial receiver should get RecvError");
+    }
+
+    /// Edge case 14: Handler that panics — verify BridgeManager continues
+    /// serving other connections.
+    #[tokio::test]
+    async fn adversarial_handler_panics_manager_survives() {
+        use std::future::Future;
+        use std::pin::Pin;
+
+        struct PanickingHandler;
+        impl BridgeHandler for PanickingHandler {
+            fn handle(&self, _conn: BridgeConnection) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    panic!("handler deliberately panicked");
+                })
+            }
+        }
+
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        // Register panicking handler for port 80
+        manager.add_handler(80, Direction::Incoming, Arc::new(PanickingHandler));
+
+        // Register a normal handler for port 443
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(1);
+        manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(tx)));
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // First: send a connection that triggers the panic (port 80)
+        {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Incoming,
+                service_port: 80,
+                request_id: String::new(),
+                remote_addr: "1.2.3.4:80".to_string(),
+                remote_dns_name: String::new(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        // Give the panic time to propagate (it's in a spawned task, so it won't kill the manager)
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Manager should still be alive
+        assert!(!manager_handle.is_finished(),
+            "manager must survive handler panic");
+
+        // Second: send a normal connection (port 443) — should still be served
+        {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
+            let header = BridgeHeader {
+                session_token: token,
+                direction: Direction::Incoming,
+                service_port: 443,
+                request_id: String::new(),
+                remote_addr: "5.6.7.8:443".to_string(),
+                remote_dns_name: "after-panic.ts.net".to_string(),
+            };
+            header.write_to(&mut stream).await.unwrap();
+        }
+
+        let conn = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout — manager stopped serving after handler panic")
+            .expect("channel closed");
+        assert_eq!(conn.header.remote_dns_name, "after-panic.ts.net");
+
+        manager_handle.abort();
+    }
+
+    /// Edge case 15: Concurrent connections storm — 50 connections simultaneously.
+    /// Verify all are handled without deadlock.
+    #[tokio::test]
+    async fn adversarial_concurrent_connections_storm() {
+        let token = test_token();
+        let mut manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let (tx, mut rx) = mpsc::channel::<BridgeConnection>(50);
+        manager.add_handler(443, Direction::Incoming, Arc::new(ChannelHandler::new(tx)));
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let count = 50;
+        let mut handles = Vec::new();
+        for i in 0..count {
+            let token = token;
+            handles.push(tokio::spawn(async move {
+                let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+                    .await
+                    .unwrap();
+                let header = BridgeHeader {
+                    session_token: token,
+                    direction: Direction::Incoming,
+                    service_port: 443,
+                    request_id: String::new(),
+                    remote_addr: format!("100.64.0.{}:{}", i % 256, 10000 + i),
+                    remote_dns_name: format!("storm-peer-{i}.ts.net"),
+                };
+                header.write_to(&mut stream).await.unwrap();
+                // Keep stream alive so the manager doesn't get broken pipe
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }));
+        }
+
+        // Collect all routed connections with generous timeout
+        let mut received = Vec::new();
+        for _ in 0..count {
+            let conn = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("timeout — possible deadlock in concurrent storm")
+                .expect("channel closed");
+            received.push(conn);
+        }
+
+        assert_eq!(received.len(), count, "all {count} connections must be routed");
+
+        for conn in &received {
+            assert_eq!(conn.header.service_port, 443);
+            assert!(conn.header.remote_dns_name.starts_with("storm-peer-"));
+        }
+
+        for h in handles {
+            h.abort();
+        }
+        manager_handle.abort();
+    }
+
+    /// Edge case: Connection sends valid magic + version but completely random
+    /// bytes for the rest. Verify no crash.
+    #[tokio::test]
+    async fn adversarial_random_payload_after_magic_version() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // Valid magic + version, then garbage
+        let mut garbage = Vec::new();
+        garbage.extend_from_slice(&crate::bridge::header::MAGIC.to_be_bytes());
+        garbage.push(crate::bridge::header::VERSION);
+        // 100 bytes of pseudo-random garbage (not valid token + direction + port + lengths)
+        for i in 0u8..100 {
+            garbage.push(i.wrapping_mul(137));
+        }
+        stream.write_all(&garbage).await.unwrap();
+        drop(stream);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(!manager_handle.is_finished(),
+            "manager must survive random payload after valid magic");
+        manager_handle.abort();
+    }
+
+    /// Edge case: Multiple rapid partial-then-close connections in succession.
+    /// Verify manager doesn't leak resources or hang.
+    #[tokio::test]
+    async fn adversarial_rapid_partial_connections() {
+        let token = test_token();
+        let manager = BridgeManager::bind(token).await.unwrap();
+        let port = manager.local_port();
+
+        let manager_handle = tokio::spawn(async move {
+            manager.run(tokio_util::sync::CancellationToken::new()).await
+        });
+
+        // Send 20 rapid connect-then-drop connections
+        for _ in 0..20 {
+            if let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await {
+                drop(stream); // immediately close without sending anything
+            }
+        }
+
+        // Wait for all header timeouts
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+
+        assert!(!manager_handle.is_finished(),
+            "manager must survive rapid partial connections");
+        manager_handle.abort();
+    }
 }
