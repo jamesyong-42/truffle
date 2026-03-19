@@ -40,6 +40,10 @@ pub struct NapiMeshNode {
     hostname_prefix: String,
     device_id: String,
     device_type: String,
+    /// Whether the tsnet node is ephemeral.
+    ephemeral: Option<bool>,
+    /// ACL tags to advertise.
+    tags: Option<Vec<String>>,
     /// GoShim handle, kept alive for the node's lifetime.
     shim: Arc<tokio::sync::Mutex<Option<GoShim>>>,
 }
@@ -99,6 +103,8 @@ impl NapiMeshNode {
             hostname_prefix: config.hostname_prefix,
             device_id: config.device_id,
             device_type: config.device_type,
+            ephemeral: config.ephemeral,
+            tags: config.tags,
             shim: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
@@ -212,6 +218,8 @@ impl NapiMeshNode {
             bridge_port,
             session_token: session_token_hex,
             auto_restart: true,
+            ephemeral: self.ephemeral,
+            tags: self.tags.clone(),
         };
 
         let (shim, mut lifecycle_rx) = GoShim::spawn(shim_config)
@@ -306,6 +314,21 @@ impl NapiMeshNode {
                                     }
                                 });
                             }
+                        }
+                        ShimLifecycleEvent::NeedsApproval => {
+                            tracing::warn!("Node needs admin approval (NeedsMachineAuth)");
+                            inner.emit_event(MeshNodeEvent::Error(
+                                "Node needs admin approval to join tailnet".to_string(),
+                            ));
+                        }
+                        ShimLifecycleEvent::StateChanged { state, .. } => {
+                            tracing::info!("Tailscale state changed: {state}");
+                        }
+                        ShimLifecycleEvent::KeyExpiring { expires_at } => {
+                            tracing::warn!("Tailscale key expiring at {expires_at}");
+                        }
+                        ShimLifecycleEvent::HealthWarning { warnings } => {
+                            tracing::warn!("Tailscale health warnings: {:?}", warnings);
                         }
                         ShimLifecycleEvent::DialFailed { request_id, error } => {
                             tracing::warn!("Dial failed: request_id={request_id}: {error}");

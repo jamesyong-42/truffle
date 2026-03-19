@@ -36,6 +36,10 @@ pub struct NapiMeshNodeConfig {
     pub static_path: Option<String>,
     pub capabilities: Option<Vec<String>>,
     pub timing: Option<NapiMeshTimingConfig>,
+    /// If true, the node is ephemeral (cleaned up when offline).
+    pub ephemeral: Option<bool>,
+    /// ACL tags to advertise (e.g. ["tag:truffle"]).
+    pub tags: Option<Vec<String>>,
 }
 
 /// Timing configuration for the mesh.
@@ -87,6 +91,11 @@ pub struct NapiTailnetPeer {
     pub tailscale_ips: Vec<String>,
     pub online: bool,
     pub os: Option<String>,
+    pub cur_addr: Option<String>,
+    pub relay: Option<String>,
+    pub last_seen: Option<String>,
+    pub key_expiry: Option<String>,
+    pub expired: Option<bool>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -162,6 +171,11 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
             device_id: None,
             payload: serde_json::Value::String(url.clone()),
         },
+        MeshNodeEvent::AuthComplete => NapiMeshEvent {
+            event_type: "authComplete".to_string(),
+            device_id: None,
+            payload: serde_json::Value::Null,
+        },
         MeshNodeEvent::DeviceDiscovered(device) => NapiMeshEvent {
             event_type: "deviceDiscovered".to_string(),
             device_id: Some(device.id.clone()),
@@ -225,6 +239,11 @@ pub fn napi_peer_to_core(p: &NapiTailnetPeer) -> truffle_core::types::TailnetPee
         tailscale_ips: p.tailscale_ips.clone(),
         online: p.online,
         os: p.os.clone(),
+        cur_addr: p.cur_addr.clone(),
+        relay: p.relay.clone(),
+        last_seen: p.last_seen.clone(),
+        key_expiry: p.key_expiry.clone(),
+        expired: p.expired.unwrap_or(false),
     }
 }
 

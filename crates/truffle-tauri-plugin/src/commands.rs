@@ -241,6 +241,11 @@ pub async fn handle_tailnet_peers(
                     tailscale_ips: p.tailscale_ips.clone(),
                     online: p.online,
                     os: p.os.clone(),
+                    cur_addr: None,
+                    relay: None,
+                    last_seen: None,
+                    key_expiry: None,
+                    expired: false,
                 }
             }).collect();
             n.handle_tailnet_peers(&core_peers).await;

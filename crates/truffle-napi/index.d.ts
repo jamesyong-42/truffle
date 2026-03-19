@@ -59,8 +59,10 @@ export declare class NapiFileTransferAdapter {
 /**
  * NapiMeshNode - Node.js wrapper for truffle-core MeshNode.
  *
- * SAFETY: No panics in any method. All errors returned via napi::Result.
- * Event delivery uses ThreadsafeFunction with Blocking mode.
+ * Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
+ * and MeshNode. The sidecar provides Tailscale connectivity; the bridge routes
+ * TCP streams; the connection manager upgrades them to WebSocket; and the mesh
+ * node handles device discovery, election, and messaging.
  */
 export declare class NapiMeshNode {
   /**
@@ -72,11 +74,12 @@ export declare class NapiMeshNode {
   /**
    * Start the mesh node.
    *
-   * If `on_event` was called before `start`, the event loop is spawned here
-   * inside the NAPI Tokio runtime context.
+   * If `sidecarPath` was provided, this spawns the Go sidecar process,
+   * creates a BridgeManager to route connections, and wires everything
+   * together for full Tailscale mesh networking.
    */
   start(): Promise<void>
-  /** Stop the mesh node. */
+  /** Stop the mesh node and sidecar. */
   stop(): Promise<void>
   /** Check if the node is running. */
   isRunning(): Promise<boolean>
@@ -101,6 +104,10 @@ export declare class NapiMeshNode {
   sendEnvelope(deviceId: string, namespace: string, msgType: string, payload: any): Promise<boolean>
   /** Broadcast a mesh envelope to all connected devices. */
   broadcastEnvelope(namespace: string, msgType: string, payload: any): Promise<void>
+  /** Get the current auth status ("unknown", "required", "authenticated"). */
+  authStatus(): Promise<string>
+  /** Get the current auth URL, if auth is required. */
+  authUrl(): Promise<string | null>
   /** Get the message bus for namespace-based pub/sub. */
   messageBus(): NapiMessageBus
   /** Handle tailnet peers update from the sidecar. */
@@ -116,6 +123,7 @@ export declare class NapiMeshNode {
    *
    * The callback receives NapiMeshEvent objects with event_type, device_id, and payload.
    *
+   * Can be called multiple times to add multiple subscribers.
    * Can be called before or after `start()`. If called before `start()`, the
    * event loop is spawned when `start()` is called.
    */

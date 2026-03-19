@@ -180,6 +180,8 @@ async fn sidecar_spawns_and_emits_status_starting() {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (_shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -228,6 +230,8 @@ async fn sidecar_emits_auth_required() {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (_shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -277,6 +281,8 @@ async fn sidecar_stops_gracefully() {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -333,6 +339,8 @@ async fn sidecar_get_peers_returns_peer_list() {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -406,6 +414,8 @@ async fn sidecar_auth_flow_completes() {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -508,6 +518,8 @@ async fn spawn_test_node(name: &str, state_dir_name: &str) -> TestNode {
         bridge_port,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -767,6 +779,8 @@ async fn sidecar_crash_emits_crashed_event_bad_binary() {
         bridge_port: 12345,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (_shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -795,6 +809,8 @@ async fn sidecar_crash_with_auto_restart_retries() {
         bridge_port: 12345,
         session_token,
         auto_restart: true,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, mut rx) = GoShim::spawn(config).await.unwrap();
@@ -842,6 +858,8 @@ async fn shim_subscribe_receives_events() {
         bridge_port: 0,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, _rx) = GoShim::spawn(config).await.unwrap();
@@ -876,6 +894,8 @@ async fn shutdown_before_any_events() {
         bridge_port: 12345, // doesn't matter, we shut down immediately
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, _rx) = GoShim::spawn(config).await.unwrap();
@@ -907,6 +927,8 @@ async fn auto_restart_paused_state() {
         bridge_port: 0,
         session_token,
         auto_restart: false,
+        ephemeral: None,
+        tags: None,
     };
 
     let (shim, _rx) = GoShim::spawn(config).await.unwrap();

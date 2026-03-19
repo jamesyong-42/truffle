@@ -24,6 +24,12 @@ pub struct StartCommandData {
     pub bridge_port: u16,
     /// Random 32-byte hex token for bridge authentication.
     pub session_token: String,
+    /// If true, the node is ephemeral and will be cleaned up when it goes offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    /// ACL tags to advertise (e.g. ["tag:truffle"]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 /// Data payload for `bridge:dial`.
@@ -56,6 +62,10 @@ pub mod event_type {
     pub const STOPPED: &str = "tsnet:stopped";
     pub const STATUS: &str = "tsnet:status";
     pub const AUTH_REQUIRED: &str = "tsnet:authRequired";
+    pub const NEEDS_APPROVAL: &str = "tsnet:needsApproval";
+    pub const STATE_CHANGE: &str = "tsnet:stateChange";
+    pub const KEY_EXPIRING: &str = "tsnet:keyExpiring";
+    pub const HEALTH_WARNING: &str = "tsnet:healthWarning";
     pub const PEERS: &str = "tsnet:peers";
     pub const DIAL_RESULT: &str = "bridge:dialResult";
     pub const ERROR: &str = "tsnet:error";
@@ -93,6 +103,55 @@ pub struct AuthRequiredEventData {
 
 use crate::types::TailnetPeer as CanonicalTailnetPeer;
 
+/// Identity of a connecting peer, resolved via WhoIs in the Go sidecar.
+/// Encoded as JSON in the bridge header's `remote_dns_name` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerIdentity {
+    /// Tailscale DNS name (FQDN without trailing dot).
+    #[serde(default)]
+    pub dns_name: String,
+    /// Login name (e.g. "alice@example.com").
+    #[serde(default)]
+    pub login_name: String,
+    /// Display name (e.g. "Alice Smith").
+    #[serde(default)]
+    pub display_name: String,
+    /// Profile picture URL.
+    #[serde(default)]
+    pub profile_pic_url: String,
+    /// Tailscale stable node ID.
+    #[serde(default)]
+    pub node_id: String,
+}
+
+/// Data from `tsnet:stateChange` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateChangeEventData {
+    pub state: String,
+    #[serde(default)]
+    pub auth_url: String,
+}
+
+/// Data from `tsnet:keyExpiring` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyExpiringEventData {
+    /// ISO 8601 timestamp when the key expires.
+    pub expires_at: String,
+    /// Seconds remaining until expiry.
+    #[serde(default)]
+    pub expires_in_secs: i64,
+}
+
+/// Data from `tsnet:healthWarning` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthWarningEventData {
+    pub warnings: Vec<String>,
+}
+
 /// Wire-format peer from Go sidecar. Converted to canonical TailnetPeer by the shim.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +164,21 @@ pub struct BridgeTailnetPeer {
     pub online: bool,
     #[serde(default)]
     pub os: String,
+    /// Direct address (e.g. "192.168.1.5:41641"), empty if relayed.
+    #[serde(default)]
+    pub cur_addr: String,
+    /// DERP relay region (e.g. "sea"), empty if direct.
+    #[serde(default)]
+    pub relay: String,
+    /// Last seen timestamp (RFC 3339 string from Go sidecar).
+    #[serde(default)]
+    pub last_seen: Option<String>,
+    /// Key expiry timestamp (RFC 3339 string from Go sidecar).
+    #[serde(default)]
+    pub key_expiry: Option<String>,
+    /// Whether the key has expired.
+    #[serde(default)]
+    pub expired: bool,
 }
 
 impl BridgeTailnetPeer {
@@ -116,6 +190,11 @@ impl BridgeTailnetPeer {
             tailscale_ips: self.tailscale_ips.clone(),
             online: self.online,
             os: if self.os.is_empty() { None } else { Some(self.os.clone()) },
+            cur_addr: if self.cur_addr.is_empty() { None } else { Some(self.cur_addr.clone()) },
+            relay: if self.relay.is_empty() { None } else { Some(self.relay.clone()) },
+            last_seen: self.last_seen.clone(),
+            key_expiry: self.key_expiry.clone(),
+            expired: self.expired,
         }
     }
 }
@@ -157,6 +236,8 @@ mod tests {
             auth_key: None,
             bridge_port: 12345,
             session_token: "aa".repeat(32),
+            ephemeral: None,
+            tags: None,
         };
         let cmd = ShimCommand {
             command: command_type::START,
@@ -367,6 +448,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.1".to_string(), "fd7a::2".to_string()],
             online: true,
             os: "darwin".to_string(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         let c = peer.to_canonical();
         assert_eq!(c.id, "abc");
@@ -386,6 +472,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.9".to_string()],
             online: false,
             os: String::new(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         let c = peer.to_canonical();
         assert!(!c.online);
@@ -401,6 +492,11 @@ mod tests {
             tailscale_ips: vec![],
             online: false,
             os: String::new(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         let c = peer.to_canonical();
         assert!(c.tailscale_ips.is_empty());
@@ -448,6 +544,8 @@ mod tests {
             auth_key: Some("tskey-auth-xxxxx".to_string()),
             bridge_port: 9999,
             session_token: "bb".repeat(32),
+            ephemeral: None,
+            tags: None,
         };
         let cmd = ShimCommand {
             command: command_type::START,
@@ -465,6 +563,8 @@ mod tests {
             auth_key: None,
             bridge_port: 9999,
             session_token: "cc".repeat(32),
+            ephemeral: None,
+            tags: None,
         };
         let value = serde_json::to_value(&data).unwrap();
         // authKey should not appear at all when None
@@ -520,6 +620,10 @@ mod tests {
         assert_eq!(event_type::STOPPED, "tsnet:stopped");
         assert_eq!(event_type::STATUS, "tsnet:status");
         assert_eq!(event_type::AUTH_REQUIRED, "tsnet:authRequired");
+        assert_eq!(event_type::NEEDS_APPROVAL, "tsnet:needsApproval");
+        assert_eq!(event_type::STATE_CHANGE, "tsnet:stateChange");
+        assert_eq!(event_type::KEY_EXPIRING, "tsnet:keyExpiring");
+        assert_eq!(event_type::HEALTH_WARNING, "tsnet:healthWarning");
         assert_eq!(event_type::PEERS, "tsnet:peers");
         assert_eq!(event_type::DIAL_RESULT, "bridge:dialResult");
         assert_eq!(event_type::ERROR, "tsnet:error");
@@ -531,5 +635,240 @@ mod tests {
         assert_eq!(command_type::STOP, "tsnet:stop");
         assert_eq!(command_type::GET_PEERS, "tsnet:getPeers");
         assert_eq!(command_type::DIAL, "bridge:dial");
+    }
+
+    // ── Phase 2: New event types ──────────────────────────────────────────
+
+    #[test]
+    fn deserialize_state_change_event() {
+        let json = r#"{"event":"tsnet:stateChange","data":{"state":"NeedsLogin"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::STATE_CHANGE);
+        let data: StateChangeEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "NeedsLogin");
+        assert_eq!(data.auth_url, "");
+    }
+
+    #[test]
+    fn deserialize_key_expiring_event() {
+        let json = r#"{"event":"tsnet:keyExpiring","data":{"expiresAt":"2026-04-01T12:00:00Z","expiresInSecs":3600}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::KEY_EXPIRING);
+        let data: KeyExpiringEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.expires_at, "2026-04-01T12:00:00Z");
+        assert_eq!(data.expires_in_secs, 3600);
+    }
+
+    #[test]
+    fn deserialize_health_warning_event() {
+        let json = r#"{"event":"tsnet:healthWarning","data":{"warnings":["no route to host","DNS timeout"]}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::HEALTH_WARNING);
+        let data: HealthWarningEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.warnings.len(), 2);
+        assert_eq!(data.warnings[0], "no route to host");
+    }
+
+    #[test]
+    fn deserialize_needs_approval_event() {
+        let json = r#"{"event":"tsnet:needsApproval","data":null}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::NEEDS_APPROVAL);
+    }
+
+    #[test]
+    fn deserialize_peer_identity() {
+        let json = r#"{"dnsName":"peer1.tail.ts.net","loginName":"alice@example.com","displayName":"Alice","profilePicUrl":"https://example.com/pic.jpg","nodeId":"stable-123"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.dns_name, "peer1.tail.ts.net");
+        assert_eq!(identity.login_name, "alice@example.com");
+        assert_eq!(identity.display_name, "Alice");
+        assert_eq!(identity.profile_pic_url, "https://example.com/pic.jpg");
+        assert_eq!(identity.node_id, "stable-123");
+    }
+
+    #[test]
+    fn deserialize_peer_identity_minimal() {
+        let json = r#"{"dnsName":"peer1.tail.ts.net"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.dns_name, "peer1.tail.ts.net");
+        assert_eq!(identity.login_name, "");
+        assert_eq!(identity.display_name, "");
+    }
+
+    #[test]
+    fn serialize_start_command_with_ephemeral_and_tags() {
+        let data = StartCommandData {
+            hostname: "node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 9999,
+            session_token: "dd".repeat(32),
+            ephemeral: Some(true),
+            tags: Some(vec!["tag:truffle".to_string()]),
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(value["ephemeral"], true);
+        assert_eq!(value["tags"][0], "tag:truffle");
+    }
+
+    #[test]
+    fn serialize_start_command_ephemeral_none_omitted() {
+        let data = StartCommandData {
+            hostname: "node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 9999,
+            session_token: "ee".repeat(32),
+            ephemeral: None,
+            tags: None,
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("ephemeral"));
+        assert!(!value.as_object().unwrap().contains_key("tags"));
+    }
+
+    #[test]
+    fn deserialize_state_change_event_with_all_fields() {
+        let json = r#"{"event":"tsnet:stateChange","data":{"state":"NeedsLogin","authUrl":"https://login.tailscale.com/a/xyz"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::STATE_CHANGE);
+        let data: StateChangeEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "NeedsLogin");
+        assert_eq!(data.auth_url, "https://login.tailscale.com/a/xyz");
+    }
+
+    #[test]
+    fn deserialize_state_change_event_empty_auth_url_defaults() {
+        // When authUrl is absent from JSON, it should default to empty string
+        let json = r#"{"event":"tsnet:stateChange","data":{"state":"Running"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        let data: StateChangeEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.state, "Running");
+        assert_eq!(data.auth_url, "", "authUrl should default to empty string when absent");
+    }
+
+    #[test]
+    fn serialize_start_command_with_tags_only() {
+        let data = StartCommandData {
+            hostname: "tagged-node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 8080,
+            session_token: "ff".repeat(32),
+            ephemeral: None,
+            tags: Some(vec!["tag:truffle".to_string(), "tag:server".to_string()]),
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        // ephemeral omitted, tags present
+        assert!(!value.as_object().unwrap().contains_key("ephemeral"),
+            "ephemeral=None should be omitted from JSON");
+        let tags = value["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0], "tag:truffle");
+        assert_eq!(tags[1], "tag:server");
+    }
+
+    #[test]
+    fn deserialize_bridge_peer_without_rich_fields_defaults() {
+        // JSON with only the base fields; new rich fields should all default
+        let json = r#"{"id":"p1","hostname":"h","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true}"#;
+        let peer: BridgeTailnetPeer = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.id, "p1");
+        assert!(peer.online);
+        // Rich fields default to empty/None/false
+        assert_eq!(peer.cur_addr, "");
+        assert_eq!(peer.relay, "");
+        assert_eq!(peer.last_seen, None);
+        assert_eq!(peer.key_expiry, None);
+        assert!(!peer.expired);
+    }
+
+    #[test]
+    fn to_canonical_maps_empty_strings_to_none() {
+        let peer = BridgeTailnetPeer {
+            id: "t1".to_string(),
+            hostname: "h".to_string(),
+            dns_name: "h.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.1".to_string()],
+            online: true,
+            os: String::new(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        };
+        let c = peer.to_canonical();
+        assert_eq!(c.os, None, "Empty os string should map to None");
+        assert_eq!(c.cur_addr, None, "Empty curAddr string should map to None");
+        assert_eq!(c.relay, None, "Empty relay string should map to None");
+    }
+
+    #[test]
+    fn to_canonical_preserves_non_empty_cur_addr_and_relay() {
+        let peer = BridgeTailnetPeer {
+            id: "t2".to_string(),
+            hostname: "h".to_string(),
+            dns_name: "h.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.2".to_string()],
+            online: true,
+            os: "linux".to_string(),
+            cur_addr: "10.0.0.5:41641".to_string(),
+            relay: "nyc".to_string(),
+            last_seen: Some("2026-03-18T10:00:00Z".to_string()),
+            key_expiry: Some("2026-06-18T10:00:00Z".to_string()),
+            expired: false,
+        };
+        let c = peer.to_canonical();
+        assert_eq!(c.cur_addr, Some("10.0.0.5:41641".to_string()));
+        assert_eq!(c.relay, Some("nyc".to_string()));
+        assert_eq!(c.last_seen, Some("2026-03-18T10:00:00Z".to_string()));
+        assert_eq!(c.key_expiry, Some("2026-06-18T10:00:00Z".to_string()));
+        assert!(!c.expired);
+    }
+
+    #[test]
+    fn to_canonical_expired_flag() {
+        let peer = BridgeTailnetPeer {
+            id: "exp".to_string(),
+            hostname: "old".to_string(),
+            dns_name: "old.ts.net".to_string(),
+            tailscale_ips: vec![],
+            online: false,
+            os: String::new(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: Some("2025-01-01T00:00:00Z".to_string()),
+            key_expiry: Some("2025-06-01T00:00:00Z".to_string()),
+            expired: true,
+        };
+        let c = peer.to_canonical();
+        assert!(c.expired, "Expired flag should be preserved");
+    }
+
+    #[test]
+    fn event_type_new_constants_match_expected() {
+        assert_eq!(event_type::NEEDS_APPROVAL, "tsnet:needsApproval");
+        assert_eq!(event_type::STATE_CHANGE, "tsnet:stateChange");
+        assert_eq!(event_type::KEY_EXPIRING, "tsnet:keyExpiring");
+        assert_eq!(event_type::HEALTH_WARNING, "tsnet:healthWarning");
+    }
+
+    #[test]
+    fn deserialize_bridge_peer_with_rich_fields() {
+        let json = r#"{"id":"p1","hostname":"h","dnsName":"h.ts.net","tailscaleIPs":["100.64.0.2"],"online":true,"curAddr":"192.168.1.5:41641","relay":"sea","lastSeen":"2026-03-18T12:00:00Z","keyExpiry":"2026-04-18T12:00:00Z","expired":false}"#;
+        let peer: BridgeTailnetPeer = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.cur_addr, "192.168.1.5:41641");
+        assert_eq!(peer.relay, "sea");
+        assert_eq!(peer.last_seen, Some("2026-03-18T12:00:00Z".to_string()));
+        assert_eq!(peer.key_expiry, Some("2026-04-18T12:00:00Z".to_string()));
+        assert!(!peer.expired);
+
+        let canonical = peer.to_canonical();
+        assert_eq!(canonical.cur_addr, Some("192.168.1.5:41641".to_string()));
+        assert_eq!(canonical.relay, Some("sea".to_string()));
+        assert_eq!(canonical.last_seen, Some("2026-03-18T12:00:00Z".to_string()));
+        assert_eq!(canonical.key_expiry, Some("2026-04-18T12:00:00Z".to_string()));
     }
 }

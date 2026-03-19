@@ -47,6 +47,11 @@ pub fn emit_mesh_event<R: Runtime>(app: &AppHandle<R>, event: &MeshNodeEvent) {
             device_id: None,
             payload: serde_json::Value::String(url.clone()),
         },
+        MeshNodeEvent::AuthComplete => MeshEventPayload {
+            event_type: "authComplete".to_string(),
+            device_id: None,
+            payload: serde_json::Value::Null,
+        },
         MeshNodeEvent::DeviceDiscovered(device) => MeshEventPayload {
             event_type: "deviceDiscovered".to_string(),
             device_id: Some(device.id.clone()),

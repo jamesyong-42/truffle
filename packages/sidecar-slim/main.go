@@ -51,11 +51,13 @@ type event struct {
 }
 
 type startData struct {
-	Hostname     string `json:"hostname"`
-	StateDir     string `json:"stateDir"`
-	AuthKey      string `json:"authKey,omitempty"`
-	BridgePort   uint16 `json:"bridgePort"`
-	SessionToken string `json:"sessionToken"` // 32-byte hex
+	Hostname     string   `json:"hostname"`
+	StateDir     string   `json:"stateDir"`
+	AuthKey      string   `json:"authKey,omitempty"`
+	BridgePort   uint16   `json:"bridgePort"`
+	SessionToken string   `json:"sessionToken"` // 32-byte hex
+	Ephemeral    bool     `json:"ephemeral,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
 }
 
 type dialData struct {
@@ -89,6 +91,11 @@ type peerInfo struct {
 	TailscaleIPs []string `json:"tailscaleIPs"`
 	Online       bool     `json:"online"`
 	OS           string   `json:"os,omitempty"`
+	CurAddr      string   `json:"curAddr,omitempty"`
+	Relay        string   `json:"relay,omitempty"`
+	LastSeen     string   `json:"lastSeen,omitempty"`
+	KeyExpiry    string   `json:"keyExpiry,omitempty"`
+	Expired      bool     `json:"expired,omitempty"`
 }
 
 type peersData struct {
@@ -100,6 +107,33 @@ type errorData struct {
 	Message string `json:"message"`
 }
 
+// peerIdentityData is the JSON structure encoded into the bridge header's
+// remoteDNS field when WhoIs lookup succeeds. Rust deserializes this to
+// extract identity information about the connecting peer.
+type peerIdentityData struct {
+	DNSName       string `json:"dnsName"`
+	LoginName     string `json:"loginName,omitempty"`
+	DisplayName   string `json:"displayName,omitempty"`
+	ProfilePicURL string `json:"profilePicUrl,omitempty"`
+	NodeID        string `json:"nodeId,omitempty"`
+}
+
+// stateChangeData is the payload for tsnet:stateChange events.
+type stateChangeData struct {
+	State string `json:"state"`
+}
+
+// keyExpiringData is the payload for tsnet:keyExpiring events.
+type keyExpiringData struct {
+	ExpiresAt  string `json:"expiresAt"`
+	ExpiresIn  int64  `json:"expiresInSecs"`
+}
+
+// healthWarningData is the payload for tsnet:healthWarning events.
+type healthWarningData struct {
+	Warnings []string `json:"warnings"`
+}
+
 // shim is the main application state.
 type shim struct {
 	server       *tsnet.Server
@@ -108,6 +142,9 @@ type shim struct {
 
 	writeMu sync.Mutex // protects stdout writes
 	writer  *json.Encoder
+
+	listenerMu sync.Mutex   // protects listeners
+	listeners  []net.Listener // active listeners (TLS :443, TCP :9417)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -178,12 +215,16 @@ func (s *shim) handleStart(data json.RawMessage) {
 	s.sendStatus("starting", d.Hostname, "", "", "")
 
 	s.server = &tsnet.Server{
-		Hostname: d.Hostname,
-		Dir:      d.StateDir,
-		Logf:     log.Printf,
+		Hostname:  d.Hostname,
+		Dir:       d.StateDir,
+		Logf:      log.Printf,
+		Ephemeral: d.Ephemeral,
 	}
 	if d.AuthKey != "" {
 		s.server.AuthKey = d.AuthKey
+	}
+	if len(d.Tags) > 0 {
+		s.server.AdvertiseTags = d.Tags
 	}
 
 	if err := s.server.Start(); err != nil {
@@ -226,6 +267,10 @@ func (s *shim) waitForRunning(hostname string) {
 			authURLSent = true
 		}
 
+		if status.BackendState == "NeedsMachineAuth" {
+			s.sendEvent("tsnet:needsApproval", nil)
+		}
+
 		if status.BackendState == "Running" {
 			var ip string
 			if len(status.TailscaleIPs) > 0 {
@@ -244,11 +289,21 @@ func (s *shim) waitForRunning(hostname string) {
 			// Start listeners
 			go s.listenTLS(lc)
 			go s.listenTCP(lc)
+
+			// Start background state monitor
+			go s.monitorState(lc)
 			return
 		}
 
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// trackListener adds a listener to the tracked set for cleanup on stop.
+func (s *shim) trackListener(ln net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listeners = append(s.listeners, ln)
 }
 
 func (s *shim) listenTLS(lc *tailscale.LocalClient) {
@@ -258,6 +313,7 @@ func (s *shim) listenTLS(lc *tailscale.LocalClient) {
 		s.sendError("LISTEN_ERROR", fmt.Sprintf("ListenTLS :443: %v", err))
 		return
 	}
+	s.trackListener(ln)
 	defer ln.Close()
 
 	log.Printf("listening TLS on :443")
@@ -270,8 +326,8 @@ func (s *shim) listenTLS(lc *tailscale.LocalClient) {
 			log.Printf("accept :443 error: %v", err)
 			continue
 		}
-		peerDNS := s.resolvePeerDNS(lc, conn.RemoteAddr().String())
-		go s.bridgeToRust(conn, 443, dirIncoming, "", conn.RemoteAddr().String(), peerDNS)
+		peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
+		go s.bridgeToRust(conn, 443, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
 	}
 }
 
@@ -282,6 +338,7 @@ func (s *shim) listenTCP(lc *tailscale.LocalClient) {
 		s.sendError("LISTEN_ERROR", fmt.Sprintf("Listen :9417: %v", err))
 		return
 	}
+	s.trackListener(ln)
 	defer ln.Close()
 
 	log.Printf("listening TCP on :9417")
@@ -294,8 +351,8 @@ func (s *shim) listenTCP(lc *tailscale.LocalClient) {
 			log.Printf("accept :9417 error: %v", err)
 			continue
 		}
-		peerDNS := s.resolvePeerDNS(lc, conn.RemoteAddr().String())
-		go s.bridgeToRust(conn, 9417, dirIncoming, "", conn.RemoteAddr().String(), peerDNS)
+		peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
+		go s.bridgeToRust(conn, 9417, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
 	}
 }
 
@@ -303,6 +360,17 @@ func (s *shim) handleStop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+
+	// Close listeners first so accept loops exit before server teardown
+	s.listenerMu.Lock()
+	for _, ln := range s.listeners {
+		if err := ln.Close(); err != nil {
+			log.Printf("listener close error: %v", err)
+		}
+	}
+	s.listeners = nil
+	s.listenerMu.Unlock()
+
 	if s.server != nil {
 		if err := s.server.Close(); err != nil {
 			log.Printf("server close error: %v", err)
@@ -336,14 +404,24 @@ func (s *shim) handleGetPeers() {
 		for _, ip := range peer.TailscaleIPs {
 			ips = append(ips, ip.String())
 		}
-		peers = append(peers, peerInfo{
+		p := peerInfo{
 			ID:           string(peer.ID),
 			Hostname:     peer.HostName,
 			DNSName:      strings.TrimSuffix(peer.DNSName, "."),
 			TailscaleIPs: ips,
 			Online:       peer.Online,
 			OS:           peer.OS,
-		})
+			CurAddr:      peer.CurAddr,
+			Relay:        peer.Relay,
+			Expired:      peer.Expired,
+		}
+		if !peer.LastSeen.IsZero() {
+			p.LastSeen = peer.LastSeen.UTC().Format(time.RFC3339)
+		}
+		if peer.KeyExpiry != nil && !peer.KeyExpiry.IsZero() {
+			p.KeyExpiry = peer.KeyExpiry.UTC().Format(time.RFC3339)
+		}
+		peers = append(peers, p)
 	}
 
 	s.sendEvent("tsnet:peers", peersData{Peers: peers})
@@ -526,28 +604,86 @@ func (w *deadlineWriter) Write(p []byte) (int, error) {
 	return w.conn.Write(p)
 }
 
-// resolvePeerDNS maps a remote address to a peer DNS name via LocalClient.Status().
-func (s *shim) resolvePeerDNS(lc *tailscale.LocalClient, remoteAddr string) string {
-	host, _, err := net.SplitHostPort(remoteAddr)
+// resolvePeerIdentity maps a remote address to a PeerIdentity JSON string via WhoIs.
+// The JSON is placed into the bridge header's remoteDNS field so Rust can
+// extract rich identity info about the connecting peer.
+func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) string {
+	whois, err := lc.WhoIs(s.ctx, remoteAddr)
 	if err != nil {
+		log.Printf("resolvePeerIdentity: WhoIs(%s) failed: %v", remoteAddr, err)
 		return ""
 	}
 
-	status, err := lc.Status(s.ctx)
-	if err != nil {
-		log.Printf("resolvePeerDNS: status failed: %v", err)
-		return ""
+	identity := peerIdentityData{}
+	if whois.Node != nil {
+		identity.DNSName = strings.TrimSuffix(whois.Node.Name, ".")
+		identity.NodeID = string(whois.Node.StableID)
+	}
+	if whois.UserProfile != nil {
+		identity.LoginName = whois.UserProfile.LoginName
+		identity.DisplayName = whois.UserProfile.DisplayName
+		identity.ProfilePicURL = whois.UserProfile.ProfilePicURL
 	}
 
-	for _, peer := range status.Peer {
-		for _, ip := range peer.TailscaleIPs {
-			if ip.String() == host {
-				return strings.TrimSuffix(peer.DNSName, ".")
+	data, err := json.Marshal(identity)
+	if err != nil {
+		log.Printf("resolvePeerIdentity: marshal failed: %v", err)
+		return ""
+	}
+	return string(data)
+}
+
+// monitorState polls Tailscale status every 60 seconds and emits events for
+// state changes, upcoming key expiry, and health warnings.
+func (s *shim) monitorState(lc *tailscale.LocalClient) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	lastState := "Running"
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		status, err := lc.StatusWithoutPeers(s.ctx)
+		if err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+			log.Printf("monitorState: status check failed: %v", err)
+			continue
+		}
+
+		// Emit tsnet:stateChange if backend state changed
+		if status.BackendState != lastState {
+			s.sendEvent("tsnet:stateChange", stateChangeData{
+				State: status.BackendState,
+			})
+			lastState = status.BackendState
+		}
+
+		// Emit tsnet:keyExpiring if our own key expires within 24 hours
+		if status.Self != nil && status.Self.KeyExpiry != nil {
+			expiresAt := *status.Self.KeyExpiry
+			remaining := time.Until(expiresAt)
+			if remaining > 0 && remaining < 24*time.Hour {
+				s.sendEvent("tsnet:keyExpiring", keyExpiringData{
+					ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+					ExpiresIn: int64(remaining.Seconds()),
+				})
 			}
 		}
-	}
 
-	return "" // peer not found — Rust should still accept
+		// Emit tsnet:healthWarning if there are health issues
+		if len(status.Health) > 0 {
+			s.sendEvent("tsnet:healthWarning", healthWarningData{
+				Warnings: status.Health,
+			})
+		}
+	}
 }
 
 // sendEvent writes a JSON event to stdout.

@@ -34,8 +34,20 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "helpers.js",
+    "helpers.d.ts",
     "*.node"
   ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./helpers": {
+      "types": "./helpers.d.ts",
+      "default": "./helpers.js"
+    }
+  },
   "napi": {
     "binaryName": "truffle",
     "targets": [

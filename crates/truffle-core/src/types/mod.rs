@@ -96,6 +96,59 @@ pub struct TailnetPeer {
     pub online: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
+    /// Direct address (e.g. "192.168.1.5:41641"), None if relayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cur_addr: Option<String>,
+    /// DERP relay region (e.g. "sea"), None if direct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    /// Last seen timestamp (RFC 3339 string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<String>,
+    /// Key expiry timestamp (RFC 3339 string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_expiry: Option<String>,
+    /// Whether the key has expired.
+    #[serde(default)]
+    pub expired: bool,
+}
+
+/// Identity of a peer, extracted from dnsName metadata or Tailscale node info.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerIdentity {
+    /// Tailscale node ID.
+    #[serde(default)]
+    pub node_id: String,
+    /// MagicDNS name.
+    #[serde(default)]
+    pub dns_name: String,
+    /// Whether this node uses ACL tags instead of a user identity.
+    #[serde(default)]
+    pub is_tagged: bool,
+    /// User ID (absent for tagged nodes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// User display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Login name (e.g. "alice@example.com") from WhoIs UserProfile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_name: Option<String>,
+    /// Profile picture URL from WhoIs UserProfile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_pic_url: Option<String>,
+}
+
+impl PeerIdentity {
+    /// Try to parse a PeerIdentity from a remote DNS name field.
+    ///
+    /// Some implementations encode identity as JSON in the dnsName field.
+    /// If the string is valid JSON containing at least `nodeId` and `dnsName`,
+    /// it is parsed; otherwise returns None.
+    pub fn from_remote_dns(dns_name: &str) -> Option<Self> {
+        serde_json::from_str::<Self>(dns_name).ok()
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +360,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.5".to_string()],
             online: true,
             os: Some("darwin".to_string()),
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         let json = serde_json::to_string(&peer).unwrap();
@@ -324,6 +382,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.1".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         let json = serde_json::to_string(&peer).unwrap();
@@ -351,5 +414,165 @@ mod tests {
         let json = r#"{"peers":[{"id":"1","hostname":"h","dnsName":"d","tailscaleIPs":["100.64.0.2"],"online":true}]}"#;
         let data: PeersEventData = serde_json::from_str(json).unwrap();
         assert_eq!(data.peers[0].tailscale_ips, vec!["100.64.0.2"]);
+    }
+
+    // ── Phase 2: Rich peer info + PeerIdentity ──────────────────────────
+
+    #[test]
+    fn tailnet_peer_rich_fields_roundtrip() {
+        let peer = TailnetPeer {
+            id: "node-rich".to_string(),
+            hostname: "rich-peer".to_string(),
+            dns_name: "rich-peer.tail.ts.net".to_string(),
+            tailscale_ips: vec!["100.64.0.10".to_string()],
+            online: true,
+            os: Some("linux".to_string()),
+            cur_addr: Some("192.168.1.5:41641".to_string()),
+            relay: Some("sea".to_string()),
+            last_seen: Some("2026-03-18T12:00:00Z".to_string()),
+            key_expiry: Some("2026-04-18T12:00:00Z".to_string()),
+            expired: false,
+        };
+
+        let json = serde_json::to_string(&peer).unwrap();
+        let parsed: TailnetPeer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, peer);
+        assert_eq!(parsed.cur_addr, Some("192.168.1.5:41641".to_string()));
+        assert_eq!(parsed.relay, Some("sea".to_string()));
+        assert_eq!(parsed.last_seen, Some("2026-03-18T12:00:00Z".to_string()));
+        assert_eq!(parsed.key_expiry, Some("2026-04-18T12:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn tailnet_peer_rich_fields_omitted_when_none() {
+        let peer = TailnetPeer {
+            id: "p".to_string(),
+            hostname: "h".to_string(),
+            dns_name: "d".to_string(),
+            tailscale_ips: vec![],
+            online: false,
+            os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        };
+
+        let json = serde_json::to_string(&peer).unwrap();
+        assert!(!json.contains("curAddr"));
+        assert!(!json.contains("relay"));
+        assert!(!json.contains("lastSeen"));
+        assert!(!json.contains("keyExpiry"));
+    }
+
+    #[test]
+    fn peer_identity_from_remote_dns_valid_json() {
+        let json = r#"{"nodeId":"stable-abc","dnsName":"peer.ts.net","loginName":"user@example.com","displayName":"User"}"#;
+        let identity = PeerIdentity::from_remote_dns(json).unwrap();
+        assert_eq!(identity.node_id, "stable-abc");
+        assert_eq!(identity.dns_name, "peer.ts.net");
+        assert_eq!(identity.display_name, Some("User".to_string()));
+    }
+
+    #[test]
+    fn peer_identity_from_remote_dns_plain_string() {
+        // Non-JSON string (e.g., a plain DNS name) should return None
+        let result = PeerIdentity::from_remote_dns("peer.ts.net");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn peer_identity_from_remote_dns_empty() {
+        let result = PeerIdentity::from_remote_dns("");
+        assert!(result.is_none());
+    }
+
+    // ── Phase 2: PeerIdentity comprehensive tests ────────────────────────
+
+    #[test]
+    fn peer_identity_parse_from_valid_json() {
+        let json = r#"{"nodeId":"stable-xyz","dnsName":"mynode.tail.ts.net","isTagged":false,"userId":"user-123","displayName":"James"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.node_id, "stable-xyz");
+        assert_eq!(identity.dns_name, "mynode.tail.ts.net");
+        assert!(!identity.is_tagged);
+        assert_eq!(identity.user_id, Some("user-123".to_string()));
+        assert_eq!(identity.display_name, Some("James".to_string()));
+    }
+
+    #[test]
+    fn peer_identity_from_remote_dns_plain_returns_none() {
+        // A plain DNS name (not JSON) should return None
+        assert!(PeerIdentity::from_remote_dns("plain.dns.name").is_none());
+    }
+
+    #[test]
+    fn peer_identity_from_remote_dns_json_returns_some() {
+        let json = r#"{"nodeId":"abc","dnsName":"x.ts.net","isTagged":false}"#;
+        let result = PeerIdentity::from_remote_dns(json);
+        assert!(result.is_some());
+        let identity = result.unwrap();
+        assert_eq!(identity.node_id, "abc");
+        assert_eq!(identity.dns_name, "x.ts.net");
+        assert!(!identity.is_tagged);
+    }
+
+    #[test]
+    fn peer_identity_roundtrip_serialize_deserialize() {
+        let identity = PeerIdentity {
+            node_id: "node-123".to_string(),
+            dns_name: "node-123.tail.ts.net".to_string(),
+            is_tagged: false,
+            user_id: Some("user-456".to_string()),
+            display_name: Some("Test User".to_string()),
+            login_name: Some("test@example.com".to_string()),
+            profile_pic_url: Some("https://example.com/pic.png".to_string()),
+        };
+
+        let json = serde_json::to_string(&identity).unwrap();
+        let parsed: PeerIdentity = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, identity, "PeerIdentity roundtrip must preserve all fields");
+    }
+
+    #[test]
+    fn peer_identity_missing_optional_fields_deserializes_with_defaults() {
+        // Only required/defaulted fields present, optional ones absent
+        let json = r#"{"nodeId":"n1","dnsName":"n1.ts.net"}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(identity.node_id, "n1");
+        assert_eq!(identity.dns_name, "n1.ts.net");
+        assert!(!identity.is_tagged, "isTagged should default to false");
+        assert_eq!(identity.user_id, None, "userId should default to None");
+        assert_eq!(identity.display_name, None, "displayName should default to None");
+        assert_eq!(identity.login_name, None, "loginName should default to None");
+        assert_eq!(identity.profile_pic_url, None, "profilePicUrl should default to None");
+    }
+
+    #[test]
+    fn peer_identity_tagged_node() {
+        let json = r#"{"nodeId":"tagged-node","dnsName":"tagged.ts.net","isTagged":true}"#;
+        let identity: PeerIdentity = serde_json::from_str(json).unwrap();
+        assert!(identity.is_tagged, "isTagged should be true for tagged nodes");
+        assert_eq!(identity.user_id, None, "Tagged nodes should not have userId");
+        assert_eq!(identity.node_id, "tagged-node");
+    }
+
+    #[test]
+    fn peer_identity_optional_fields_omitted_in_json_when_none() {
+        let identity = PeerIdentity {
+            node_id: "n".to_string(),
+            dns_name: "n.ts.net".to_string(),
+            is_tagged: false,
+            user_id: None,
+            display_name: None,
+            login_name: None,
+            profile_pic_url: None,
+        };
+        let json = serde_json::to_string(&identity).unwrap();
+        assert!(!json.contains("userId"), "None userId should be omitted");
+        assert!(!json.contains("displayName"), "None displayName should be omitted");
+        assert!(!json.contains("loginName"), "None loginName should be omitted");
+        assert!(!json.contains("profilePicUrl"), "None profilePicUrl should be omitted");
     }
 }

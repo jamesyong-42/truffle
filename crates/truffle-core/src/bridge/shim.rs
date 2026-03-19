@@ -56,6 +56,21 @@ pub enum ShimLifecycleEvent {
     },
     /// Shim requires Tailscale authentication.
     AuthRequired { auth_url: String },
+    /// Node needs admin approval to join the tailnet.
+    NeedsApproval,
+    /// Tailscale state changed (e.g. NeedsLogin, Running, Stopped).
+    StateChanged {
+        state: String,
+        auth_url: String,
+    },
+    /// Key is approaching expiry.
+    KeyExpiring {
+        expires_at: String,
+    },
+    /// Health subsystem warnings.
+    HealthWarning {
+        warnings: Vec<String>,
+    },
     /// Shim status update.
     Status(super::protocol::StatusEventData),
     /// Peer list update.
@@ -83,6 +98,10 @@ pub struct ShimConfig {
     pub session_token: String,
     /// Whether to auto-restart on crash.
     pub auto_restart: bool,
+    /// If true, the node is ephemeral (cleaned up when offline).
+    pub ephemeral: Option<bool>,
+    /// ACL tags to advertise.
+    pub tags: Option<Vec<String>>,
 }
 
 /// Manages the Go shim child process.
@@ -278,6 +297,8 @@ impl GoShim {
             auth_key: config.auth_key.clone(),
             bridge_port: config.bridge_port,
             session_token: config.session_token.clone(),
+            ephemeral: config.ephemeral,
+            tags: config.tags.clone(),
         };
         let start_cmd = ShimCommand {
             command: command_type::START,
@@ -465,6 +486,31 @@ impl GoShim {
                     });
                 }
             }
+            event_type::NEEDS_APPROVAL => {
+                let _ = lifecycle_tx.send(ShimLifecycleEvent::NeedsApproval);
+            }
+            event_type::STATE_CHANGE => {
+                if let Ok(data) = serde_json::from_value::<super::protocol::StateChangeEventData>(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::StateChanged {
+                        state: data.state,
+                        auth_url: data.auth_url,
+                    });
+                }
+            }
+            event_type::KEY_EXPIRING => {
+                if let Ok(data) = serde_json::from_value::<super::protocol::KeyExpiringEventData>(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::KeyExpiring {
+                        expires_at: data.expires_at,
+                    });
+                }
+            }
+            event_type::HEALTH_WARNING => {
+                if let Ok(data) = serde_json::from_value::<super::protocol::HealthWarningEventData>(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::HealthWarning {
+                        warnings: data.warnings,
+                    });
+                }
+            }
             event_type::PEERS => {
                 if let Ok(data) = serde_json::from_value(event.data) {
                     let _ = lifecycle_tx.send(ShimLifecycleEvent::Peers(data));
@@ -598,6 +644,8 @@ mod tests {
             bridge_port: 12345,
             session_token: "aa".repeat(32),
             auto_restart: true,
+            ephemeral: None,
+            tags: None,
         };
         let config2 = config.clone();
         assert_eq!(config.hostname, config2.hostname);
@@ -671,6 +719,8 @@ mod tests {
             auth_key: None,
             bridge_port: 54321,
             session_token: "ab".repeat(32),
+            ephemeral: None,
+            tags: None,
         };
         let cmd = super::super::protocol::ShimCommand {
             command: super::super::protocol::command_type::START,
@@ -775,6 +825,11 @@ mod tests {
                 tailscale_ips: vec!["100.64.0.2".to_string()],
                 online: true,
                 os: "linux".to_string(),
+                cur_addr: String::new(),
+                relay: String::new(),
+                last_seen: None,
+                key_expiry: None,
+                expired: false,
             }],
         };
         let event = ShimLifecycleEvent::Peers(data);
@@ -835,6 +890,8 @@ mod tests {
             bridge_port: 0,
             session_token: "ff".repeat(32),
             auto_restart: false,
+            ephemeral: None,
+            tags: None,
         };
         assert_eq!(config.hostname, "test");
         assert_eq!(config.auth_key, Some("tskey-xxx".to_string()));
@@ -883,5 +940,113 @@ mod tests {
         assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    // ── Phase 2: New lifecycle event variants ─────────────────────────────
+
+    #[test]
+    fn lifecycle_event_needs_approval_variant() {
+        let event = ShimLifecycleEvent::NeedsApproval;
+        let debug = format!("{event:?}");
+        assert_eq!(debug, "NeedsApproval");
+    }
+
+    #[test]
+    fn lifecycle_event_state_changed_variant() {
+        let event = ShimLifecycleEvent::StateChanged {
+            state: "NeedsLogin".to_string(),
+            auth_url: "".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("StateChanged"));
+        assert!(debug.contains("NeedsLogin"));
+    }
+
+    #[test]
+    fn lifecycle_event_key_expiring_variant() {
+        let event = ShimLifecycleEvent::KeyExpiring {
+            expires_at: "2026-04-01T12:00:00Z".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("KeyExpiring"));
+        assert!(debug.contains("2026-04-01"));
+    }
+
+    #[test]
+    fn lifecycle_event_health_warning_variant() {
+        let event = ShimLifecycleEvent::HealthWarning {
+            warnings: vec!["DNS not working".to_string()],
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("HealthWarning"));
+        assert!(debug.contains("DNS not working"));
+    }
+
+    #[test]
+    fn shim_config_with_ephemeral_and_tags() {
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/usr/bin/sidecar"),
+            hostname: "ephemeral-node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 0,
+            session_token: "aa".repeat(32),
+            auto_restart: false,
+            ephemeral: Some(true),
+            tags: Some(vec!["tag:truffle".to_string()]),
+        };
+        assert_eq!(config.ephemeral, Some(true));
+        assert_eq!(config.tags.as_ref().unwrap()[0], "tag:truffle");
+    }
+
+    #[test]
+    fn shim_config_with_ephemeral_and_tags_clones_correctly() {
+        let config = ShimConfig {
+            binary_path: PathBuf::from("/usr/bin/sidecar"),
+            hostname: "ephemeral-node".to_string(),
+            state_dir: "/tmp/ts".to_string(),
+            auth_key: None,
+            bridge_port: 8080,
+            session_token: "bb".repeat(32),
+            auto_restart: true,
+            ephemeral: Some(true),
+            tags: Some(vec!["tag:truffle".to_string(), "tag:server".to_string()]),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.ephemeral, Some(true));
+        assert_eq!(cloned.tags.as_ref().unwrap().len(), 2);
+        assert_eq!(cloned.tags.as_ref().unwrap()[0], "tag:truffle");
+        assert_eq!(cloned.tags.as_ref().unwrap()[1], "tag:server");
+        assert_eq!(cloned.hostname, config.hostname);
+        assert_eq!(cloned.bridge_port, config.bridge_port);
+        assert_eq!(cloned.auto_restart, config.auto_restart);
+    }
+
+    #[test]
+    fn lifecycle_event_state_changed_with_auth_url() {
+        let event = ShimLifecycleEvent::StateChanged {
+            state: "NeedsLogin".to_string(),
+            auth_url: "https://login.tailscale.com/a/abc123".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("StateChanged"));
+        assert!(debug.contains("NeedsLogin"));
+        assert!(debug.contains("https://login.tailscale.com"));
+    }
+
+    #[test]
+    fn lifecycle_event_health_warning_multiple() {
+        let event = ShimLifecycleEvent::HealthWarning {
+            warnings: vec![
+                "DNS not resolving".to_string(),
+                "DERP relay unreachable".to_string(),
+                "Clock skew detected".to_string(),
+            ],
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("HealthWarning"));
+        assert!(debug.contains("DNS not resolving"));
+        assert!(debug.contains("DERP relay unreachable"));
+        assert!(debug.contains("Clock skew detected"));
     }
 }

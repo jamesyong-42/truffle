@@ -394,6 +394,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: Some("android".to_string()),
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         let device = mgr.add_discovered_peer(&peer).unwrap();
@@ -415,6 +420,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.3".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         assert!(mgr.add_discovered_peer(&peer).is_none());
@@ -431,6 +441,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.1".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         assert!(mgr.add_discovered_peer(&peer).is_none());
@@ -510,6 +525,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         mgr.add_discovered_peer(&peer);
         mgr.set_device_role("dev2", DeviceRole::Primary);
@@ -530,6 +550,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         mgr.add_discovered_peer(&peer);
         assert!(!mgr.devices().is_empty());
@@ -553,6 +578,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         mgr.add_discovered_peer(&peer);
 
@@ -697,6 +727,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         let offline_peer = TailnetPeer {
             id: "p2".to_string(),
@@ -705,6 +740,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.3".to_string()],
             online: false,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
 
         mgr.add_discovered_peer(&online_peer);
@@ -727,6 +767,11 @@ mod tests {
             tailscale_ips: vec!["100.64.0.2".to_string()],
             online: true,
             os: None,
+            cur_addr: None,
+            relay: None,
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
         };
         mgr.add_discovered_peer(&peer);
         mgr.set_device_role("dev2", DeviceRole::Primary);

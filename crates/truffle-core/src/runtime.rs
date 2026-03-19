@@ -190,6 +190,8 @@ impl TruffleRuntime {
             bridge_port,
             session_token: session_token_hex,
             auto_restart: true,
+            ephemeral: None,
+            tags: None,
         };
 
         let (shim, lifecycle_rx) = GoShim::spawn(shim_config)

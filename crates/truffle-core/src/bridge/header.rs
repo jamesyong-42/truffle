@@ -14,8 +14,10 @@ pub const MAX_REQUEST_ID_LEN: u16 = 128;
 /// Maximum length for RemoteAddr field
 pub const MAX_REMOTE_ADDR_LEN: u16 = 256;
 
-/// Maximum length for RemoteDNSName field
-pub const MAX_REMOTE_DNS_NAME_LEN: u16 = 256;
+/// Maximum length for RemoteDNSName field.
+/// Increased from 256 to 512 to accommodate JSON-encoded PeerIdentity payloads
+/// that include profile URLs.
+pub const MAX_REMOTE_DNS_NAME_LEN: u16 = 512;
 
 /// Minimum header size: magic(4) + version(1) + token(32) + direction(1) + port(2) + 3 length fields(2 each)
 pub const MIN_HEADER_SIZE: usize = 4 + 1 + 32 + 1 + 2 + 2 + 2 + 2;
@@ -497,12 +499,12 @@ mod tests {
         buf.extend_from_slice(&443u16.to_be_bytes());
         buf.extend_from_slice(&0u16.to_be_bytes()); // request_id_len=0
         buf.extend_from_slice(&0u16.to_be_bytes()); // remote_addr_len=0
-        buf.extend_from_slice(&300u16.to_be_bytes()); // exceeds MAX_REMOTE_DNS_NAME_LEN(256)
+        buf.extend_from_slice(&600u16.to_be_bytes()); // exceeds MAX_REMOTE_DNS_NAME_LEN(512)
 
         let mut cursor = Cursor::new(&buf);
         let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
         assert!(
-            matches!(err, HeaderError::RemoteDnsNameTooLong(300)),
+            matches!(err, HeaderError::RemoteDnsNameTooLong(600)),
             "got: {err:?}"
         );
     }
