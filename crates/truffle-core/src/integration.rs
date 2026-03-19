@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::file_transfer::adapter::FileTransferAdapter;
+use crate::services::file_transfer::adapter::FileTransferAdapter;
 use crate::mesh::node::{MeshNode, MeshNodeEvent};
-use crate::store_sync::adapter::StoreSyncAdapter;
-use crate::store_sync::types::{OutgoingSyncMessage, SyncMessage, STORE_SYNC_NAMESPACE};
-use crate::file_transfer::adapter::FILE_TRANSFER_NAMESPACE;
+use crate::services::store_sync::adapter::StoreSyncAdapter;
+use crate::services::store_sync::types::{OutgoingSyncMessage, SyncMessage, STORE_SYNC_NAMESPACE};
+use crate::services::file_transfer::adapter::FILE_TRANSFER_NAMESPACE;
 use crate::protocol::envelope::MeshEnvelope;
 
 /// Wire a `StoreSyncAdapter` to a `MeshNode`.
@@ -154,7 +154,7 @@ mod tests {
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
 
         let adapter = StoreSyncAdapter::new(
-            crate::store_sync::adapter::StoreSyncAdapterConfig {
+            crate::services::store_sync::adapter::StoreSyncAdapterConfig {
                 local_device_id: "test-dev".to_string(),
             },
             vec![],
