@@ -168,7 +168,7 @@ fn fast_mesh_config(device_id: &str, device_name: &str) -> MeshNodeConfig {
         device_id: device_id.to_string(),
         device_name: device_name.to_string(),
         device_type: "desktop".to_string(),
-        hostname_prefix: "truffle-test".to_string(),
+        hostname_prefix: "test".to_string(),
         prefer_primary: false,
         capabilities: vec![],
         metadata: None,
@@ -194,10 +194,20 @@ struct RuntimeNode {
 
 async fn spawn_runtime_node(name: &str) -> RuntimeNode {
     let sidecar_path = sidecar_binary_path();
-    let state_dir = shared_authed_state_dir(name);
+    // Use mesh-specific state dirs to avoid TLS cert conflicts with
+    // sidecar_lifecycle tests (which use different hostnames).
+    let state_dir = shared_authed_state_dir(&format!("mesh-{name}"));
 
+    // CRITICAL: device_id must be STABLE across runs because it's part of the
+    // Tailscale hostname ("test-desktop-{device_id}"). If it changes, the TLS
+    // cert (cached from the previous run) won't match and dials fail with:
+    //   "getCertPEM: invalid domain ... must be one of [old hostname]"
+    //
+    // Hostname prefix "test" is shared so the peer filter matches all test nodes.
+    let stable_device_id = format!("mesh-integ-{name}");
     let (runtime, _mesh_rx) = TruffleRuntime::builder()
-        .hostname("truffle-test")
+        .hostname("test")
+        .device_id(stable_device_id)
         .device_name(format!("Test Node {name}"))
         .state_dir(state_dir)
         .sidecar_path(sidecar_path)

@@ -46,7 +46,17 @@ pub struct PongMessage {
 
 /// Check if a JSON value is a heartbeat message (ping or pong).
 /// Returns true if the message was handled as a heartbeat.
+///
+/// Heartbeat messages are bare `{"type":"ping","timestamp":…}` or
+/// `{"type":"pong","timestamp":…,"echoTimestamp":…}` objects.  They never
+/// have a `"namespace"` field, which every `MeshEnvelope` does — so we
+/// require the absence of `"namespace"` to avoid falsely swallowing
+/// application envelopes whose `msg_type` happens to be `"ping"`.
 pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
+    // MeshEnvelopes always carry a "namespace" key; heartbeats never do.
+    if value.get("namespace").is_some() {
+        return false;
+    }
     value
         .get("type")
         .and_then(|t| t.as_str())
@@ -200,6 +210,18 @@ mod tests {
         assert!(!is_heartbeat_message(&serde_json::json!({"type": "announce"})));
         assert!(!is_heartbeat_message(&serde_json::json!({"foo": "bar"})));
         assert!(!is_heartbeat_message(&serde_json::json!(null)));
+
+        // MeshEnvelope with msg_type "ping" must NOT be treated as heartbeat
+        assert!(!is_heartbeat_message(&serde_json::json!({
+            "namespace": "test-ns",
+            "type": "ping",
+            "payload": {"msg": "hello"}
+        })));
+        assert!(!is_heartbeat_message(&serde_json::json!({
+            "namespace": "mesh",
+            "type": "pong",
+            "payload": {}
+        })));
     }
 
     #[test]
