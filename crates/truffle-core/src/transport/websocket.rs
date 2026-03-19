@@ -173,10 +173,12 @@ pub fn decode_frame(data: &[u8]) -> Result<DecodedFrame, WsError> {
                 }
             }
             // Fall back to v2 legacy decode
+            #[allow(deprecated)]
             decode_message(data).map(DecodedFrame::Legacy)
         }
         _ => {
             // v2 legacy frame
+            #[allow(deprecated)]
             decode_message(data).map(DecodedFrame::Legacy)
         }
     }
@@ -243,9 +245,10 @@ pub fn ws_config() -> WebSocketConfig {
     config
 }
 
-/// Encode a message for sending over WebSocket.
+/// Encode a message for sending over WebSocket (v2 legacy format).
 ///
 /// Uses 1-byte flags prefix: 0x00 = MessagePack, 0x02 = JSON.
+#[deprecated(note = "Use v3 encode_data_frame / decode_frame instead")]
 pub fn encode_message(value: &serde_json::Value, use_json: bool) -> Result<Vec<u8>, WsError> {
     if use_json {
         let json_bytes = serde_json::to_vec(value)?;
@@ -262,9 +265,10 @@ pub fn encode_message(value: &serde_json::Value, use_json: bool) -> Result<Vec<u
     }
 }
 
-/// Decode a binary WebSocket message.
+/// Decode a binary WebSocket message (v2 legacy format).
 ///
 /// Reads the 1-byte flags prefix to determine serialization format.
+#[deprecated(note = "Use v3 encode_data_frame / decode_frame instead")]
 pub fn decode_message(data: &[u8]) -> Result<WireMessage, WsError> {
     if data.is_empty() {
         return Err(WsError::EmptyBinaryFrame);
@@ -411,6 +415,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise both v2 legacy and v3 functions
 mod tests {
     use super::*;
     use crate::protocol::frame::{ControlMessage, ErrorCode, Flags, FrameType, ProtocolError};

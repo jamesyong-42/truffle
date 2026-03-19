@@ -1,6 +1,10 @@
 use napi_derive::napi;
 
 use truffle_core::mesh::node::{IncomingMeshMessage, MeshNodeEvent};
+use truffle_core::protocol::namespace::Namespace;
+use truffle_core::protocol::types::{
+    FileTransferMessageType, MeshMessageType, SyncMessageType,
+};
 use truffle_core::runtime::TruffleEvent;
 use truffle_core::types::{BaseDevice, DeviceRole, DeviceStatus};
 
@@ -139,14 +143,59 @@ impl From<BaseDevice> for NapiBaseDevice {
 
 impl From<&IncomingMeshMessage> for NapiIncomingMessage {
     fn from(m: &IncomingMeshMessage) -> Self {
+        let ns = normalize_namespace(&m.namespace);
+        let mt = normalize_msg_type(&ns, &m.msg_type);
         Self {
             from: m.from.clone(),
             connection_id: m.connection_id.clone(),
-            namespace: m.namespace.clone(),
-            msg_type: m.msg_type.clone(),
+            namespace: ns,
+            msg_type: mt,
             payload: m.payload.clone(),
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RFC 009 Phase 5: Namespace/message-type normalization to kebab-case
+//
+// The internal core layer may still use legacy naming (colon-separated or
+// SCREAMING_CASE). These helpers normalize to the canonical kebab-case form
+// before delivering to JS, so consumers always see the new convention.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Normalize a namespace string to its canonical kebab-case form.
+///
+/// Known namespaces are mapped via the `Namespace` enum. Unknown namespaces
+/// are passed through unchanged.
+fn normalize_namespace(ns: &str) -> String {
+    // Try deserializing as a Namespace enum (handles known values like "mesh",
+    // "sync", "file-transfer" as well as custom strings).
+    if let Ok(parsed) = serde_json::from_value::<Namespace>(serde_json::Value::String(ns.to_string())) {
+        parsed.as_str().to_string()
+    } else {
+        ns.to_string()
+    }
+}
+
+/// Normalize a message type string to its canonical kebab-case form.
+///
+/// Uses the `from_str` methods on the typed message enums which accept both
+/// legacy (colon-separated, SCREAMING_CASE) and new (kebab-case) forms.
+/// Unknown types are passed through unchanged.
+fn normalize_msg_type(namespace: &str, msg_type: &str) -> String {
+    // Try each namespace's message type enum to see if it matches
+    if let Some(t) = MeshMessageType::from_str(msg_type) {
+        return t.as_str().to_string();
+    }
+    if let Some(t) = SyncMessageType::from_str(msg_type) {
+        return t.as_str().to_string();
+    }
+    if let Some(t) = FileTransferMessageType::from_str(msg_type) {
+        return t.as_str().to_string();
+    }
+    // Unknown: namespace hint is available but we don't use it for now
+    let _ = namespace;
+    msg_type.to_string()
 }
 
 /// Convert a MeshNodeEvent into a NapiMeshEvent for delivery to JS.
@@ -211,15 +260,19 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
             device_id: id.clone(),
             payload: serde_json::Value::Null,
         },
-        MeshNodeEvent::Message(msg) => NapiMeshEvent {
-            event_type: "message".to_string(),
-            device_id: msg.from.clone(),
-            payload: serde_json::json!({
-                "connectionId": msg.connection_id,
-                "namespace": msg.namespace,
-                "type": msg.msg_type,
-                "payload": msg.payload,
-            }),
+        MeshNodeEvent::Message(msg) => {
+            let ns = normalize_namespace(&msg.namespace);
+            let mt = normalize_msg_type(&ns, &msg.msg_type);
+            NapiMeshEvent {
+                event_type: "message".to_string(),
+                device_id: msg.from.clone(),
+                payload: serde_json::json!({
+                    "connectionId": msg.connection_id,
+                    "namespace": ns,
+                    "type": mt,
+                    "payload": msg.payload,
+                }),
+            }
         },
         MeshNodeEvent::Error(err) => NapiMeshEvent {
             event_type: "error".to_string(),
@@ -341,15 +394,19 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiTruffleEvent {
             device_id: primary_id.clone(),
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::Message(msg) => NapiTruffleEvent {
-            event_type: "message".to_string(),
-            device_id: msg.from.clone(),
-            payload: serde_json::json!({
-                "connectionId": msg.connection_id,
-                "namespace": msg.namespace,
-                "type": msg.msg_type,
-                "payload": msg.payload,
-            }),
+        TruffleEvent::Message(msg) => {
+            let ns = normalize_namespace(&msg.namespace);
+            let mt = normalize_msg_type(&ns, &msg.msg_type);
+            NapiTruffleEvent {
+                event_type: "message".to_string(),
+                device_id: msg.from.clone(),
+                payload: serde_json::json!({
+                    "connectionId": msg.connection_id,
+                    "namespace": ns,
+                    "type": mt,
+                    "payload": msg.payload,
+                }),
+            }
         },
         TruffleEvent::Error(err) => NapiTruffleEvent {
             event_type: "error".to_string(),
@@ -485,6 +542,137 @@ mod tests {
             &e.event_type
         }
         assert_eq!(accepts_truffle_event(&event), "started");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // RFC 009 Phase 5: Namespace/message-type normalization tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn normalize_namespace_known_values() {
+        assert_eq!(normalize_namespace("mesh"), "mesh");
+        assert_eq!(normalize_namespace("sync"), "sync");
+        assert_eq!(normalize_namespace("file-transfer"), "file-transfer");
+    }
+
+    #[test]
+    fn normalize_namespace_custom_passthrough() {
+        assert_eq!(normalize_namespace("chat"), "chat");
+        assert_eq!(normalize_namespace("my-app"), "my-app");
+        assert_eq!(normalize_namespace("clipboard"), "clipboard");
+    }
+
+    #[test]
+    fn normalize_msg_type_mesh_kebab() {
+        assert_eq!(normalize_msg_type("mesh", "device-announce"), "device-announce");
+        assert_eq!(normalize_msg_type("mesh", "device-list"), "device-list");
+        assert_eq!(normalize_msg_type("mesh", "election-start"), "election-start");
+        assert_eq!(normalize_msg_type("mesh", "route-broadcast"), "route-broadcast");
+    }
+
+    #[test]
+    fn normalize_msg_type_mesh_legacy_colon() {
+        assert_eq!(normalize_msg_type("mesh", "device:announce"), "device-announce");
+        assert_eq!(normalize_msg_type("mesh", "device:list"), "device-list");
+        assert_eq!(normalize_msg_type("mesh", "election:start"), "election-start");
+        assert_eq!(normalize_msg_type("mesh", "route:broadcast"), "route-broadcast");
+    }
+
+    #[test]
+    fn normalize_msg_type_sync_legacy_colon() {
+        assert_eq!(normalize_msg_type("sync", "store:sync:full"), "sync-full");
+        assert_eq!(normalize_msg_type("sync", "store:sync:update"), "sync-update");
+        assert_eq!(normalize_msg_type("sync", "store:sync:request"), "sync-request");
+        assert_eq!(normalize_msg_type("sync", "store:sync:clear"), "sync-clear");
+    }
+
+    #[test]
+    fn normalize_msg_type_sync_kebab() {
+        assert_eq!(normalize_msg_type("sync", "sync-full"), "sync-full");
+        assert_eq!(normalize_msg_type("sync", "sync-update"), "sync-update");
+    }
+
+    #[test]
+    fn normalize_msg_type_file_transfer_legacy_screaming() {
+        assert_eq!(normalize_msg_type("file-transfer", "OFFER"), "file-offer");
+        assert_eq!(normalize_msg_type("file-transfer", "ACCEPT"), "file-accept");
+        assert_eq!(normalize_msg_type("file-transfer", "REJECT"), "file-reject");
+        assert_eq!(normalize_msg_type("file-transfer", "CANCEL"), "file-cancel");
+    }
+
+    #[test]
+    fn normalize_msg_type_file_transfer_kebab() {
+        assert_eq!(normalize_msg_type("file-transfer", "file-offer"), "file-offer");
+        assert_eq!(normalize_msg_type("file-transfer", "file-accept"), "file-accept");
+    }
+
+    #[test]
+    fn normalize_msg_type_unknown_passthrough() {
+        assert_eq!(normalize_msg_type("chat", "message"), "message");
+        assert_eq!(normalize_msg_type("mesh", "unknown-type"), "unknown-type");
+        assert_eq!(normalize_msg_type("custom", "anything"), "anything");
+    }
+
+    #[test]
+    fn truffle_event_message_uses_kebab_case_namespace() {
+        // Legacy colon-separated names should be normalized in the event payload
+        let msg = IncomingMeshMessage {
+            from: Some("dev-1".to_string()),
+            connection_id: "conn-1".to_string(),
+            namespace: "mesh".to_string(),
+            msg_type: "device:announce".to_string(),
+            payload: serde_json::json!({"device": {}}),
+        };
+        let event = TruffleEvent::Message(msg);
+        let napi = truffle_event_to_napi(&event);
+        assert_eq!(napi.event_type, "message");
+        let payload = &napi.payload;
+        assert_eq!(payload["namespace"], "mesh");
+        assert_eq!(payload["type"], "device-announce");
+    }
+
+    #[test]
+    fn truffle_event_message_normalizes_file_transfer_legacy() {
+        let msg = IncomingMeshMessage {
+            from: Some("dev-2".to_string()),
+            connection_id: "conn-2".to_string(),
+            namespace: "file-transfer".to_string(),
+            msg_type: "OFFER".to_string(),
+            payload: serde_json::json!({}),
+        };
+        let event = TruffleEvent::Message(msg);
+        let napi = truffle_event_to_napi(&event);
+        let payload = &napi.payload;
+        assert_eq!(payload["namespace"], "file-transfer");
+        assert_eq!(payload["type"], "file-offer");
+    }
+
+    #[test]
+    fn napi_incoming_message_normalizes() {
+        let msg = IncomingMeshMessage {
+            from: Some("dev-1".to_string()),
+            connection_id: "conn-1".to_string(),
+            namespace: "sync".to_string(),
+            msg_type: "store:sync:full".to_string(),
+            payload: serde_json::json!({}),
+        };
+        let napi: NapiIncomingMessage = (&msg).into();
+        assert_eq!(napi.namespace, "sync");
+        assert_eq!(napi.msg_type, "sync-full");
+    }
+
+    #[test]
+    fn napi_incoming_message_custom_namespace_passthrough() {
+        let msg = IncomingMeshMessage {
+            from: None,
+            connection_id: "conn-x".to_string(),
+            namespace: "chat".to_string(),
+            msg_type: "text".to_string(),
+            payload: serde_json::json!({"text": "hi"}),
+        };
+        let napi: NapiIncomingMessage = (&msg).into();
+        assert_eq!(napi.namespace, "chat");
+        assert_eq!(napi.msg_type, "text");
     }
 
     // ═══════════════════════════════════════════════════════════════════

@@ -59,6 +59,7 @@ pub struct PongMessage {
 /// have a `"namespace"` field, which every `MeshEnvelope` does -- so we
 /// require the absence of `"namespace"` to avoid falsely swallowing
 /// application envelopes whose `msg_type` happens to be `"ping"`.
+#[deprecated(note = "Use v3 ControlMessage::Ping/Pong with FrameType::Control discrimination")]
 pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
     // MeshEnvelopes always carry a "namespace" key; heartbeats never do.
     if value.get("namespace").is_some() {
@@ -75,6 +76,7 @@ pub fn is_heartbeat_message(value: &serde_json::Value) -> bool {
 ///
 /// Kept for backward compatibility. New code should use `create_v3_ping()`
 /// which returns a `ControlMessage`.
+#[deprecated(note = "Use create_v3_ping() which returns a ControlMessage")]
 pub fn create_ping() -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,6 +93,7 @@ pub fn create_ping() -> serde_json::Value {
 ///
 /// Kept for backward compatibility. New code should use `create_v3_pong()`
 /// which returns a `ControlMessage`.
+#[deprecated(note = "Use create_v3_pong() which returns a ControlMessage")]
 pub fn create_pong(ping_timestamp: u64) -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -227,6 +230,7 @@ pub async fn heartbeat_loop(
 pub struct HeartbeatTimeout;
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise both v2 legacy and v3 heartbeat functions
 mod tests {
     use super::*;
 

@@ -11,7 +11,7 @@ use truffle_core::mesh::message_bus::MeshMessageBus;
 use truffle_core::mesh::node::{MeshNodeConfig, MeshTimingConfig};
 use truffle_core::protocol::envelope::MeshEnvelope;
 use truffle_core::runtime::{RuntimeConfig, TruffleEvent, TruffleRuntime};
-use truffle_core::transport::connection::TransportConfig;
+use truffle_core::transport::connection::{TransportConfig, PROTOCOL_V3};
 
 use crate::types::{
     napi_peer_to_core, truffle_event_to_napi, NapiBaseDevice,
@@ -226,6 +226,16 @@ impl NapiMeshNode {
     #[napi]
     pub async fn auth_url(&self) -> Result<Option<String>> {
         Ok(self.runtime.mesh_node().auth_url().await)
+    }
+
+    /// Get the protocol version supported by this node.
+    ///
+    /// Returns the maximum protocol version this node speaks (currently 3,
+    /// the RFC 009 wire format). Use this to check compatibility with peers
+    /// or to display version info in a UI.
+    #[napi]
+    pub fn protocol_version(&self) -> u32 {
+        PROTOCOL_V3 as u32
     }
 
     /// Get the message bus for namespace-based pub/sub.

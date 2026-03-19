@@ -1,6 +1,6 @@
 # RFC 009: Wire Protocol Redesign
 
-**Status**: Proposed
+**Status**: Implemented (2026-03-19)
 **Created**: 2026-03-19
 **Depends on**: RFC 003 (Rust Rewrite), RFC 005 (Refactor), RFC 008 (Vision)
 **Supersedes**: Wire protocol defined in RFC 008 Appendix C (Mesh Envelope section)

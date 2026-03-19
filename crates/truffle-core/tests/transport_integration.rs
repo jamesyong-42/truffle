@@ -37,6 +37,8 @@
 //! cargo test --test transport_integration -- --ignored --test-threads=1 --nocapture
 //! ```
 
+#![allow(deprecated)] // Integration tests exercise v2 legacy paths for backward compat verification
+
 use std::path::PathBuf;
 use std::sync::Once;
 use std::time::Duration;

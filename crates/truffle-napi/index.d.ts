@@ -57,12 +57,17 @@ export declare class NapiFileTransferAdapter {
 }
 
 /**
- * NapiMeshNode - Node.js wrapper for truffle-core MeshNode.
+ * NapiMeshNode - Node.js wrapper for TruffleRuntime.
  *
  * Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
- * and MeshNode. The sidecar provides Tailscale connectivity; the bridge routes
- * TCP streams; the connection manager upgrades them to WebSocket; and the mesh
- * node handles device discovery, election, and messaging.
+ * and MeshNode via the unified TruffleRuntime. The sidecar provides Tailscale
+ * connectivity; the bridge routes TCP streams; the connection manager upgrades
+ * them to WebSocket; and the mesh node handles device discovery, election,
+ * and messaging.
+ *
+ * ## RFC 009 Phase 5
+ * Message events normalize namespace and message type strings to kebab-case.
+ * Protocol version info is exposed via `protocolVersion()`.
  */
 export declare class NapiMeshNode {
   /**
@@ -108,6 +113,14 @@ export declare class NapiMeshNode {
   authStatus(): Promise<string>
   /** Get the current auth URL, if auth is required. */
   authUrl(): Promise<string | null>
+  /**
+   * Get the protocol version supported by this node.
+   *
+   * Returns the maximum protocol version this node speaks (currently 3,
+   * the RFC 009 wire format). Use this to check compatibility with peers
+   * or to display version info in a UI.
+   */
+  protocolVersion(): number
   /** Get the message bus for namespace-based pub/sub. */
   messageBus(): NapiMessageBus
   /** Handle tailnet peers update from the sidecar. */
@@ -300,6 +313,10 @@ export interface NapiMeshNodeConfig {
   staticPath?: string
   capabilities?: Array<string>
   timing?: NapiMeshTimingConfig
+  /** If true, the node is ephemeral (cleaned up when offline). */
+  ephemeral?: boolean
+  /** ACL tags to advertise (e.g. ["tag:truffle"]). */
+  tags?: Array<string>
 }
 
 /** Timing configuration for the mesh. */
@@ -331,4 +348,9 @@ export interface NapiTailnetPeer {
   tailscaleIps: Array<string>
   online: boolean
   os?: string
+  curAddr?: string
+  relay?: string
+  lastSeen?: string
+  keyExpiry?: string
+  expired?: boolean
 }

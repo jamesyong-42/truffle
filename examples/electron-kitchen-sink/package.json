@@ -1,0 +1,15 @@
+{
+  "name": "@vibecook/example-electron-kitchen-sink",
+  "private": true,
+  "version": "0.0.1",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@vibecook/truffle-native": "workspace:*"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}

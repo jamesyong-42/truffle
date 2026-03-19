@@ -51,6 +51,7 @@
 <div class="header">
   <h1>Truffle Kitchen Sink</h1>
   <span id="nodeStatus" class="status off">Not Created</span>
+  <span id="protoVersion" style="font-size:11px; color:#888; margin-left:auto;"></span>
   <button id="btnCreate" onclick="createNode()">Create Node</button>
   <button id="btnStart" onclick="startNode()" disabled>Start</button>
   <button id="btnStop" onclick="stopNode()" disabled>Stop</button>
@@ -255,6 +256,11 @@ async function createNode() {
     document.getElementById('nodeStatus').className = 'status on';
     document.getElementById('btnCreate').disabled = true;
     document.getElementById('btnStart').disabled = false;
+    // Display protocol version
+    const ver = await window.truffle.meshProtocolVersion();
+    if (ver != null) {
+      document.getElementById('protoVersion').textContent = `Protocol v${ver}`;
+    }
   } else {
     alert('Failed: ' + result.error);
   }

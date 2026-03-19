@@ -31,8 +31,14 @@ pub enum MeshMessageType {
 impl MeshMessageType {
     /// Parse a message type string, accepting both new kebab-case and legacy
     /// colon-separated forms.
+    ///
+    /// The legacy colon-separated aliases (e.g. `"device:announce"`) exist for
+    /// backward compatibility with v2 nodes and are intentionally kept. They
+    /// are cheap (compile-time match arms) and aid migration. They may be
+    /// removed in a future major version once all nodes run v3 exclusively.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            // Canonical kebab-case (v3) | Legacy colon-separated (v2 compat)
             "device-announce" | "device:announce" => Some(Self::DeviceAnnounce),
             "device-list" | "device:list" => Some(Self::DeviceList),
             "device-goodbye" | "device:goodbye" => Some(Self::DeviceGoodbye),
@@ -86,8 +92,14 @@ pub enum SyncMessageType {
 impl SyncMessageType {
     /// Parse a message type string, accepting both new kebab-case and legacy
     /// colon-separated forms.
+    ///
+    /// The legacy colon-separated aliases (e.g. `"store:sync:full"`) exist for
+    /// backward compatibility with v2 nodes and are intentionally kept. They
+    /// are cheap (compile-time match arms) and aid migration. They may be
+    /// removed in a future major version once all nodes run v3 exclusively.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            // Canonical kebab-case (v3) | Legacy colon-separated (v2 compat)
             "sync-full" | "store:sync:full" => Some(Self::SyncFull),
             "sync-update" | "store:sync:update" => Some(Self::SyncUpdate),
             "sync-request" | "store:sync:request" => Some(Self::SyncRequest),
@@ -133,8 +145,14 @@ pub enum FileTransferMessageType {
 impl FileTransferMessageType {
     /// Parse a message type string, accepting both new kebab-case and legacy
     /// SCREAMING_CASE forms.
+    ///
+    /// The legacy SCREAMING_CASE aliases (e.g. `"OFFER"`) exist for backward
+    /// compatibility with v2 nodes and are intentionally kept. They are cheap
+    /// (compile-time match arms) and aid migration. They may be removed in a
+    /// future major version once all nodes run v3 exclusively.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
+            // Canonical kebab-case (v3) | Legacy SCREAMING_CASE (v2 compat)
             "file-offer" | "OFFER" => Some(Self::FileOffer),
             "file-accept" | "ACCEPT" => Some(Self::FileAccept),
             "file-reject" | "REJECT" => Some(Self::FileReject),

@@ -487,7 +487,10 @@ impl ConnectionManager {
 
                         // --- v2 legacy frames ---
                         DecodedFrame::Legacy(msg) => {
+                            tracing::warn!("Received legacy v2 frame — peer should upgrade to v3");
+
                             // Check for v2 heartbeat using content inspection
+                            #[allow(deprecated)]
                             if heartbeat::is_heartbeat_message(&msg.payload) {
                                 if let Some(ts) =
                                     msg.payload.get("timestamp").and_then(|v| v.as_u64())
@@ -583,6 +586,7 @@ impl ConnectionManager {
             websocket::encode_data_frame(value, use_json)?
         } else {
             // v2 peer: use 1-byte flags legacy format
+            #[allow(deprecated)]
             websocket::encode_message(value, use_json)?
         };
 
@@ -721,6 +725,7 @@ impl crate::bridge::manager::BridgeHandler for WsOutgoingHandler {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests exercise v2 legacy encode/decode for backward compat verification
 mod tests {
     use super::*;
 
