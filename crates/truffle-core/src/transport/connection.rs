@@ -630,4 +630,762 @@ mod tests {
 
         server_handle.abort();
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Helpers for WebSocket-over-duplex testing
+    // ═══════════════════════════════════════════════════════════════════════
+
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    /// Build a TransportConfig with a very long heartbeat timeout so heartbeat
+    /// does not interfere with short-lived test connections.
+    fn test_config() -> TransportConfig {
+        TransportConfig {
+            heartbeat: HeartbeatConfig {
+                ping_interval: Duration::from_secs(600),
+                timeout: Duration::from_secs(600),
+            },
+            auto_reconnect: false,
+            max_reconnect_delay: Duration::from_secs(1),
+            debug_json_mode: false,
+        }
+    }
+
+    /// Create a duplex-backed WebSocket pair (server, client).
+    ///
+    /// Returns `(server_ws, client_ws)` where both sides are `WebSocketStream`
+    /// over `DuplexStream`. The server side can be fed to `handle_ws_stream`,
+    /// and the client side can send/receive messages for assertions.
+    async fn duplex_ws_pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(16384);
+        let server_fut = WebSocketStream::from_raw_socket(server_io, Role::Server, None);
+        let client_fut = WebSocketStream::from_raw_socket(client_io, Role::Client, None);
+        // Both must be driven concurrently (from_raw_socket may exchange frames)
+        let (server_ws, client_ws) = tokio::join!(server_fut, client_fut);
+        (server_ws, client_ws)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Connection lifecycle tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_handle_ws_stream_emits_connected_event_incoming() {
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:9999".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // The Connected event should have been emitted synchronously in
+        // setup_connection before the spawned tasks, so it's already in the
+        // channel.
+        match rx.try_recv() {
+            Ok(TransportEvent::Connected(conn)) => {
+                assert_eq!(conn.remote_addr, "100.64.0.2:9999");
+                assert_eq!(conn.remote_dns_name, "peer.ts.net");
+                assert_eq!(conn.direction, Direction::Incoming);
+                assert_eq!(conn.status, ConnectionStatus::Connected);
+                assert!(conn.device_id.is_none());
+                assert!(conn.id.starts_with("incoming:"));
+            }
+            other => panic!("expected Connected event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_ws_stream_emits_connected_event_outgoing() {
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.3:8080".into(),
+                "other.ts.net".into(),
+                Direction::Outgoing,
+            )
+            .await;
+
+        match rx.try_recv() {
+            Ok(TransportEvent::Connected(conn)) => {
+                assert_eq!(conn.remote_addr, "100.64.0.3:8080");
+                assert_eq!(conn.direction, Direction::Outgoing);
+                assert!(conn.id.starts_with("dial:"));
+            }
+            other => panic!("expected Connected event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_device_id_emits_identified_event() {
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:9999".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Consume the Connected event
+        let _ = rx.recv().await.unwrap();
+
+        let conn_id = "incoming:100.64.0.2:9999".to_string();
+        manager.set_device_id(&conn_id, "device-abc".into()).await;
+
+        match rx.try_recv() {
+            Ok(TransportEvent::DeviceIdentified {
+                connection_id,
+                device_id,
+            }) => {
+                assert_eq!(connection_id, conn_id);
+                assert_eq!(device_id, "device-abc");
+            }
+            other => panic!("expected DeviceIdentified event, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_device_id_updates_index() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:9999".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:9999";
+        manager
+            .set_device_id(conn_id, "device-xyz".into())
+            .await;
+
+        // Lookup by device_id should return the connection
+        let found = manager.get_connection_by_device("device-xyz").await;
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.id, conn_id);
+        assert_eq!(found.device_id.as_deref(), Some("device-xyz"));
+
+        // Lookup by a non-existent device_id returns None
+        let missing = manager.get_connection_by_device("no-such-device").await;
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_device_id_replaces_old_device_id() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:9999".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:9999";
+
+        // Set initial device_id
+        manager.set_device_id(conn_id, "old-device".into()).await;
+        assert!(manager.get_connection_by_device("old-device").await.is_some());
+
+        // Replace with new device_id
+        manager.set_device_id(conn_id, "new-device".into()).await;
+
+        // Old device_id should no longer resolve
+        assert!(manager.get_connection_by_device("old-device").await.is_none());
+        // New device_id should resolve
+        let found = manager.get_connection_by_device("new-device").await.unwrap();
+        assert_eq!(found.id, conn_id);
+        assert_eq!(found.device_id.as_deref(), Some("new-device"));
+    }
+
+    #[tokio::test]
+    async fn test_disconnect_emits_disconnected_event() {
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:9999".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Consume the Connected event
+        let _ = rx.recv().await.unwrap();
+
+        // Drop the client side to trigger a disconnect in the read pump
+        drop(client_ws);
+
+        // The spawned lifecycle task should detect the closed stream and
+        // emit a Disconnected event.
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for Disconnected event")
+            .expect("channel closed unexpectedly");
+
+        match event {
+            TransportEvent::Disconnected {
+                connection_id,
+                reason,
+            } => {
+                assert_eq!(connection_id, "incoming:100.64.0.2:9999");
+                // The reason should indicate the remote closed
+                assert!(
+                    reason.contains("remote_closed") || reason.contains("error"),
+                    "unexpected reason: {}",
+                    reason,
+                );
+            }
+            other => panic!("expected Disconnected event, got {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Generic handle_ws_stream tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_handle_ws_stream_accepts_duplex_io() {
+        // Verifies the generic method works with DuplexStream (not TcpStream).
+        // This is the RFC 007 generification: any AsyncRead+AsyncWrite works.
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        // This call must compile and succeed — that is the test.
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "127.0.0.1:1234".into(),
+                "mock.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conns = manager.get_connections().await;
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].remote_addr, "127.0.0.1:1234");
+    }
+
+    #[tokio::test]
+    async fn test_handle_ws_stream_connection_registered() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        // Before: no connections
+        assert!(manager.get_connections().await.is_empty());
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "10.0.0.1:5555".into(),
+                "node.ts.net".into(),
+                Direction::Outgoing,
+            )
+            .await;
+
+        // After: one connection present
+        let conns = manager.get_connections().await;
+        assert_eq!(conns.len(), 1);
+        let conn = &conns[0];
+        assert_eq!(conn.id, "dial:10.0.0.1:5555");
+        assert_eq!(conn.remote_addr, "10.0.0.1:5555");
+        assert_eq!(conn.remote_dns_name, "node.ts.net");
+        assert_eq!(conn.direction, Direction::Outgoing);
+        assert_eq!(conn.status, ConnectionStatus::Connected);
+        assert!(conn.device_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_handle_ws_stream_message_forwarded() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.5:7777".into(),
+                "sender.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Consume the Connected event
+        let _ = rx.recv().await.unwrap();
+
+        // Send a non-heartbeat message from the client side
+        let payload = serde_json::json!({"namespace": "mesh", "type": "announce", "data": "hello"});
+        let encoded = websocket::encode_message(&payload, false).unwrap();
+        client_ws
+            .send(Message::Binary(bytes::Bytes::from(encoded)))
+            .await
+            .unwrap();
+
+        // Should receive a TransportEvent::Message
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for Message event")
+            .expect("channel closed");
+
+        match event {
+            TransportEvent::Message {
+                connection_id,
+                message,
+            } => {
+                assert_eq!(connection_id, "incoming:100.64.0.5:7777");
+                assert_eq!(
+                    message.payload.get("type").unwrap().as_str().unwrap(),
+                    "announce"
+                );
+                assert_eq!(
+                    message.payload.get("data").unwrap().as_str().unwrap(),
+                    "hello"
+                );
+            }
+            other => panic!("expected Message event, got {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Multiple connections tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_multiple_connections_tracked() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        // Add 3 connections with different addresses
+        let mut _clients = Vec::new();
+        for i in 0..3 {
+            let (server_ws, client_ws) = duplex_ws_pair().await;
+            _clients.push(client_ws); // keep alive
+            manager
+                .handle_ws_stream(
+                    server_ws,
+                    format!("100.64.0.{}:9999", i + 1),
+                    format!("node{}.ts.net", i + 1),
+                    Direction::Incoming,
+                )
+                .await;
+        }
+
+        let conns = manager.get_connections().await;
+        assert_eq!(conns.len(), 3);
+
+        // Verify all three distinct addresses are present
+        let addrs: Vec<&str> = conns.iter().map(|c| c.remote_addr.as_str()).collect();
+        assert!(addrs.contains(&"100.64.0.1:9999"));
+        assert!(addrs.contains(&"100.64.0.2:9999"));
+        assert!(addrs.contains(&"100.64.0.3:9999"));
+    }
+
+    #[tokio::test]
+    async fn test_get_connection_by_device_returns_correct() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        // Two connections, each assigned a different device_id
+        let (ws1, _c1) = duplex_ws_pair().await;
+        let (ws2, _c2) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                ws1,
+                "100.64.0.10:443".into(),
+                "alpha.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+        manager
+            .handle_ws_stream(
+                ws2,
+                "100.64.0.20:443".into(),
+                "beta.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        manager
+            .set_device_id("incoming:100.64.0.10:443", "device-alpha".into())
+            .await;
+        manager
+            .set_device_id("incoming:100.64.0.20:443", "device-beta".into())
+            .await;
+
+        let alpha = manager
+            .get_connection_by_device("device-alpha")
+            .await
+            .unwrap();
+        assert_eq!(alpha.remote_addr, "100.64.0.10:443");
+        assert_eq!(alpha.device_id.as_deref(), Some("device-alpha"));
+
+        let beta = manager
+            .get_connection_by_device("device-beta")
+            .await
+            .unwrap();
+        assert_eq!(beta.remote_addr, "100.64.0.20:443");
+        assert_eq!(beta.device_id.as_deref(), Some("device-beta"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Cleanup tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_close_all_disconnects_everything() {
+        let (manager, mut rx) = ConnectionManager::new(test_config());
+
+        let mut _clients = Vec::new();
+        for i in 0..3 {
+            let (server_ws, client_ws) = duplex_ws_pair().await;
+            _clients.push(client_ws);
+            manager
+                .handle_ws_stream(
+                    server_ws,
+                    format!("100.64.0.{}:443", i + 1),
+                    format!("n{}.ts.net", i + 1),
+                    Direction::Incoming,
+                )
+                .await;
+        }
+
+        // Drain the 3 Connected events
+        for _ in 0..3 {
+            let _ = rx.recv().await.unwrap();
+        }
+
+        assert_eq!(manager.get_connections().await.len(), 3);
+
+        manager.close_all().await;
+
+        // After close_all, get_connections should be empty
+        assert!(manager.get_connections().await.is_empty());
+
+        // Should have received 3 Disconnected events
+        let mut disconnected_ids = Vec::new();
+        for _ in 0..3 {
+            match rx.try_recv() {
+                Ok(TransportEvent::Disconnected {
+                    connection_id,
+                    reason,
+                }) => {
+                    assert_eq!(reason, "closed_by_local");
+                    disconnected_ids.push(connection_id);
+                }
+                other => panic!("expected Disconnected event, got {:?}", other),
+            }
+        }
+
+        assert_eq!(disconnected_ids.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_close_connection_removes_device_index() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+        manager.set_device_id(conn_id, "device-123".into()).await;
+
+        // Verify device lookup works
+        assert!(manager.get_connection_by_device("device-123").await.is_some());
+
+        // Close the connection
+        manager.close_connection(conn_id).await;
+
+        // Device lookup should now return None
+        assert!(manager.get_connection_by_device("device-123").await.is_none());
+
+        // Connection should be gone
+        assert!(manager.get_connection(conn_id).await.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Transport event subscription tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_subscribe_receives_all_events() {
+        let (manager, _initial_rx) = ConnectionManager::new(test_config());
+
+        // Subscribe after creation
+        let mut sub = manager.subscribe();
+
+        // Generate a Connected event
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Generate a DeviceIdentified event
+        let conn_id = "incoming:100.64.0.2:443";
+        manager.set_device_id(conn_id, "dev-1".into()).await;
+
+        // Generate a Disconnected event (via close_connection)
+        manager.close_connection(conn_id).await;
+
+        // Verify the subscriber received all three events in order
+        let ev1 = sub.recv().await.unwrap();
+        assert!(matches!(ev1, TransportEvent::Connected(_)));
+
+        let ev2 = sub.recv().await.unwrap();
+        assert!(matches!(
+            ev2,
+            TransportEvent::DeviceIdentified { .. }
+        ));
+
+        let ev3 = sub.recv().await.unwrap();
+        assert!(matches!(
+            ev3,
+            TransportEvent::Disconnected { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_subscribers_receive_events() {
+        let (manager, _initial_rx) = ConnectionManager::new(test_config());
+
+        let mut sub1 = manager.subscribe();
+        let mut sub2 = manager.subscribe();
+
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        // Both subscribers should receive the Connected event
+        let ev1 = sub1.recv().await.unwrap();
+        let ev2 = sub2.recv().await.unwrap();
+
+        assert!(matches!(ev1, TransportEvent::Connected(_)));
+        assert!(matches!(ev2, TransportEvent::Connected(_)));
+
+        // Verify both got the same connection info
+        if let (
+            TransportEvent::Connected(c1),
+            TransportEvent::Connected(c2),
+        ) = (ev1, ev2)
+        {
+            assert_eq!(c1.id, c2.id);
+            assert_eq!(c1.remote_addr, c2.remote_addr);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Connection lookup / filtering tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_get_connection_by_id() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn = manager
+            .get_connection("incoming:100.64.0.2:443")
+            .await;
+        assert!(conn.is_some());
+        let conn = conn.unwrap();
+        assert_eq!(conn.remote_dns_name, "peer.ts.net");
+
+        // Non-existent ID
+        let missing = manager.get_connection("no-such-id").await;
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_connections_mixed_directions() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        let (ws_in, _c1) = duplex_ws_pair().await;
+        let (ws_out, _c2) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                ws_in,
+                "100.64.0.2:443".into(),
+                "incoming-peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+        manager
+            .handle_ws_stream(
+                ws_out,
+                "100.64.0.3:443".into(),
+                "outgoing-peer.ts.net".into(),
+                Direction::Outgoing,
+            )
+            .await;
+
+        let conns = manager.get_connections().await;
+        assert_eq!(conns.len(), 2);
+
+        let incoming: Vec<_> = conns
+            .iter()
+            .filter(|c| c.direction == Direction::Incoming)
+            .collect();
+        let outgoing: Vec<_> = conns
+            .iter()
+            .filter(|c| c.direction == Direction::Outgoing)
+            .collect();
+
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(incoming[0].remote_dns_name, "incoming-peer.ts.net");
+        assert_eq!(outgoing[0].remote_dns_name, "outgoing-peer.ts.net");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Send tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_send_to_nonexistent_connection_returns_error() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+
+        let result = manager
+            .send("no-such-connection", &serde_json::json!({"type": "test"}))
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), WsError::Closed));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_received_by_client() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, mut client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "100.64.0.2:443".into(),
+                "peer.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conn_id = "incoming:100.64.0.2:443";
+
+        // Send a message through the connection manager
+        let msg = serde_json::json!({"namespace": "mesh", "type": "state", "value": 42});
+        manager.send(conn_id, &msg).await.unwrap();
+
+        // Client should receive it as a binary frame
+        let received = tokio::time::timeout(Duration::from_secs(5), client_ws.next())
+            .await
+            .expect("timed out waiting for message")
+            .expect("stream ended")
+            .expect("ws error");
+
+        match received {
+            Message::Binary(data) => {
+                let decoded = websocket::decode_message(&data).unwrap();
+                assert_eq!(
+                    decoded.payload.get("type").unwrap().as_str().unwrap(),
+                    "state"
+                );
+                assert_eq!(
+                    decoded.payload.get("value").unwrap().as_i64().unwrap(),
+                    42
+                );
+            }
+            other => panic!("expected binary message, got {:?}", other),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Connection ID format tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_connection_id_format_incoming() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "192.168.1.100:12345".into(),
+                "host.ts.net".into(),
+                Direction::Incoming,
+            )
+            .await;
+
+        let conns = manager.get_connections().await;
+        assert_eq!(conns[0].id, "incoming:192.168.1.100:12345");
+    }
+
+    #[tokio::test]
+    async fn test_connection_id_format_outgoing() {
+        let (manager, _rx) = ConnectionManager::new(test_config());
+        let (server_ws, _client_ws) = duplex_ws_pair().await;
+
+        manager
+            .handle_ws_stream(
+                server_ws,
+                "10.0.0.1:443".into(),
+                "remote.ts.net".into(),
+                Direction::Outgoing,
+            )
+            .await;
+
+        let conns = manager.get_connections().await;
+        assert_eq!(conns[0].id, "dial:10.0.0.1:443");
+    }
 }

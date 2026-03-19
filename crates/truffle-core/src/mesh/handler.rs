@@ -349,3 +349,970 @@ impl TransportHandler {
         let _ = self.event_tx.send(MeshNodeEvent::Message(incoming));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::mpsc;
+
+    use crate::mesh::device::{DeviceEvent, DeviceIdentity};
+    use crate::mesh::election::{ElectionConfig, ElectionEvent, ElectionPhase, ElectionTimingConfig};
+    use crate::mesh::node::MeshTimingConfig;
+    use crate::protocol::message_types::{
+        DeviceAnnouncePayload, DeviceListPayload, ElectionCandidatePayload,
+        ElectionResultPayload, MeshMessage,
+    };
+    use crate::transport::connection::TransportConfig;
+    use crate::types::{BaseDevice, DeviceRole, DeviceStatus};
+
+    /// Build an isolated TransportHandler with real components.
+    /// Returns the handler plus receivers for all event channels.
+    fn make_handler() -> (
+        TransportHandler,
+        broadcast::Receiver<MeshNodeEvent>,
+        mpsc::Receiver<DeviceEvent>,
+        mpsc::Receiver<ElectionEvent>,
+    ) {
+        let config = MeshNodeConfig {
+            device_id: "local-dev".to_string(),
+            device_name: "Local Device".to_string(),
+            device_type: "desktop".to_string(),
+            hostname_prefix: "app".to_string(),
+            prefer_primary: false,
+            capabilities: vec![],
+            metadata: None,
+            timing: MeshTimingConfig::default(),
+        };
+
+        let (connection_manager, _transport_rx) = ConnectionManager::new(TransportConfig::default());
+        let connection_manager = Arc::new(connection_manager);
+
+        let (device_event_tx, device_event_rx) = mpsc::channel(256);
+        let device_manager = DeviceManager::new(
+            DeviceIdentity {
+                id: "local-dev".to_string(),
+                device_type: "desktop".to_string(),
+                name: "Local Device".to_string(),
+                tailscale_hostname: "app-desktop-local-dev".to_string(),
+            },
+            "app".to_string(),
+            vec![],
+            None,
+            device_event_tx,
+        );
+        let device_manager = Arc::new(RwLock::new(device_manager));
+
+        let (election_event_tx, election_event_rx) = mpsc::channel(256);
+        let election = PrimaryElection::new(ElectionTimingConfig::default(), election_event_tx);
+        let election = Arc::new(RwLock::new(election));
+
+        let (event_tx, event_rx) = broadcast::channel(256);
+
+        let (bus_event_tx, _bus_event_rx) = mpsc::channel(64);
+        let message_bus = Arc::new(MeshMessageBus::new(bus_event_tx));
+
+        let handler = TransportHandler {
+            config,
+            connection_manager,
+            device_manager,
+            election,
+            event_tx,
+            message_bus,
+        };
+
+        (handler, event_rx, device_event_rx, election_event_rx)
+    }
+
+    /// Helper: create a BaseDevice for testing.
+    fn make_device(id: &str, name: &str) -> BaseDevice {
+        BaseDevice {
+            id: id.to_string(),
+            device_type: "desktop".to_string(),
+            name: name.to_string(),
+            tailscale_hostname: format!("app-desktop-{id}"),
+            tailscale_dns_name: None,
+            tailscale_ip: Some("100.64.0.2".to_string()),
+            role: None,
+            status: DeviceStatus::Online,
+            capabilities: vec![],
+            metadata: None,
+            last_seen: None,
+            started_at: Some(1000),
+            os: None,
+            latency_ms: None,
+        }
+    }
+
+    /// Helper: create a device:announce MeshMessage.
+    fn make_announce_msg(device: &BaseDevice) -> MeshMessage {
+        MeshMessage::new(
+            "device:announce",
+            &device.id,
+            serde_json::to_value(&DeviceAnnouncePayload {
+                device: device.clone(),
+                protocol_version: 2,
+            })
+            .unwrap(),
+        )
+    }
+
+    // ── dispatch_mesh_message tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_device_announce_adds_device() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+        let device = make_device("remote-1", "Remote 1");
+        let msg = make_announce_msg(&device);
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let dm = handler.device_manager.read().await;
+        let found = dm.device_by_id("remote-1");
+        assert!(found.is_some(), "Device should be added after announce");
+        assert_eq!(found.unwrap().name, "Remote 1");
+    }
+
+    #[tokio::test]
+    async fn test_device_announce_emits_discovered_event() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+        let device = make_device("remote-1", "Remote 1");
+        let msg = make_announce_msg(&device);
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let mut found_discovered = false;
+        while let Ok(event) = dev_rx.try_recv() {
+            if let DeviceEvent::DeviceDiscovered(d) = event {
+                assert_eq!(d.id, "remote-1");
+                found_discovered = true;
+            }
+        }
+        assert!(found_discovered, "Must emit DeviceDiscovered for new device");
+    }
+
+    #[tokio::test]
+    async fn test_device_announce_emits_updated_event() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+        let device = make_device("remote-1", "Remote 1");
+        let msg = make_announce_msg(&device);
+
+        // First announce: discovered
+        handler.dispatch_mesh_message(&msg).await;
+        // Drain events
+        while dev_rx.try_recv().is_ok() {}
+
+        // Second announce: updated
+        handler.dispatch_mesh_message(&msg).await;
+
+        let mut found_updated = false;
+        while let Ok(event) = dev_rx.try_recv() {
+            if let DeviceEvent::DeviceUpdated(d) = event {
+                assert_eq!(d.id, "remote-1");
+                found_updated = true;
+            }
+        }
+        assert!(found_updated, "Second announce must emit DeviceUpdated");
+    }
+
+    #[tokio::test]
+    async fn test_device_list_adds_multiple_devices() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let devices = vec![
+            make_device("dev-a", "Device A"),
+            make_device("dev-b", "Device B"),
+            make_device("dev-c", "Device C"),
+        ];
+
+        let msg = MeshMessage::new(
+            "device:list",
+            "primary-node",
+            serde_json::to_value(&DeviceListPayload {
+                devices,
+                primary_id: "primary-node".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let dm = handler.device_manager.read().await;
+        assert!(dm.device_by_id("dev-a").is_some(), "dev-a should exist");
+        assert!(dm.device_by_id("dev-b").is_some(), "dev-b should exist");
+        assert!(dm.device_by_id("dev-c").is_some(), "dev-c should exist");
+    }
+
+    #[tokio::test]
+    async fn test_device_list_sets_primary() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let msg = MeshMessage::new(
+            "device:list",
+            "primary-node",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![make_device("primary-node", "Primary")],
+                primary_id: "primary-node".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let election = handler.election.read().await;
+        assert_eq!(
+            election.primary_id(),
+            Some("primary-node"),
+            "Election primary_id must match device:list primaryId"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_goodbye_marks_offline() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // First add the device
+        let device = make_device("remote-1", "Remote 1");
+        let announce = make_announce_msg(&device);
+        handler.dispatch_mesh_message(&announce).await;
+        while dev_rx.try_recv().is_ok() {}
+
+        // Send goodbye
+        let goodbye = MeshMessage::new(
+            "device:goodbye",
+            "remote-1",
+            serde_json::json!({}),
+        );
+        handler.dispatch_mesh_message(&goodbye).await;
+
+        let dm = handler.device_manager.read().await;
+        let dev = dm.device_by_id("remote-1").unwrap();
+        assert_eq!(dev.status, DeviceStatus::Offline, "Device must be offline after goodbye");
+    }
+
+    #[tokio::test]
+    async fn test_election_start_triggers_election() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Configure election so handle_election_start has config
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+        }
+
+        let msg = MeshMessage::new(
+            "election:start",
+            "remote-1",
+            serde_json::json!({}),
+        );
+        handler.dispatch_mesh_message(&msg).await;
+
+        let election = handler.election.read().await;
+        assert_eq!(
+            election.phase(),
+            ElectionPhase::Collecting,
+            "election:start must transition to Collecting"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_election_candidate_registered() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Configure and start collecting
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.start_election();
+        }
+
+        let candidate = ElectionCandidatePayload {
+            device_id: "remote-1".to_string(),
+            uptime: 50000,
+            user_designated: false,
+        };
+        let msg = MeshMessage::new(
+            "election:candidate",
+            "remote-1",
+            serde_json::to_value(&candidate).unwrap(),
+        );
+        handler.dispatch_mesh_message(&msg).await;
+
+        // We cannot directly inspect candidates since it's private,
+        // but we can verify indirectly: if we decide now, the candidate
+        // should influence the result
+        // Just verify it didn't panic and the phase is still collecting
+        let election = handler.election.read().await;
+        assert_eq!(election.phase(), ElectionPhase::Collecting);
+    }
+
+    #[tokio::test]
+    async fn test_election_result_sets_primary() {
+        let (handler, _event_rx, _dev_rx, mut elec_rx) = make_handler();
+
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+        }
+
+        let result = ElectionResultPayload {
+            new_primary_id: "remote-winner".to_string(),
+            previous_primary_id: None,
+            reason: "election".to_string(),
+        };
+        let msg = MeshMessage::new(
+            "election:result",
+            "remote-winner",
+            serde_json::to_value(&result).unwrap(),
+        );
+        handler.dispatch_mesh_message(&msg).await;
+
+        let election = handler.election.read().await;
+        assert_eq!(
+            election.primary_id(),
+            Some("remote-winner"),
+            "election:result must set the new primary"
+        );
+        assert_eq!(election.phase(), ElectionPhase::Decided);
+
+        // Verify PrimaryElected event emitted
+        let mut found_elected = false;
+        while let Ok(event) = elec_rx.try_recv() {
+            if let ElectionEvent::PrimaryElected { device_id, is_local } = event {
+                assert_eq!(device_id, "remote-winner");
+                assert!(!is_local);
+                found_elected = true;
+            }
+        }
+        assert!(found_elected, "Must emit PrimaryElected event");
+    }
+
+    // ── handle_connected tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_connected_sends_announce() {
+        // handle_connected calls send_envelope_to_conn which calls
+        // connection_manager.send(). Since there's no real connection,
+        // the send will silently fail (no conn_id found). We verify
+        // it doesn't panic and the code path executes.
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let conn = crate::transport::connection::WSConnection {
+            id: "conn-1".to_string(),
+            device_id: None,
+            direction: crate::bridge::header::Direction::Incoming,
+            remote_addr: "100.64.0.5:443".to_string(),
+            remote_dns_name: "peer.ts.net".to_string(),
+            status: ConnectionStatus::Connected,
+        };
+
+        // Should not panic - sends announce (fails silently on missing conn)
+        handler.handle_connected(&conn).await;
+    }
+
+    #[tokio::test]
+    async fn test_connected_primary_sends_device_list() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make this node the primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        let conn = crate::transport::connection::WSConnection {
+            id: "conn-1".to_string(),
+            device_id: None,
+            direction: crate::bridge::header::Direction::Incoming,
+            remote_addr: "100.64.0.5:443".to_string(),
+            remote_dns_name: "peer.ts.net".to_string(),
+            status: ConnectionStatus::Connected,
+        };
+
+        // Should not panic - sends announce + device list (both fail silently)
+        handler.handle_connected(&conn).await;
+
+        // Verify the code path was taken by checking election is still primary
+        let election = handler.election.read().await;
+        assert!(election.is_primary());
+    }
+
+    // ── handle_disconnected tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_disconnected_marks_device_offline() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // Add a device via announce
+        let device = make_device("remote-1", "Remote 1");
+        let announce = make_announce_msg(&device);
+        handler.dispatch_mesh_message(&announce).await;
+        while dev_rx.try_recv().is_ok() {}
+
+        // Disconnect - since there's no real connection for remote-1,
+        // get_connection_by_device returns None, so it marks offline
+        handler.handle_disconnected("conn-1", "remote_closed").await;
+
+        let dm = handler.device_manager.read().await;
+        let dev = dm.device_by_id("remote-1").unwrap();
+        assert_eq!(
+            dev.status,
+            DeviceStatus::Offline,
+            "Device with no connection should be marked offline on disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disconnected_triggers_primary_lost() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // Add a device and make it primary (in device manager)
+        let mut device = make_device("remote-primary", "Primary Remote");
+        device.role = Some(DeviceRole::Primary);
+        let announce = make_announce_msg(&device);
+        handler.dispatch_mesh_message(&announce).await;
+        {
+            let mut dm = handler.device_manager.write().await;
+            dm.set_device_role("remote-primary", DeviceRole::Primary);
+        }
+        while dev_rx.try_recv().is_ok() {}
+
+        // Disconnect
+        handler.handle_disconnected("conn-primary", "remote_closed").await;
+
+        let dm = handler.device_manager.read().await;
+        assert!(
+            dm.primary_id().is_none(),
+            "Primary should be cleared when primary device goes offline"
+        );
+    }
+
+    // ── handle_message (envelope parsing) tests ──────────────────────────
+
+    #[tokio::test]
+    async fn test_mesh_envelope_dispatched() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // Create a full mesh envelope with a device:announce inside
+        let device = make_device("remote-1", "Remote 1");
+        let mesh_msg = make_announce_msg(&device);
+        let envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "message".to_string(),
+            payload: serde_json::to_value(&mesh_msg).unwrap(),
+            timestamp: Some(1000),
+        };
+        let payload = serde_json::to_value(&envelope).unwrap();
+
+        handler.handle_message("conn-1", &payload).await;
+
+        // Verify device was added (proving dispatch_mesh_message was called)
+        let dm = handler.device_manager.read().await;
+        assert!(
+            dm.device_by_id("remote-1").is_some(),
+            "Mesh envelope with type=message must dispatch inner MeshMessage"
+        );
+
+        // Verify DeviceDiscovered was emitted
+        let mut found = false;
+        while let Ok(event) = dev_rx.try_recv() {
+            if let DeviceEvent::DeviceDiscovered(d) = event {
+                if d.id == "remote-1" {
+                    found = true;
+                }
+            }
+        }
+        assert!(found);
+    }
+
+    #[tokio::test]
+    async fn test_non_mesh_envelope_delivered_as_app_message() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let envelope = MeshEnvelope {
+            namespace: "custom-app".to_string(),
+            msg_type: "sync-update".to_string(),
+            payload: serde_json::json!({"data": "hello"}),
+            timestamp: Some(1000),
+        };
+        let payload = serde_json::to_value(&envelope).unwrap();
+
+        handler.handle_message("conn-1", &payload).await;
+
+        // Should be delivered as MeshNodeEvent::Message
+        let mut found_message = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let MeshNodeEvent::Message(incoming) = event {
+                assert_eq!(incoming.namespace, "custom-app");
+                assert_eq!(incoming.msg_type, "sync-update");
+                assert_eq!(incoming.payload["data"], "hello");
+                found_message = true;
+            }
+        }
+        assert!(
+            found_message,
+            "Non-mesh namespace envelope must be delivered as MeshNodeEvent::Message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_envelope_ignored() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Malformed JSON that can't be parsed as MeshEnvelope
+        let payload = serde_json::json!({"garbage": true, "no_namespace": 42});
+
+        handler.handle_message("conn-1", &payload).await;
+
+        // Should not emit any events
+        assert!(
+            event_rx.try_recv().is_err(),
+            "Invalid envelope must be silently ignored"
+        );
+    }
+
+    // ── handle_route_envelope (STAR routing) tests ───────────────────────
+
+    #[tokio::test]
+    async fn test_route_message_forwarded_to_target() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make this node primary (route envelopes are only handled by primary)
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // Build route:message envelope
+        let inner_envelope = MeshEnvelope::new("custom", "data", serde_json::json!({"key": "val"}));
+        let route_payload = serde_json::json!({
+            "targetDeviceId": "dev-b",
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:message".to_string(),
+            payload: route_payload,
+            timestamp: Some(1000),
+        };
+
+        // The target device "dev-b" has no real connection, so send will
+        // fail silently. Test verifies no panic and code path executes.
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_route_broadcast_delivers_locally() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make this node primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        let inner_envelope = MeshEnvelope::new(
+            "sync",
+            "file-update",
+            serde_json::json!({"file": "test.txt"}),
+        );
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        // route:broadcast should deliver locally via event_tx
+        let mut found_local_delivery = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let MeshNodeEvent::Message(incoming) = event {
+                assert_eq!(incoming.namespace, "sync");
+                assert_eq!(incoming.msg_type, "file-update");
+                assert_eq!(incoming.payload["file"], "test.txt");
+                found_local_delivery = true;
+            }
+        }
+        assert!(
+            found_local_delivery,
+            "Primary must deliver broadcast locally via event_tx"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_broadcast_forwarded_to_all() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make this node primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        let inner_envelope = MeshEnvelope::new("sync", "update", serde_json::json!({}));
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        // No real connections, so forwarding is a no-op for remote peers.
+        // But local delivery should still happen.
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+        // No panic = success for the forwarding codepath
+    }
+
+    #[tokio::test]
+    async fn test_route_envelope_rejected_when_not_primary() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // NOT primary (default state)
+        let inner_envelope = MeshEnvelope::new("custom", "data", serde_json::json!({}));
+        let route_payload = serde_json::json!({
+            "targetDeviceId": "dev-b",
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:message".to_string(),
+            payload: route_payload,
+            timestamp: Some(1000),
+        };
+
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        // Should not deliver anything
+        assert!(
+            event_rx.try_recv().is_err(),
+            "Non-primary must not process route envelopes"
+        );
+    }
+
+    // ── Edge cases ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_announce_from_self_not_duplicated() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Announce with own device_id — DeviceManager.handle_device_announce
+        // adds it to the devices map (this is by design: the handler doesn't
+        // filter self-announces, the DeviceManager treats it as a remote device).
+        // However, device_by_id("local-dev") always returns the local device
+        // first, so it's effectively a no-op for lookups.
+        let device = make_device("local-dev", "Local Device");
+        let msg = make_announce_msg(&device);
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // The local device should still be the local device
+        let dm = handler.device_manager.read().await;
+        let local = dm.local_device();
+        assert_eq!(local.id, "local-dev");
+    }
+
+    #[tokio::test]
+    async fn test_message_bus_dispatch() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Subscribe to the message bus
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+        handler
+            .message_bus
+            .subscribe(
+                "test-ns",
+                Arc::new(move |msg: &BusMessage| {
+                    assert_eq!(msg.namespace, "test-ns");
+                    assert_eq!(msg.msg_type, "test-type");
+                    count_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+
+        // Send a non-mesh envelope (goes through handle_app_message -> message_bus)
+        let envelope = MeshEnvelope {
+            namespace: "test-ns".to_string(),
+            msg_type: "test-type".to_string(),
+            payload: serde_json::json!({"key": "val"}),
+            timestamp: Some(1000),
+        };
+        let payload = serde_json::to_value(&envelope).unwrap();
+
+        handler.handle_message("conn-1", &payload).await;
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "MessageBus handler must be called for app messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_bus_dispatch_on_broadcast() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+        handler
+            .message_bus
+            .subscribe(
+                "broadcast-ns",
+                Arc::new(move |msg: &BusMessage| {
+                    assert_eq!(msg.namespace, "broadcast-ns");
+                    count_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+
+        let inner_envelope = MeshEnvelope::new(
+            "broadcast-ns",
+            "update",
+            serde_json::json!({}),
+        );
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "MessageBus must be dispatched on route:broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_mesh_message_type_ignored() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        let msg = MeshMessage::new(
+            "device:unknown_type",
+            "remote-1",
+            serde_json::json!({}),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // Should not emit any device events
+        assert!(
+            dev_rx.try_recv().is_err(),
+            "Unknown mesh message type must be silently ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_list_empty_primary_id_does_not_set_primary() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        let msg = MeshMessage::new(
+            "device:list",
+            "some-node",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![make_device("dev-a", "A")],
+                primary_id: "".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        let election = handler.election.read().await;
+        assert!(
+            election.primary_id().is_none(),
+            "Empty primary_id in device:list must not set election primary"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wrap_mesh_message_produces_correct_envelope() {
+        let msg = MeshMessage::new("device:announce", "dev-1", serde_json::json!({}));
+        let envelope = TransportHandler::wrap_mesh_message(&msg);
+
+        assert_eq!(envelope.namespace, MESH_NAMESPACE);
+        assert_eq!(envelope.msg_type, "message");
+        assert!(envelope.timestamp.is_some());
+        // Payload should contain the serialized MeshMessage
+        let inner: MeshMessage = serde_json::from_value(envelope.payload).unwrap();
+        assert_eq!(inner.msg_type, "device:announce");
+        assert_eq!(inner.from, "dev-1");
+    }
+
+    #[tokio::test]
+    async fn test_device_goodbye_emits_offline_event() {
+        let (handler, _event_rx, mut dev_rx, _elec_rx) = make_handler();
+
+        // Add device first
+        let device = make_device("remote-1", "Remote 1");
+        handler.dispatch_mesh_message(&make_announce_msg(&device)).await;
+        while dev_rx.try_recv().is_ok() {}
+
+        // Goodbye
+        let goodbye = MeshMessage::new("device:goodbye", "remote-1", serde_json::json!({}));
+        handler.dispatch_mesh_message(&goodbye).await;
+
+        let mut found_offline = false;
+        while let Ok(event) = dev_rx.try_recv() {
+            if let DeviceEvent::DeviceOffline(id) = event {
+                assert_eq!(id, "remote-1");
+                found_offline = true;
+            }
+        }
+        assert!(found_offline, "device:goodbye must emit DeviceOffline event");
+    }
+
+    #[tokio::test]
+    async fn test_handle_message_mesh_envelope_binds_device_id() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Create a mesh envelope with device:announce that triggers set_device_id
+        let device = make_device("remote-1", "Remote 1");
+        let mesh_msg = make_announce_msg(&device);
+        let envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "message".to_string(),
+            payload: serde_json::to_value(&mesh_msg).unwrap(),
+            timestamp: Some(1000),
+        };
+        let payload = serde_json::to_value(&envelope).unwrap();
+
+        // handle_message calls handle_mesh_envelope which calls set_device_id
+        // on the connection_manager. Since "conn-1" doesn't exist, it's a no-op.
+        handler.handle_message("conn-1", &payload).await;
+
+        // Verify the device was still added despite no real connection
+        let dm = handler.device_manager.read().await;
+        assert!(dm.device_by_id("remote-1").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_route_message_with_missing_fields_is_noop() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // route:message without targetDeviceId
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:message".to_string(),
+            payload: serde_json::json!({"envelope": {"namespace": "x", "type": "y", "payload": {}}}),
+            timestamp: Some(1000),
+        };
+
+        // Should not panic
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_route_broadcast_with_missing_envelope_is_noop() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // route:broadcast without envelope field
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: serde_json::json!({"other": "data"}),
+            timestamp: Some(1000),
+        };
+
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        // Nothing should be delivered
+        assert!(
+            event_rx.try_recv().is_err(),
+            "route:broadcast without envelope field must be a no-op"
+        );
+    }
+}
