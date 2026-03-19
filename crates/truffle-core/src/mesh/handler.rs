@@ -7,9 +7,9 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::protocol::envelope::{MeshEnvelope, MESH_NAMESPACE};
 use crate::protocol::message_types::{
-    DeviceAnnouncePayload, DeviceListPayload, ElectionCandidatePayload, ElectionResultPayload,
-    MeshMessage,
+    DeviceAnnouncePayload, DeviceListPayload, MeshMessage,
 };
+use crate::protocol::types::MeshPayload;
 use crate::transport::connection::{ConnectionManager, ConnectionStatus};
 use super::device::DeviceManager;
 use super::election::PrimaryElection;
@@ -31,19 +31,33 @@ impl TransportHandler {
     // ── Envelope helpers ──────────────────────────────────────────────
 
     /// Create a mesh-namespace envelope wrapping a MeshMessage.
-    fn wrap_mesh_message(message: &MeshMessage) -> MeshEnvelope {
-        MeshEnvelope {
+    ///
+    /// Returns `None` if the message cannot be serialized (logged as error).
+    fn wrap_mesh_message(message: &MeshMessage) -> Option<MeshEnvelope> {
+        let payload = match serde_json::to_value(message) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to serialize MeshMessage: {e}");
+                return None;
+            }
+        };
+        Some(MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
             msg_type: "message".to_string(),
-            payload: serde_json::to_value(message).unwrap_or_default(),
+            payload,
             timestamp: Some(crate::util::current_timestamp_ms()),
-        }
+        })
     }
 
     /// Serialize and send an envelope to a connection.
     async fn send_envelope_to_conn(&self, conn_id: &str, envelope: &MeshEnvelope) {
-        if let Ok(value) = serde_json::to_value(envelope) {
-            let _ = self.connection_manager.send(conn_id, &value).await;
+        match serde_json::to_value(envelope) {
+            Ok(value) => {
+                let _ = self.connection_manager.send(conn_id, &value).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize MeshEnvelope for conn {conn_id}: {e}");
+            }
         }
     }
 
@@ -61,17 +75,24 @@ impl TransportHandler {
 
         // Send our device announce
         let local_device = self.device_manager.read().await.local_device().clone();
+        let announce_payload = match serde_json::to_value(&DeviceAnnouncePayload {
+            device: local_device.clone(),
+            protocol_version: 2,
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to serialize DeviceAnnouncePayload: {e}");
+                return;
+            }
+        };
         let announce = MeshMessage::new(
             "device:announce",
             &self.config.device_id,
-            serde_json::to_value(&DeviceAnnouncePayload {
-                device: local_device.clone(),
-                protocol_version: 2,
-            })
-            .unwrap_or_default(),
+            announce_payload,
         );
-        let envelope = Self::wrap_mesh_message(&announce);
-        self.send_envelope_to_conn(&conn.id, &envelope).await;
+        if let Some(envelope) = Self::wrap_mesh_message(&announce) {
+            self.send_envelope_to_conn(&conn.id, &envelope).await;
+        }
 
         // If primary, send device list to new connection
         if self.election.read().await.is_primary() {
@@ -81,17 +102,24 @@ impl TransportHandler {
                 devs.extend(dm.devices());
                 devs
             };
+            let list_payload = match serde_json::to_value(&DeviceListPayload {
+                devices,
+                primary_id: self.config.device_id.clone(),
+            }) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to serialize DeviceListPayload: {e}");
+                    return;
+                }
+            };
             let list = MeshMessage::new(
                 "device:list",
                 &self.config.device_id,
-                serde_json::to_value(&DeviceListPayload {
-                    devices,
-                    primary_id: self.config.device_id.clone(),
-                })
-                .unwrap_or_default(),
+                list_payload,
             );
-            let envelope = Self::wrap_mesh_message(&list);
-            self.send_envelope_to_conn(&conn.id, &envelope).await;
+            if let Some(envelope) = Self::wrap_mesh_message(&list) {
+                self.send_envelope_to_conn(&conn.id, &envelope).await;
+            }
         }
     }
 
@@ -117,7 +145,14 @@ impl TransportHandler {
     ) {
         let envelope: MeshEnvelope = match serde_json::from_value(payload.clone()) {
             Ok(e) => e,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    connection_id,
+                    error = %e,
+                    "Failed to parse MeshEnvelope from incoming message"
+                );
+                return;
+            }
         };
 
         let conn = self
@@ -152,7 +187,14 @@ impl TransportHandler {
     ) {
         let mesh_msg: MeshMessage = match serde_json::from_value(envelope.payload.clone()) {
             Ok(m) => m,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    connection_id,
+                    error = %e,
+                    "Failed to parse MeshMessage from mesh envelope payload"
+                );
+                return;
+            }
         };
 
         // Bind device ID from announce
@@ -170,67 +212,65 @@ impl TransportHandler {
     }
 
     pub(crate) async fn dispatch_mesh_message(&self, msg: &MeshMessage) {
-        match msg.msg_type.as_str() {
-            "device:announce" => {
-                if let Ok(payload) =
-                    serde_json::from_value::<DeviceAnnouncePayload>(msg.payload.clone())
-                {
-                    self.device_manager
+        match MeshPayload::parse(&msg.msg_type, msg.payload.clone()) {
+            Ok(MeshPayload::DeviceAnnounce(payload)) => {
+                self.device_manager
+                    .write()
+                    .await
+                    .handle_device_announce(&msg.from, &payload);
+            }
+            Ok(MeshPayload::DeviceList(payload)) => {
+                self.device_manager
+                    .write()
+                    .await
+                    .handle_device_list(&msg.from, &payload);
+                if !payload.primary_id.is_empty() {
+                    self.election
                         .write()
                         .await
-                        .handle_device_announce(&msg.from, &payload);
+                        .set_primary(&payload.primary_id);
                 }
             }
-            "device:list" => {
-                if let Ok(payload) =
-                    serde_json::from_value::<DeviceListPayload>(msg.payload.clone())
-                {
-                    self.device_manager
-                        .write()
-                        .await
-                        .handle_device_list(&msg.from, &payload);
-                    if !payload.primary_id.is_empty() {
-                        self.election
-                            .write()
-                            .await
-                            .set_primary(&payload.primary_id);
-                    }
-                }
-            }
-            "device:goodbye" => {
+            Ok(MeshPayload::DeviceGoodbye(_payload)) => {
                 self.device_manager
                     .write()
                     .await
                     .handle_device_goodbye(&msg.from);
             }
-            "election:start" => {
+            Ok(MeshPayload::ElectionStart) => {
                 self.election
                     .write()
                     .await
                     .handle_election_start(&msg.from);
             }
-            "election:candidate" => {
-                if let Ok(payload) =
-                    serde_json::from_value::<ElectionCandidatePayload>(msg.payload.clone())
-                {
-                    self.election
-                        .write()
-                        .await
-                        .handle_election_candidate(&msg.from, &payload);
-                }
+            Ok(MeshPayload::ElectionCandidate(payload)) => {
+                self.election
+                    .write()
+                    .await
+                    .handle_election_candidate(&msg.from, &payload);
             }
-            "election:result" => {
-                if let Ok(payload) =
-                    serde_json::from_value::<ElectionResultPayload>(msg.payload.clone())
-                {
-                    self.election
-                        .write()
-                        .await
-                        .handle_election_result(&msg.from, &payload);
-                }
+            Ok(MeshPayload::ElectionResult(payload)) => {
+                self.election
+                    .write()
+                    .await
+                    .handle_election_result(&msg.from, &payload);
             }
-            _ => {
-                tracing::debug!("Unknown mesh message type: {}", msg.msg_type);
+            Ok(MeshPayload::RouteMessage(_)) | Ok(MeshPayload::RouteBroadcast(_)) => {
+                // Route messages should not arrive via dispatch_mesh_message;
+                // they are handled by handle_route_envelope at the envelope level.
+                tracing::warn!(
+                    msg_type = %msg.msg_type,
+                    from = %msg.from,
+                    "Route message received via dispatch_mesh_message -- should use handle_route_envelope"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    msg_type = %msg.msg_type,
+                    from = %msg.from,
+                    error = %e,
+                    "Failed to parse mesh message"
+                );
             }
         }
     }
@@ -248,7 +288,7 @@ impl TransportHandler {
         }
 
         match envelope.msg_type.as_str() {
-            "route:message" => {
+            "route:message" | "route-message" => {
                 if let (Some(target), Some(inner)) = (
                     envelope
                         .payload
@@ -256,63 +296,138 @@ impl TransportHandler {
                         .and_then(|v| v.as_str()),
                     envelope.payload.get("envelope"),
                 ) {
-                    if let Ok(inner_env) =
-                        serde_json::from_value::<MeshEnvelope>(inner.clone())
+                    let inner_env = match serde_json::from_value::<MeshEnvelope>(inner.clone()) {
+                        Ok(env) => env,
+                        Err(e) => {
+                            tracing::warn!(
+                                connection_id,
+                                error = %e,
+                                "Failed to parse inner envelope in route:message"
+                            );
+                            return;
+                        }
+                    };
+
+                    // Nesting depth guard: reject inner envelopes that are themselves route envelopes
+                    if inner_env.namespace == MESH_NAMESPACE
+                        && (inner_env.msg_type.starts_with("route:")
+                            || inner_env.msg_type.starts_with("route-"))
                     {
-                        if let Some(conn) = self
-                            .connection_manager
-                            .get_connection_by_device(target)
-                            .await
+                        tracing::warn!(
+                            connection_id,
+                            inner_type = %inner_env.msg_type,
+                            "Nested route envelope rejected (max depth 1)"
+                        );
+                        return;
+                    }
+
+                    if let Some(conn) = self
+                        .connection_manager
+                        .get_connection_by_device(target)
+                        .await
+                    {
+                        let mut env_ts = inner_env;
+                        if env_ts.timestamp.is_none() {
+                            env_ts.timestamp =
+                                Some(crate::util::current_timestamp_ms());
+                        }
+                        self.send_envelope_to_conn(&conn.id, &env_ts).await;
+                    } else {
+                        tracing::warn!(
+                            target_device_id = target,
+                            "route:message target device not connected"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        connection_id,
+                        "route:message missing targetDeviceId or envelope field"
+                    );
+                }
+            }
+            "route:broadcast" | "route-broadcast" => {
+                let inner = match envelope.payload.get("envelope") {
+                    Some(inner) => inner,
+                    None => {
+                        tracing::warn!(
+                            connection_id,
+                            "route:broadcast missing envelope field"
+                        );
+                        return;
+                    }
+                };
+
+                let inner_env = match serde_json::from_value::<MeshEnvelope>(inner.clone()) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        tracing::warn!(
+                            connection_id,
+                            error = %e,
+                            "Failed to parse inner envelope in route:broadcast"
+                        );
+                        return;
+                    }
+                };
+
+                // Mesh-namespace filter: reject inner envelopes with mesh namespace
+                // to prevent protocol bypass (RFC 009 issue #8)
+                if inner_env.namespace == MESH_NAMESPACE {
+                    tracing::warn!(
+                        connection_id,
+                        inner_type = %inner_env.msg_type,
+                        "route:broadcast with mesh namespace rejected -- use dispatch_mesh_message directly"
+                    );
+                    return;
+                }
+
+                // Nesting depth guard: reject inner envelopes that are themselves route envelopes
+                if inner_env.msg_type.starts_with("route:") || inner_env.msg_type.starts_with("route-") {
+                    tracing::warn!(
+                        connection_id,
+                        inner_type = %inner_env.msg_type,
+                        "Nested route envelope rejected (max depth 1)"
+                    );
+                    return;
+                }
+
+                let conns = self.connection_manager.get_connections().await;
+                for c in &conns {
+                    if let Some(ref did) = c.device_id {
+                        if from_device_id != Some(did.as_str())
+                            && c.status == ConnectionStatus::Connected
                         {
-                            let mut env_ts = inner_env;
+                            let mut env_ts = inner_env.clone();
                             if env_ts.timestamp.is_none() {
                                 env_ts.timestamp =
                                     Some(crate::util::current_timestamp_ms());
                             }
-                            self.send_envelope_to_conn(&conn.id, &env_ts).await;
+                            self.send_envelope_to_conn(&c.id, &env_ts).await;
                         }
                     }
                 }
+                // Local delivery
+                self.deliver_app_message(
+                    connection_id,
+                    from_device_id.map(|s| s.to_string()),
+                    &inner_env,
+                );
+                // MessageBus dispatch
+                self.message_bus
+                    .dispatch(&BusMessage {
+                        from: from_device_id.map(|s| s.to_string()),
+                        namespace: inner_env.namespace.clone(),
+                        msg_type: inner_env.msg_type.clone(),
+                        payload: inner_env.payload.clone(),
+                    })
+                    .await;
             }
-            "route:broadcast" => {
-                if let Some(inner) = envelope.payload.get("envelope") {
-                    if let Ok(inner_env) =
-                        serde_json::from_value::<MeshEnvelope>(inner.clone())
-                    {
-                        let conns = self.connection_manager.get_connections().await;
-                        for c in &conns {
-                            if let Some(ref did) = c.device_id {
-                                if from_device_id != Some(did.as_str())
-                                    && c.status == ConnectionStatus::Connected
-                                {
-                                    let mut env_ts = inner_env.clone();
-                                    if env_ts.timestamp.is_none() {
-                                        env_ts.timestamp =
-                                            Some(crate::util::current_timestamp_ms());
-                                    }
-                                    self.send_envelope_to_conn(&c.id, &env_ts).await;
-                                }
-                            }
-                        }
-                        // Local delivery
-                        self.deliver_app_message(
-                            connection_id,
-                            from_device_id.map(|s| s.to_string()),
-                            &inner_env,
-                        );
-                        // MessageBus dispatch
-                        self.message_bus
-                            .dispatch(&BusMessage {
-                                from: from_device_id.map(|s| s.to_string()),
-                                namespace: inner_env.namespace.clone(),
-                                msg_type: inner_env.msg_type.clone(),
-                                payload: inner_env.payload.clone(),
-                            })
-                            .await;
-                    }
-                }
+            _ => {
+                tracing::warn!(
+                    connection_id,
+                    msg_type = %envelope.msg_type,
+                    "Unknown route envelope type in mesh namespace"
+                );
             }
-            _ => {}
         }
     }
 
@@ -581,7 +696,10 @@ mod tests {
         let goodbye = MeshMessage::new(
             "device:goodbye",
             "remote-1",
-            serde_json::json!({}),
+            serde_json::to_value(&crate::protocol::message_types::DeviceGoodbyePayload {
+                device_id: "remote-1".to_string(),
+                reason: "shutdown".to_string(),
+            }).unwrap(),
         );
         handler.dispatch_mesh_message(&goodbye).await;
 
@@ -1195,7 +1313,8 @@ mod tests {
     #[tokio::test]
     async fn test_wrap_mesh_message_produces_correct_envelope() {
         let msg = MeshMessage::new("device:announce", "dev-1", serde_json::json!({}));
-        let envelope = TransportHandler::wrap_mesh_message(&msg);
+        let envelope = TransportHandler::wrap_mesh_message(&msg)
+            .expect("wrap_mesh_message must succeed for valid MeshMessage");
 
         assert_eq!(envelope.namespace, MESH_NAMESPACE);
         assert_eq!(envelope.msg_type, "message");
@@ -1216,7 +1335,14 @@ mod tests {
         while dev_rx.try_recv().is_ok() {}
 
         // Goodbye
-        let goodbye = MeshMessage::new("device:goodbye", "remote-1", serde_json::json!({}));
+        let goodbye = MeshMessage::new(
+            "device:goodbye",
+            "remote-1",
+            serde_json::to_value(&crate::protocol::message_types::DeviceGoodbyePayload {
+                device_id: "remote-1".to_string(),
+                reason: "shutdown".to_string(),
+            }).unwrap(),
+        );
         handler.dispatch_mesh_message(&goodbye).await;
 
         let mut found_offline = false;
@@ -1423,10 +1549,10 @@ mod tests {
     }
 
     /// 21. Deeply nested envelope: route:broadcast containing another
-    ///     route:broadcast inside. Must not recurse infinitely (the inner
-    ///     envelope is delivered as an app message, not re-routed).
+    ///     route:broadcast inside. The nesting guard (RFC 009 issue #7) rejects
+    ///     inner envelopes with mesh namespace, preventing recursive nesting.
     #[tokio::test]
-    async fn nested_route_broadcast_no_infinite_recursion() {
+    async fn nested_route_broadcast_rejected_by_mesh_namespace_guard() {
         let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
 
         // Make primary
@@ -1440,8 +1566,7 @@ mod tests {
             election.set_primary("local-dev");
         }
 
-        // Inner envelope that happens to be another route:broadcast (but in a
-        // non-mesh namespace, so it won't be treated as a route)
+        // Inner envelope with mesh namespace -- should be rejected by mesh-namespace guard
         let inner_inner = MeshEnvelope::new("app-ns", "data", serde_json::json!({"level": 2}));
         let inner_envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
@@ -1462,22 +1587,62 @@ mod tests {
             timestamp: Some(1000),
         };
 
-        // This should complete without hanging or panicking
+        // This should complete without hanging or panicking, but the inner
+        // envelope is rejected because it has mesh namespace
         handler
             .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
             .await;
 
-        // The inner envelope is delivered as a Message event (local delivery)
-        let mut found = false;
-        while let Ok(event) = event_rx.try_recv() {
-            if let MeshNodeEvent::Message(incoming) = event {
-                // The delivered message is the inner envelope, which has mesh namespace
-                found = true;
-                _ = incoming; // just verify it was delivered
-            }
+        // The inner envelope must NOT be delivered (mesh namespace guard blocks it)
+        assert!(
+            event_rx.try_recv().is_err(),
+            "Nested route:broadcast with mesh namespace inner must be rejected"
+        );
+    }
+
+    /// 21b. route:broadcast with a non-mesh inner envelope that has a route: type prefix.
+    ///      The nesting depth guard rejects it.
+    #[tokio::test]
+    async fn nested_route_type_rejected_by_nesting_guard() {
+        let (handler, mut event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
         }
-        assert!(found,
-            "Nested route:broadcast must deliver the inner envelope locally without infinite recursion");
+
+        // Inner envelope with non-mesh namespace but route: type prefix
+        let inner_envelope = MeshEnvelope::new(
+            "custom-ns",
+            "route:sneaky",
+            serde_json::json!({"trick": true}),
+        );
+
+        let broadcast_payload = serde_json::json!({
+            "envelope": serde_json::to_value(&inner_envelope).unwrap(),
+        });
+        let route_envelope = MeshEnvelope {
+            namespace: MESH_NAMESPACE.to_string(),
+            msg_type: "route:broadcast".to_string(),
+            payload: broadcast_payload,
+            timestamp: Some(1000),
+        };
+
+        handler
+            .handle_route_envelope("conn-sender", Some("dev-a"), &route_envelope)
+            .await;
+
+        // The inner envelope must NOT be delivered (route: prefix guard blocks it)
+        assert!(
+            event_rx.try_recv().is_err(),
+            "Inner envelope with route: prefix must be rejected by nesting guard"
+        );
     }
 
     /// 22. route:message targeting a device that is offline. Must not panic,

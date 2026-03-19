@@ -57,26 +57,40 @@ pub fn route_to_device(
 }
 
 /// Create a route:message envelope that wraps another envelope for routing via primary.
-pub fn wrap_route_message(target_device_id: &str, envelope: &MeshEnvelope) -> MeshEnvelope {
-    MeshEnvelope::new(
+pub fn wrap_route_message(target_device_id: &str, envelope: &MeshEnvelope) -> Option<MeshEnvelope> {
+    let inner_value = match serde_json::to_value(envelope) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to serialize inner envelope for route:message: {e}");
+            return None;
+        }
+    };
+    Some(MeshEnvelope::new(
         MESH_NAMESPACE,
         "route:message",
         serde_json::json!({
             "targetDeviceId": target_device_id,
-            "envelope": serde_json::to_value(envelope).unwrap_or_default()
+            "envelope": inner_value
         }),
-    )
+    ))
 }
 
 /// Create a route:broadcast envelope that wraps another envelope for broadcast via primary.
-pub fn wrap_route_broadcast(envelope: &MeshEnvelope) -> MeshEnvelope {
-    MeshEnvelope::new(
+pub fn wrap_route_broadcast(envelope: &MeshEnvelope) -> Option<MeshEnvelope> {
+    let inner_value = match serde_json::to_value(envelope) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to serialize inner envelope for route:broadcast: {e}");
+            return None;
+        }
+    };
+    Some(MeshEnvelope::new(
         MESH_NAMESPACE,
         "route:broadcast",
         serde_json::json!({
-            "envelope": serde_json::to_value(envelope).unwrap_or_default()
+            "envelope": inner_value
         }),
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -121,7 +135,8 @@ mod tests {
     #[test]
     fn wrap_route_message_creates_envelope() {
         let inner = MeshEnvelope::new("sync", "update", serde_json::json!({"key": "val"}));
-        let wrapped = wrap_route_message("dev-2", &inner);
+        let wrapped = wrap_route_message("dev-2", &inner)
+            .expect("wrap_route_message must succeed for valid envelope");
         assert_eq!(wrapped.namespace, MESH_NAMESPACE);
         assert_eq!(wrapped.msg_type, "route:message");
 
@@ -136,7 +151,8 @@ mod tests {
     #[test]
     fn wrap_route_broadcast_creates_envelope() {
         let inner = MeshEnvelope::new("sync", "full", serde_json::json!(null));
-        let wrapped = wrap_route_broadcast(&inner);
+        let wrapped = wrap_route_broadcast(&inner)
+            .expect("wrap_route_broadcast must succeed for valid envelope");
         assert_eq!(wrapped.namespace, MESH_NAMESPACE);
         assert_eq!(wrapped.msg_type, "route:broadcast");
         assert!(wrapped.payload.get("envelope").is_some());

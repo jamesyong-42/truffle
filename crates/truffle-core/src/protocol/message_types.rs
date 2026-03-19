@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::types::BaseDevice;
 
 /// Base mesh message wrapper.
+///
+/// TODO(Phase 6): Flatten `from`, `to`, `correlation_id` fields into `MeshEnvelope`
+/// and remove this struct. The addressing fields are duplicated between MeshMessage
+/// and MeshEnvelope. See RFC 009 Section 5.1 for the target envelope format.
+/// Deferred from Phase 3 because MeshMessage is deeply embedded in test helpers,
+/// node.rs event loops, and election broadcasting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshMessage {

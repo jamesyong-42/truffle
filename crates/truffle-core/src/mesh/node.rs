@@ -371,8 +371,10 @@ impl MeshNode {
         // Route via primary if we're a secondary
         if !self.is_primary().await {
             if let Some(primary_id) = self.primary_id().await {
-                let route_envelope = routing::wrap_route_message(device_id, envelope);
-                return self.send_envelope_direct(&primary_id, &route_envelope).await;
+                if let Some(route_envelope) = routing::wrap_route_message(device_id, envelope) {
+                    return self.send_envelope_direct(&primary_id, &route_envelope).await;
+                }
+                return false;
             }
         }
 
@@ -405,8 +407,9 @@ impl MeshNode {
         } else {
             // Secondary: route broadcast through primary
             if let Some(primary_id) = self.primary_id().await {
-                let route_envelope = routing::wrap_route_broadcast(envelope);
-                self.send_envelope_direct(&primary_id, &route_envelope).await;
+                if let Some(route_envelope) = routing::wrap_route_broadcast(envelope) {
+                    self.send_envelope_direct(&primary_id, &route_envelope).await;
+                }
             }
         }
     }
@@ -571,15 +574,25 @@ impl MeshNode {
 
     /// Send a mesh message (wrapped in mesh namespace envelope) to a connection.
     async fn send_mesh_message_raw(&self, connection_id: &str, message: &MeshMessage) -> bool {
+        let msg_payload = match serde_json::to_value(message) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to serialize MeshMessage: {e}");
+                return false;
+            }
+        };
         let envelope = MeshEnvelope {
             namespace: MESH_NAMESPACE.to_string(),
             msg_type: "message".to_string(),
-            payload: serde_json::to_value(message).unwrap_or_default(),
+            payload: msg_payload,
             timestamp: Some(current_timestamp_ms()),
         };
         let value = match serde_json::to_value(&envelope) {
             Ok(v) => v,
-            Err(_) => return false,
+            Err(e) => {
+                tracing::error!("Failed to serialize MeshEnvelope: {e}");
+                return false;
+            }
         };
         self.connection_manager.send(connection_id, &value).await.is_ok()
     }
@@ -598,14 +611,20 @@ impl MeshNode {
 
     /// Broadcast goodbye to all peers.
     async fn broadcast_goodbye(&self) {
+        let goodbye_payload = match serde_json::to_value(&DeviceGoodbyePayload {
+            device_id: self.config.device_id.clone(),
+            reason: "shutdown".to_string(),
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("Failed to serialize DeviceGoodbyePayload: {e}");
+                return;
+            }
+        };
         let goodbye = MeshMessage::new(
             "device:goodbye",
             &self.config.device_id,
-            serde_json::to_value(&DeviceGoodbyePayload {
-                device_id: self.config.device_id.clone(),
-                reason: "shutdown".to_string(),
-            })
-            .unwrap_or_default(),
+            goodbye_payload,
         );
         self.broadcast_mesh_message(&goodbye).await;
     }
@@ -718,26 +737,45 @@ impl MeshNode {
                                 devs
                             };
                             let config_id = config_el.device_id.clone();
+                            let list_payload = match serde_json::to_value(&DeviceListPayload {
+                                devices,
+                                primary_id: config_id.clone(),
+                            }) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize DeviceListPayload: {e}");
+                                    continue;
+                                }
+                            };
                             let list_msg = MeshMessage::new(
                                 "device:list",
                                 &config_id,
-                                serde_json::to_value(&DeviceListPayload {
-                                    devices,
-                                    primary_id: config_id.clone(),
-                                }).unwrap_or_default(),
+                                list_payload,
                             );
+                            let msg_payload = match serde_json::to_value(&list_msg) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize device:list MeshMessage: {e}");
+                                    continue;
+                                }
+                            };
                             let envelope = MeshEnvelope {
                                 namespace: MESH_NAMESPACE.to_string(),
                                 msg_type: "message".to_string(),
-                                payload: serde_json::to_value(&list_msg).unwrap_or_default(),
+                                payload: msg_payload,
                                 timestamp: Some(current_timestamp_ms()),
                             };
-                            if let Ok(value) = serde_json::to_value(&envelope) {
-                                let conns = connection_manager_el.get_connections().await;
-                                for conn in &conns {
-                                    if conn.status == ConnectionStatus::Connected {
-                                        let _ = connection_manager_el.send(&conn.id, &value).await;
+                            match serde_json::to_value(&envelope) {
+                                Ok(value) => {
+                                    let conns = connection_manager_el.get_connections().await;
+                                    for conn in &conns {
+                                        if conn.status == ConnectionStatus::Connected {
+                                            let _ = connection_manager_el.send(&conn.id, &value).await;
+                                        }
                                     }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize device:list envelope: {e}");
                                 }
                             }
                         }
@@ -747,18 +785,30 @@ impl MeshNode {
                     }
                     ElectionEvent::Broadcast(message) => {
                         // Send mesh message to all peers
-                        let conns = connection_manager_el.get_connections().await;
-                        for conn in &conns {
-                            if conn.status == ConnectionStatus::Connected {
-                                let envelope = MeshEnvelope {
-                                    namespace: MESH_NAMESPACE.to_string(),
-                                    msg_type: "message".to_string(),
-                                    payload: serde_json::to_value(&message).unwrap_or_default(),
-                                    timestamp: Some(current_timestamp_ms()),
-                                };
-                                if let Ok(value) = serde_json::to_value(&envelope) {
-                                    let _ = connection_manager_el.send(&conn.id, &value).await;
+                        let msg_payload = match serde_json::to_value(&message) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::error!("Failed to serialize election broadcast MeshMessage: {e}");
+                                continue;
+                            }
+                        };
+                        let envelope = MeshEnvelope {
+                            namespace: MESH_NAMESPACE.to_string(),
+                            msg_type: "message".to_string(),
+                            payload: msg_payload,
+                            timestamp: Some(current_timestamp_ms()),
+                        };
+                        match serde_json::to_value(&envelope) {
+                            Ok(value) => {
+                                let conns = connection_manager_el.get_connections().await;
+                                for conn in &conns {
+                                    if conn.status == ConnectionStatus::Connected {
+                                        let _ = connection_manager_el.send(&conn.id, &value).await;
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to serialize election broadcast envelope: {e}");
                             }
                         }
                     }
@@ -838,28 +888,47 @@ impl MeshNode {
                 interval_timer.tick().await;
 
                 let local_device = device_manager.read().await.local_device().clone();
+                let announce_payload = match serde_json::to_value(&DeviceAnnouncePayload {
+                    device: local_device,
+                    protocol_version: 2,
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize DeviceAnnouncePayload in announce interval: {e}");
+                        continue;
+                    }
+                };
                 let announce = MeshMessage::new(
                     "device:announce",
                     &device_id,
-                    serde_json::to_value(&DeviceAnnouncePayload {
-                        device: local_device,
-                        protocol_version: 2,
-                    }).unwrap_or_default(),
+                    announce_payload,
                 );
 
+                let msg_payload = match serde_json::to_value(&announce) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!("Failed to serialize announce MeshMessage: {e}");
+                        continue;
+                    }
+                };
                 let envelope = MeshEnvelope {
                     namespace: MESH_NAMESPACE.to_string(),
                     msg_type: "message".to_string(),
-                    payload: serde_json::to_value(&announce).unwrap_or_default(),
+                    payload: msg_payload,
                     timestamp: Some(current_timestamp_ms()),
                 };
 
-                let conns = connection_manager.get_connections().await;
-                for conn in &conns {
-                    if conn.status == ConnectionStatus::Connected {
-                        if let Ok(value) = serde_json::to_value(&envelope) {
-                            let _ = connection_manager.send(&conn.id, &value).await;
+                match serde_json::to_value(&envelope) {
+                    Ok(value) => {
+                        let conns = connection_manager.get_connections().await;
+                        for conn in &conns {
+                            if conn.status == ConnectionStatus::Connected {
+                                let _ = connection_manager.send(&conn.id, &value).await;
+                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to serialize announce envelope: {e}");
                     }
                 }
             }

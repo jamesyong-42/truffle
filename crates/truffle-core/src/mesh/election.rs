@@ -203,13 +203,16 @@ impl PrimaryElection {
         ));
 
         // Broadcast our candidacy
-        self.emit(ElectionEvent::Broadcast(
-            MeshMessage::new(
-                "election:candidate",
-                &config.device_id,
-                serde_json::to_value(&my_candidate).unwrap_or_default(),
-            ),
-        ));
+        match serde_json::to_value(&my_candidate) {
+            Ok(payload) => {
+                self.emit(ElectionEvent::Broadcast(
+                    MeshMessage::new("election:candidate", &config.device_id, payload),
+                ));
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize ElectionCandidatePayload: {e}");
+            }
+        }
 
         self.emit(ElectionEvent::ElectionStarted);
 
@@ -303,13 +306,16 @@ impl PrimaryElection {
             previous_primary_id: None,
             reason: "election".to_string(),
         };
-        self.emit(ElectionEvent::Broadcast(
-            MeshMessage::new(
-                "election:result",
-                &config.device_id,
-                serde_json::to_value(&result).unwrap_or_default(),
-            ),
-        ));
+        match serde_json::to_value(&result) {
+            Ok(payload) => {
+                self.emit(ElectionEvent::Broadcast(
+                    MeshMessage::new("election:result", &config.device_id, payload),
+                ));
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize ElectionResultPayload: {e}");
+            }
+        }
         self.emit(ElectionEvent::PrimaryElected {
             device_id: config.device_id,
             is_local: true,
@@ -341,13 +347,16 @@ impl PrimaryElection {
             self.candidates.insert(config.device_id.clone(), my_candidate.clone());
 
             // Broadcast candidacy
-            self.emit(ElectionEvent::Broadcast(
-                MeshMessage::new(
-                    "election:candidate",
-                    &config.device_id,
-                    serde_json::to_value(&my_candidate).unwrap_or_default(),
-                ),
-            ));
+            match serde_json::to_value(&my_candidate) {
+                Ok(payload) => {
+                    self.emit(ElectionEvent::Broadcast(
+                        MeshMessage::new("election:candidate", &config.device_id, payload),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!("Failed to serialize ElectionCandidatePayload: {e}");
+                }
+            }
 
             // Set timeout
             let timeout_duration = self.timing.election_timeout;
