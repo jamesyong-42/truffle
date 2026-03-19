@@ -1,7 +1,8 @@
 # RFC 008: Truffle Vision -- Architecture & Public API
 
-**Status**: Draft
+**Status**: Implemented
 **Created**: 2026-03-18
+**Implemented**: 2026-03-19
 **Depends on**: RFC 003 (Rust Rewrite), RFC 005 (Refactor), RFC 007 (Comprehensive Refactor)
 
 ---
@@ -1330,10 +1331,13 @@ react ──> core ───┘ (via truffle-napi)
 
 ## 8. Migration Path
 
-### 8.1 Phase 1: Module Reorganization (Non-Breaking)
+> **Implementation Note (2026-03-19)**: All 6 phases have been implemented. The codebase now reflects the full RFC 008 architecture: ~23k LOC Rust + 600 LOC Go, ~436 tests, 4 Rust crates (truffle-core, truffle-napi, truffle-tauri-plugin, truffle-cli) + Go sidecar.
+
+### 8.1 Phase 1: Module Reorganization (Non-Breaking) -- COMPLETE
 
 **Effort:** 2-3 hours
 **Breaking changes:** None (re-exports maintain backward compatibility)
+**Status:** Implemented 2026-03-19
 
 1. Create `services/` module, move `store_sync/` and `file_transfer/` under it
 2. Create `tailscale/` module, extract auth/health concerns from `runtime.rs`
@@ -1346,10 +1350,11 @@ react ──> core ───┘ (via truffle-napi)
    pub use http::proxy as reverse_proxy;
    ```
 
-### 8.2 Phase 2: Sidecar Improvements (Non-Breaking)
+### 8.2 Phase 2: Sidecar Improvements (Non-Breaking) -- COMPLETE
 
 **Effort:** 4-6 hours
 **Breaking changes:** None (additive only)
+**Status:** Implemented 2026-03-19
 
 1. Replace `resolvePeerDNS` with `WhoIs()` in the sidecar
 2. Add background state monitoring goroutine
@@ -1359,10 +1364,11 @@ react ──> core ───┘ (via truffle-napi)
 6. Add ephemeral node support to start command
 7. Add corresponding Rust event variants (additive to `ShimLifecycleEvent`)
 
-### 8.3 Phase 3: Unified Event API (Breaking for NAPI)
+### 8.3 Phase 3: Unified Event API (Breaking for NAPI) -- COMPLETE
 
 **Effort:** 4-6 hours
 **Breaking changes:** NAPI bindings need updating
+**Status:** Implemented 2026-03-19
 
 1. Create `TruffleEvent` enum (Section 6.3)
 2. Add `TruffleRuntime::start() -> broadcast::Receiver<TruffleEvent>` that merges all internal event streams into one
@@ -1370,30 +1376,33 @@ react ──> core ───┘ (via truffle-napi)
 4. Add convenience accessors: `runtime.bus()`, `runtime.store_sync()`, `runtime.file_transfer()`, `runtime.http()`, `runtime.push()`
 5. Update NAPI bindings to use the new API
 
-### 8.4 Phase 4: HTTP Router (Breaking for Reverse Proxy)
+### 8.4 Phase 4: HTTP Router (Breaking for Reverse Proxy) -- COMPLETE
 
 **Effort:** 6-8 hours
 **Breaking changes:** Reverse proxy API changes (path-based instead of port-based)
+**Status:** Implemented 2026-03-19
 
 1. Implement `HttpRouter` (Section 3.2)
 2. Change `ConnectionManager::handle_incoming` to route through `HttpRouter` instead of hard-coding `GET /ws`
 3. Migrate `ProxyManager` to `ReverseProxyHandler` (path-based routing)
 4. Implement `StaticHandler` for static file serving
 
-### 8.5 Phase 5: PWA & Web Push (Additive)
+### 8.5 Phase 5: PWA & Web Push (Additive) -- COMPLETE
 
 **Effort:** 8-12 hours
 **Breaking changes:** None (entirely new functionality)
+**Status:** Implemented 2026-03-19
 
 1. Implement `PwaHandler` (manifest, service worker, icons)
 2. Implement `PushManager` (VAPID keys, subscription management, push delivery)
 3. Add API endpoints for push subscription
 4. Add integration tests with a headless browser
 
-### 8.6 Phase 6: CLI Tool (New Crate)
+### 8.6 Phase 6: CLI Tool (New Crate) -- COMPLETE
 
 **Effort:** 4-6 hours
 **Breaking changes:** None (new crate)
+**Status:** Implemented 2026-03-19
 
 1. Create `truffle-cli` crate
 2. Implement commands: `status`, `peers`, `send`, `proxy`, `serve`
@@ -1401,16 +1410,16 @@ react ──> core ───┘ (via truffle-napi)
 
 ### 8.7 Summary
 
-| Phase | Effort | Breaking | Can Ship Independently |
-|-------|--------|----------|----------------------|
-| 1. Module reorg | 2-3h | No | Yes |
-| 2. Sidecar improvements | 4-6h | No | Yes |
-| 3. Unified event API | 4-6h | NAPI | Yes (with NAPI update) |
-| 4. HTTP router | 6-8h | Reverse proxy | Yes |
-| 5. PWA & Push | 8-12h | No | Yes |
-| 6. CLI tool | 4-6h | No | Yes |
+| Phase | Effort | Breaking | Can Ship Independently | Status |
+|-------|--------|----------|----------------------|--------|
+| 1. Module reorg | 2-3h | No | Yes | **Complete** |
+| 2. Sidecar improvements | 4-6h | No | Yes | **Complete** |
+| 3. Unified event API | 4-6h | NAPI | Yes (with NAPI update) | **Complete** |
+| 4. HTTP router | 6-8h | Reverse proxy | Yes | **Complete** |
+| 5. PWA & Push | 8-12h | No | Yes | **Complete** |
+| 6. CLI tool | 4-6h | No | Yes | **Complete** |
 
-Total: ~30-40 hours of implementation across 6 independent phases.
+Total: ~30-40 hours of implementation across 6 phases. All phases complete as of 2026-03-19.
 
 ---
 

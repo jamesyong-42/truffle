@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use napi_derive::napi;
 
 use truffle_core::mesh::node::{IncomingMeshMessage, MeshNodeEvent};
@@ -375,19 +373,6 @@ pub fn napi_peer_to_core(p: &NapiTailnetPeer) -> truffle_core::types::TailnetPee
         last_seen: p.last_seen.clone(),
         key_expiry: p.key_expiry.clone(),
         expired: p.expired.unwrap_or(false),
-    }
-}
-
-/// Convert JS metadata (serde_json::Value) to HashMap.
-pub fn value_to_metadata(val: &serde_json::Value) -> Option<HashMap<String, serde_json::Value>> {
-    match val {
-        serde_json::Value::Object(map) => {
-            let result: HashMap<String, serde_json::Value> = map.iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            Some(result)
-        }
-        _ => None,
     }
 }
 

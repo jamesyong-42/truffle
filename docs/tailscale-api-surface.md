@@ -425,49 +425,75 @@ Auth key options: `reusable`, `ephemeral`, `preauthorized`, `tags`, `expirySecon
 
 ## Part 2: What Truffle Currently Uses
 
+> **Updated 2026-03-19** after RFC 008 implementation (Phase 2: Sidecar Improvements).
+
 ### 2.1 Go Sidecar (sidecar-slim/main.go)
 
 #### tsnet.Server Fields Used
 
 | Field | Where | Value |
 |-------|-------|-------|
-| `Hostname` | `handleStart()` line 181 | From `startData.Hostname` |
-| `Dir` | `handleStart()` line 182 | From `startData.StateDir` |
-| `Logf` | `handleStart()` line 183 | `log.Printf` |
-| `AuthKey` | `handleStart()` line 186 | From `startData.AuthKey` (optional) |
+| `Hostname` | `handleStart()` | From `startData.Hostname` |
+| `Dir` | `handleStart()` | From `startData.StateDir` |
+| `Logf` | `handleStart()` | `log.Printf` |
+| `AuthKey` | `handleStart()` | From `startData.AuthKey` (optional) |
+| `Ephemeral` | `handleStart()` | From `startData.Ephemeral` (optional) -- **NEW in RFC 008** |
+| `AdvertiseTags` | `handleStart()` | From `startData.Tags` (optional) -- **NEW in RFC 008** |
 
 #### tsnet.Server Methods Used
 
 | Method | Where | Purpose |
 |--------|-------|---------|
-| `Start()` | `handleStart()` line 189 | Initialize tsnet node |
-| `LocalClient()` | `waitForRunning()` line 199, `listenTLS()` line 254, `listenTCP()` line 278, `handleGetPeers()` line 322 | Get local API client |
-| `ListenTLS("tcp", ":443")` | `listenTLS()` line 255 | TLS listener for secure mesh connections |
-| `Listen("tcp", ":9417")` | `listenTCP()` line 279 | Plain TCP listener for unencrypted mesh connections |
-| `Dial(ctx, "tcp", addr)` | `handleDial()` line 371 | Connect to remote peer |
-| `Close()` | `handleStop()` line 307 | Shutdown |
+| `Start()` | `handleStart()` | Initialize tsnet node |
+| `LocalClient()` | `waitForRunning()`, `listenTLS()`, `listenTCP()`, `handleGetPeers()`, `monitorState()`, incoming connection handlers | Get local API client |
+| `ListenTLS("tcp", ":443")` | `listenTLS()` | TLS listener for secure mesh + HTTP connections |
+| `Listen("tcp", ":9417")` | `listenTCP()` | Plain TCP listener for unencrypted mesh connections |
+| `Dial(ctx, "tcp", addr)` | `handleDial()` | Connect to remote peer |
+| `Close()` | `handleStop()` | Shutdown (with explicit listener cleanup) -- **improved in RFC 008** |
 
 #### LocalClient Methods Used
 
 | Method | Where | Purpose |
 |--------|-------|---------|
-| `StatusWithoutPeers(ctx)` | `waitForRunning()` line 214 | Poll for BackendState == "Running" + AuthURL |
-| `Status(ctx)` | `handleGetPeers()` line 328, `resolvePeerDNS()` line 536 | Get full peer list, resolve peer DNS names |
+| `StatusWithoutPeers(ctx)` | `waitForRunning()`, `monitorState()` | Poll for BackendState + AuthURL; background state monitoring -- **expanded in RFC 008** |
+| `Status(ctx)` | `handleGetPeers()` | Get full peer list with rich info |
+| `WhoIs(ctx, remoteAddr)` | `resolvePeerIdentity()` | Identify incoming connections by IP -- **NEW in RFC 008**, replaces O(n) `Status()` calls |
 
 #### Status Fields Consumed
 
 | Field | Where |
 |-------|-------|
-| `status.BackendState` | `waitForRunning()` — check for `"Running"` |
-| `status.AuthURL` | `waitForRunning()` — send `tsnet:authRequired` event |
+| `status.BackendState` | `waitForRunning()`, `monitorState()` — check for `"Running"`, `"NeedsLogin"`, `"NeedsMachineAuth"` |
+| `status.AuthURL` | `waitForRunning()`, `monitorState()` — send `tsnet:authRequired` event |
 | `status.TailscaleIPs[0]` | `waitForRunning()` — report our IP |
 | `status.Self.DNSName` | `waitForRunning()` — report our MagicDNS name |
+| `status.Self.KeyExpiry` | `monitorState()` — detect key expiry -- **NEW in RFC 008** |
+| `status.Health` | `monitorState()` — health warnings -- **NEW in RFC 008** |
 | `peer.ID` | `handleGetPeers()` — peer identity |
 | `peer.HostName` | `handleGetPeers()` — peer hostname |
 | `peer.DNSName` | `handleGetPeers()` — peer MagicDNS name |
-| `peer.TailscaleIPs` | `handleGetPeers()`, `resolvePeerDNS()` — peer IPs |
+| `peer.TailscaleIPs` | `handleGetPeers()` — peer IPs |
 | `peer.Online` | `handleGetPeers()` — peer online status |
 | `peer.OS` | `handleGetPeers()` — peer OS |
+| `peer.CurAddr` | `handleGetPeers()` — direct address (empty = relayed) -- **NEW in RFC 008** |
+| `peer.Relay` | `handleGetPeers()` — DERP region name -- **NEW in RFC 008** |
+| `peer.LastSeen` | `handleGetPeers()` — last seen timestamp -- **NEW in RFC 008** |
+| `peer.KeyExpiry` | `handleGetPeers()` — key expiry timestamp -- **NEW in RFC 008** |
+| `peer.Expired` | `handleGetPeers()` — expired flag -- **NEW in RFC 008** |
+| `peer.Tags` | `handleGetPeers()` — node tags -- **NEW in RFC 008** |
+
+#### WhoIs Fields Consumed (NEW in RFC 008)
+
+| Field | Where |
+|-------|-------|
+| `whois.Node.ID` | `resolvePeerIdentity()` — node identity |
+| `whois.UserProfile.ID` | `resolvePeerIdentity()` — user identity |
+| `whois.UserProfile.LoginName` | `resolvePeerIdentity()` — user login |
+| `whois.UserProfile.DisplayName` | `resolvePeerIdentity()` — display name |
+| `whois.Node.Addresses` | `resolvePeerIdentity()` — Tailscale IPs |
+| `whois.Node.Name` | `resolvePeerIdentity()` — DNS name |
+| `whois.Node.Hostinfo.OS()` | `resolvePeerIdentity()` — OS |
+| `whois.Node.Tags` | `resolvePeerIdentity()` — node tags |
 
 ### 2.2 Rust Side (truffle-core)
 
@@ -475,9 +501,9 @@ Auth key options: `reusable`, `ephemeral`, `preauthorized`, `tags`, `expirySecon
 
 | Command | Rust Source | Purpose |
 |---------|-------------|---------|
-| `tsnet:start` | `shim.rs` `run_child()` | Start tsnet with hostname, stateDir, authKey, bridgePort, sessionToken |
+| `tsnet:start` | `shim.rs` `run_child()` | Start tsnet with hostname, stateDir, authKey, bridgePort, sessionToken, ephemeral, tags |
 | `tsnet:stop` | `shim.rs` `stop()` | Graceful shutdown |
-| `tsnet:getPeers` | `shim.rs` `get_peers()` | Request peer list |
+| `tsnet:getPeers` | `shim.rs` `get_peers()` | Request peer list (with rich info) |
 | `bridge:dial` | `shim.rs` `dial_raw()` | Dial remote peer with requestId, target, port |
 
 #### Events Handled from Go Shim
@@ -488,7 +514,11 @@ Auth key options: `reusable`, `ephemeral`, `preauthorized`, `tags`, `expirySecon
 | `tsnet:stopped` | `ShimLifecycleEvent::Stopped` | Notify application layer |
 | `tsnet:status` | `ShimLifecycleEvent::Status(data)` | Forward status updates |
 | `tsnet:authRequired` | `ShimLifecycleEvent::AuthRequired` | Forward auth URL for user login |
-| `tsnet:peers` | `ShimLifecycleEvent::Peers(data)` | Forward peer list |
+| `tsnet:peers` | `ShimLifecycleEvent::Peers(data)` | Forward peer list (with rich peer info) |
+| `tsnet:stateChange` | `ShimLifecycleEvent::StateChanged` | Backend state transitions -- **NEW in RFC 008** |
+| `tsnet:needsApproval` | `ShimLifecycleEvent::NeedsApproval` | NeedsMachineAuth state -- **NEW in RFC 008** |
+| `tsnet:keyExpiring` | `ShimLifecycleEvent::KeyExpiring` | Key expiry warning -- **NEW in RFC 008** |
+| `tsnet:healthWarning` | `ShimLifecycleEvent::HealthWarning` | Health warnings from Tailscale -- **NEW in RFC 008** |
 | `bridge:dialResult` | `ShimLifecycleEvent::DialFailed` (on failure) | Report dial failures; success handled via bridge TCP |
 | `tsnet:error` | Logged via `tracing::error!` | Log errors |
 
