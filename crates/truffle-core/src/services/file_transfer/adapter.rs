@@ -210,7 +210,13 @@ impl FileTransferAdapter {
             token: offer.token.clone(),
         };
 
-        let payload = serde_json::to_string(&accept).unwrap_or_default();
+        let payload = match serde_json::to_string(&accept) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to serialize file transfer accept: {e}");
+                return;
+            }
+        };
         let _ = self.bus_tx.send((
             offer.sender_device_id.clone(),
             message_types::ACCEPT.to_string(),
@@ -227,7 +233,13 @@ impl FileTransferAdapter {
             reason: reason.to_string(),
         };
 
-        let payload = serde_json::to_string(&reject).unwrap_or_default();
+        let payload = match serde_json::to_string(&reject) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to serialize file transfer reject: {e}");
+                return;
+            }
+        };
         let _ = self.bus_tx.send((
             offer.sender_device_id.clone(),
             message_types::REJECT.to_string(),
@@ -246,7 +258,13 @@ impl FileTransferAdapter {
                 cancelled_by: self.config.local_device_id.clone(),
                 reason: "cancelled by user".to_string(),
             };
-            let payload = serde_json::to_string(&cancel).unwrap_or_default();
+            let payload = match serde_json::to_string(&cancel) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("Failed to serialize file transfer cancel: {e}");
+                    return;
+                }
+            };
             let _ = self.bus_tx.send((
                 info.peer_device_id.clone(),
                 message_types::CANCEL.to_string(),

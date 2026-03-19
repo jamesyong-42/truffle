@@ -204,7 +204,9 @@ impl StoreSyncAdapter {
             msg_type if msg_type == message_types::SYNC_CLEAR => {
                 self.handle_sync_clear(&store, &message.payload);
             }
-            _ => {}
+            other => {
+                tracing::warn!("[StoreSyncAdapter] Unknown sync message type: {other}");
+            }
         }
     }
 

@@ -1,5 +1,11 @@
 # RFC 003: Truffle Rust Rewrite — Option C: Thin Go Shim + Rust Core
 
+**Status**: Implemented
+**Created**: 2026-02-24
+**Implemented**: 2026-03-08
+
+---
+
 ## Context
 
 Truffle is a ~8,200 LOC mesh networking framework (~4,400 LOC TypeScript + ~3,800 LOC Go source) built on Tailscale. The goal is to rewrite it in Rust for long-term robustness, performance, and to support both Node.js packages (via NAPI-RS) and Tauri v2 desktop apps from a single Rust core.

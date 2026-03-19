@@ -7,7 +7,7 @@
 
 **Mesh networking for local-first apps, built on Tailscale.**
 
-Truffle lets your devices discover each other, elect a primary, and exchange messages over a secure Tailscale network -- no central server required. The core is written in Rust (~23k LOC, ~436 tests) with bindings for Node.js (via NAPI-RS), Tauri desktop apps, and a CLI tool. A thin Go sidecar (~600 LOC) provides the Tailscale `tsnet` integration.
+Truffle lets your devices discover each other, elect a primary, and exchange messages over a secure Tailscale network -- no central server required. The core is written in Rust (~39k LOC, ~929 tests) with bindings for Node.js (via NAPI-RS), Tauri desktop apps, and a CLI tool. A thin Go sidecar (~600 LOC) provides the Tailscale `tsnet` integration.
 
 ## Features
 
@@ -17,7 +17,7 @@ Truffle lets your devices discover each other, elect a primary, and exchange mes
 - **State Sync** -- Cross-device store synchronization via CRDT-like device-scoped slices
 - **File Transfer** -- Resumable transfers with SHA-256 verification and real-time progress
 - **HTTP Services** -- Reverse proxy, static file hosting, PWA support, and Web Push notifications
-- **Wire Protocol** -- MessagePack/JSON framing with length-prefixed codec
+- **Wire Protocol v3** -- Binary-framed protocol with typed dispatch, MessagePack/JSON codec, control/data frame discrimination, and v2 backward compatibility
 - **Builder API** -- Ergonomic `TruffleRuntime::builder()` for configuring the full stack
 - **CLI Tool** -- `truffle-cli` for status, peers, messaging, proxy, and file serving
 
@@ -47,7 +47,7 @@ Truffle is organized into 6 layers, from network foundation to application servi
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The Rust core (`truffle-core`) implements all mesh logic: device discovery, primary election, message routing, store sync, file transfer, HTTP services (reverse proxy, static hosting, PWA, Web Push), and a unified event API. The `TruffleRuntime` (in `runtime.rs`) wires together the sidecar, bridge, connection manager, mesh node, and HTTP router into a single high-level API with an ergonomic builder pattern. A thin Go shim (`sidecar-slim`) provides the Tailscale `tsnet` integration with WhoIs-based peer identity, background state monitoring, and ephemeral node support.
+The Rust core (`truffle-core`) implements all mesh logic: device discovery, primary election, message routing, store sync, file transfer, HTTP services (reverse proxy, static hosting, PWA, Web Push), and a unified event API. The v3 wire protocol uses binary-framed typed dispatch with control/data frame discrimination and backward-compatible v2 fallback. The `TruffleRuntime` (in `runtime.rs`) wires together the sidecar, bridge, connection manager, mesh node, and HTTP router into a single high-level API with an ergonomic builder pattern. A thin Go shim (`sidecar-slim`) provides the Tailscale `tsnet` integration with WhoIs-based peer identity, background state monitoring, and ephemeral node support. There are 4 Rust crates in the workspace: `truffle-core` (library), `truffle-napi` (Node.js bindings), `truffle-tauri-plugin` (Tauri v2), and `truffle-cli` (CLI tool).
 
 ## Installation
 
@@ -232,7 +232,7 @@ cd crates/truffle-napi && pnpm run build
 # Build TypeScript packages
 pnpm run build
 
-# Run Rust tests (~436 tests)
+# Run Rust tests (~929 tests)
 cargo test --workspace
 
 # Lint and format
