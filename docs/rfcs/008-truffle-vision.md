@@ -1327,14 +1327,14 @@ Truffle uses Tailscale's identity system. Every device on the tailnet is authent
 
 Device identity IS the auth system. A device's Tailscale identity (user + node) determines what it can do.
 
-### 9.5 No Video/Audio Streaming
+### 9.5 No Video/Audio Codec Handling
 
-Truffle handles messages, files, and HTTP. It does not handle real-time media:
+Truffle handles messages, files, and HTTP. It does not handle media codecs or real-time streaming protocols:
 - No WebRTC
 - No RTMP
-- No audio/video codecs
+- No audio/video transcoding or codec handling
 
-For media, use the reverse proxy to expose a streaming server, or implement media-specific protocols at the application layer using the message bus for signaling.
+However, truffle's **reverse proxy** is the natural transport for on-demand video streaming. HTTP range requests (`Range: bytes=X-Y`) are how all modern video players work — a `<video>` tag in a browser streams perfectly over a reverse-proxied HTTP server. See **Appendix D** for a detailed example of building a media streaming app on truffle.
 
 ### 9.6 No iOS/Android Native SDK
 
@@ -1366,7 +1366,7 @@ For critical data, use file transfer (which has integrity verification and resum
 
 ## Appendix A: How This Relates to the vibe-ctl Ecosystem
 
-Truffle is the networking infrastructure that vibe-ctl and cheeseboard build on:
+Truffle is the networking infrastructure that the vibe-ctl ecosystem builds on:
 
 ```
 vibe-ctl (main product: remote Claude Code monitoring)
@@ -1375,14 +1375,16 @@ vibe-ctl (main product: remote Claude Code monitoring)
     |       |
     |       +-- sidecar-slim (Go/tsnet)
     |
-    +-- cheeseboard (clipboard + file sync) -- uses truffle mesh
+    +-- cheeseboard (clipboard + file sync) -- uses truffle store sync
+    |
+    +-- fondue (media streaming) -- uses truffle reverse proxy (planned)
     |
     +-- xterm-r3f (terminal renderer) -- for the PWA UI
     |
     +-- r3f-msdf (text rendering) -- supports xterm-r3f
 ```
 
-Truffle's design ensures it serves both vibe-ctl's needs (terminal monitoring, session sharing, push notifications) and cheeseboard's needs (clipboard sync, file drop) without either product knowing about the other.
+Truffle's design ensures it serves vibe-ctl (terminal monitoring, session sharing, push notifications), cheeseboard (clipboard sync, file drop), and fondue (media streaming) without any product knowing about the others.
 
 ## Appendix B: Tailscale Features Truffle Leverages
 
@@ -1447,3 +1449,105 @@ Truffle's design ensures it serves both vibe-ctl's needs (terminal monitoring, s
 ```
 
 Namespaces: `mesh` (internal), `sync` (store sync), `file-transfer` (file transfer signaling), and any application-defined namespace.
+
+## Appendix D: Use Case — Media Streaming App (fondue)
+
+A Plex-like personal media streaming app demonstrates how truffle's layers compose to support rich applications **without any truffle changes**.
+
+### Architecture
+
+```
+Node A (media server)                    Node B (viewer)
+┌─────────────────────────┐             ┌──────────────────────┐
+│ fondue app              │             │ Browser              │
+│                         │             │                      │
+│ ┌─────────────────────┐ │  Tailscale  │  https://node-a      │
+│ │ Media server :8080  │◄├─────────────├──.tailnet.ts.net/    │
+│ │ (axum, serves files │ │  encrypted  │                      │
+│ │  with Range headers)│ │  WireGuard  │  <video src="/movies │
+│ └─────────────────────┘ │  tunnel     │   /film.mp4">        │
+│                         │             │                      │
+│ truffle layers used:    │             │ truffle layers used:  │
+│  L5: reverse proxy      │             │  (none — just HTTPS) │
+│  L4: store sync (watch  │             │                      │
+│      history, position) │             │                      │
+│  L3: mesh (discovery)   │             │                      │
+└─────────────────────────┘             └──────────────────────┘
+```
+
+### What truffle provides
+
+| Truffle layer | What fondue uses it for |
+|---|---|
+| **L5 HTTP: Reverse proxy** | Expose local media server (port 8080) to entire tailnet. Browsers on other devices access `https://node-a.tailnet.ts.net/` and stream video via standard HTTP range requests. |
+| **L5 HTTP: Static hosting** | Serve the fondue web UI (React SPA) — library browser, search, player |
+| **L5 HTTP: PWA** | Installable on mobile devices. Offline cache for the UI shell. |
+| **L5 HTTP: Web Push** | "New episode available" notifications to subscribed browsers |
+| **L4: Store sync** | Sync watch history and playback position across all devices. Each device owns its own `WatchHistoryStore` slice — when you pause on Node A, Node B knows where you left off. |
+| **L4: Message bus** | Real-time "now playing" status broadcast — other devices see what's playing |
+| **L3: Mesh** | Auto-discover all fondue instances on the tailnet. Primary node coordinates the media library index. |
+| **L0: Tailscale** | Zero-config encrypted access from anywhere. No port forwarding, no dynamic DNS, no firewall rules. |
+
+### What fondue owns (NOT truffle's job)
+
+| Concern | Implementation |
+|---|---|
+| **Media library scanning** | Walk a directory, read file metadata (ffprobe), fetch artwork from TMDB/TVDB |
+| **Transcoding** | ffmpeg HLS segmentation for adaptive bitrate (optional — direct play works without it) |
+| **Media HTTP server** | axum server serving files with `Accept-Ranges: bytes` headers |
+| **Library UI** | React SPA with poster grid, search, and video player (hls.js for adaptive) |
+| **Playback position tracking** | `WatchHistoryStore` implementing `SyncableStore` — per-device positions synced via truffle |
+
+### Key insight
+
+Video streaming is just HTTP range requests. A `<video src="url">` tag in a browser automatically sends `Range: bytes=X-Y` headers, and the server responds with `206 Partial Content`. Truffle's reverse proxy passes these through transparently. **No custom streaming protocol needed.**
+
+### Code sketch
+
+```rust
+// fondue/src/main.rs
+let runtime = TruffleRuntime::builder()
+    .hostname("fondue")
+    .sidecar_path(sidecar_binary)
+    .build().await?;
+
+runtime.start().await?;
+
+// Start local media server
+let media_server = MediaServer::new("/path/to/media");
+tokio::spawn(media_server.serve(8080));
+
+// Expose via truffle reverse proxy (HTTPS, auto-cert from Tailscale)
+runtime.http().proxy("/api", "localhost:8080");     // media API
+runtime.http().serve_static("/", "./fondue-ui/dist"); // web UI
+
+// Sync watch history across devices
+let watch_store = WatchHistoryStore::new(&runtime.device_id());
+runtime.store_sync().register(watch_store.clone());
+runtime.store_sync().start().await?;
+
+// Broadcast "now playing" status
+runtime.bus().broadcast("fondue", "now-playing", json!({
+    "title": "The Matrix",
+    "position": 3420,
+}));
+```
+
+### Performance considerations
+
+| Concern | Impact | Mitigation |
+|---|---|---|
+| **DERP relay bandwidth** | Tailscale relays have limited throughput (~10 Mbps). Video at 1080p needs ~5-8 Mbps. | Tailscale prioritizes direct WireGuard connections. DERP is fallback only. Direct connections can handle 4K. |
+| **Range request pass-through** | Reverse proxy must not buffer entire responses in memory. | Use streaming response bodies (axum/hyper do this by default). |
+| **Connection quality** | App should adapt bitrate based on available bandwidth. | Truffle can expose connection quality info (direct vs relay, latency). HLS adaptive bitrate handles this at the player level. |
+| **Large library indexing** | Scanning 1000+ files takes time. | Background indexing with progress events via message bus. |
+
+### Why this validates truffle's architecture
+
+fondue uses **every truffle layer** without requiring any truffle changes:
+- L0 (Tailscale): encrypted access from anywhere
+- L3 (Mesh): device discovery
+- L4 (Store sync + Message bus): watch history + now-playing
+- L5 (HTTP): reverse proxy + static site + PWA + push
+
+This is the "SQLite for networking" vision — drop truffle into your app, and multi-device networking just works.
