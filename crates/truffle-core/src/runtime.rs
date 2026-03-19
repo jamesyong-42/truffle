@@ -120,7 +120,7 @@ pub struct RuntimeConfig {
 /// Builder for `TruffleRuntime`. Provides a fluent API for configuration.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let (runtime, event_rx) = TruffleRuntime::builder()
 ///     .hostname("my-app")
 ///     .sidecar_path("/usr/local/bin/truffle-sidecar")
@@ -956,7 +956,7 @@ impl HttpHandle {
     /// push notification endpoints if a VAPID key path is provided.
     ///
     /// # Example
-    /// ```ignore
+    /// ```text
     /// let http = runtime.http().await.unwrap();
     /// http.enable_pwa(PwaConfig {
     ///     name: "My App".to_string(),
