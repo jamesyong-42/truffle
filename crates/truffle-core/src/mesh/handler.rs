@@ -1820,4 +1820,115 @@ mod tests {
         assert_eq!(dm.devices().len(), 10,
             "All 10 rapid announces should be processed and added");
     }
+
+    // ── Split-brain detection tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_split_brain_triggers_re_election() {
+        let (handler, _event_rx, _dev_rx, mut elec_rx) = make_handler();
+
+        // Make local node the primary (simulating self-election)
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // Drain initial election events
+        while elec_rx.try_recv().is_ok() {}
+
+        // Verify we think we're primary
+        assert!(handler.election.read().await.is_primary());
+
+        // Receive device:list from a remote node claiming IT is primary
+        let msg = MeshMessage::new(
+            "device-list",
+            "remote-primary",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![make_device("remote-primary", "Remote Primary")],
+                primary_id: "remote-primary".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // Split-brain detected: we're primary but they claim different primary.
+        // Should trigger a re-election (phase transitions to Collecting).
+        let election = handler.election.read().await;
+        assert_eq!(
+            election.phase(),
+            ElectionPhase::Collecting,
+            "Split-brain must trigger re-election (phase should be Collecting)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_split_brain_when_not_primary() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Local node is NOT primary (default state)
+        assert!(!handler.election.read().await.is_primary());
+
+        // Receive device:list from a remote node claiming to be primary
+        let msg = MeshMessage::new(
+            "device-list",
+            "remote-primary",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![make_device("remote-primary", "Remote Primary")],
+                primary_id: "remote-primary".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // Should accept the remote primary normally (no re-election)
+        let election = handler.election.read().await;
+        assert_eq!(
+            election.primary_id(),
+            Some("remote-primary"),
+            "Secondary should accept remote primary via device:list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_split_brain_when_same_primary() {
+        let (handler, _event_rx, _dev_rx, _elec_rx) = make_handler();
+
+        // Make local node the primary
+        {
+            let mut election = handler.election.write().await;
+            election.configure(ElectionConfig {
+                device_id: "local-dev".to_string(),
+                started_at: 1000,
+                prefer_primary: false,
+            });
+            election.set_primary("local-dev");
+        }
+
+        // Receive device:list from a remote node that agrees we're primary
+        let msg = MeshMessage::new(
+            "device-list",
+            "remote-secondary",
+            serde_json::to_value(&DeviceListPayload {
+                devices: vec![make_device("local-dev", "Local Device")],
+                primary_id: "local-dev".to_string(),
+            })
+            .unwrap(),
+        );
+
+        handler.dispatch_mesh_message(&msg).await;
+
+        // No conflict — we're primary and the remote agrees
+        let election = handler.election.read().await;
+        assert!(
+            election.is_primary(),
+            "No split-brain when remote agrees on primary"
+        );
+    }
 }
