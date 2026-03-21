@@ -227,7 +227,6 @@ Options:
   --name <name>         Set this node's display name     [default: hostname]
   --type <type>         Device type: desktop, server, mobile  [default: auto-detected]
   --hostname <prefix>   Tailscale hostname prefix        [default: "truffle"]
-  --prefer-primary      Volunteer to be the primary node
   --auth-key <key>      Tailscale auth key (for headless setup)
   --port <port>         Mesh listen port                 [default: 443]
   --background, -b      Run as a background daemon
@@ -246,16 +245,15 @@ $ truffle up
   Status      ● online
   IP          100.64.0.3
   DNS         truffle-desktop-a1b2.tailnet.ts.net
-  Role        secondary
-  Primary     living-room-server (100.64.0.1)
   Mesh        3 nodes online
   Uptime      just started
 
   Listening for connections...
+  Handles laptop sleep/wake automatically -- reconnects to peers when your network comes back.
   Press Ctrl+C to stop, or run 'truffle down' from another terminal.
 ```
 
-The output is a live TUI that updates. When a new node joins or leaves, the mesh count updates. When the role changes (e.g., this node becomes primary), it updates in place.
+The output is a live TUI that updates. When a new node joins or leaves, the mesh count updates in place.
 
 **If Tailscale auth is needed:**
 ```
@@ -330,8 +328,6 @@ $ truffle status
   Status      ● online
   IP          100.64.0.3
   DNS         truffle-desktop-a1b2.tailnet.ts.net
-  Role        secondary
-  Primary     living-room-server
   Uptime      2h 14m
 
   Mesh
@@ -387,22 +383,24 @@ Aliases: truffle list, truffle nodes
 ```
 $ truffle ls
 
-  NODE                  STATUS     ROLE        LATENCY
-  james-macbook         ● online   secondary   —
-  living-room-server    ● online   primary     2ms
-  work-desktop          ● online   secondary   14ms
+  NODE                  STATUS     CONNECTION   LATENCY
+  james-macbook         ● online   —            —
+  living-room-server    ● online   direct       2ms
+  work-desktop          ● online   relayed      14ms
 
   3 nodes online
 ```
+
+The LATENCY column requires active pinging via the sidecar's `tsnet:ping` command and may show `—` initially. Latency values are filled in asynchronously after the listing is displayed, or can be pre-fetched with `truffle ls -l` (which pings all peers before displaying results).
 
 **Example (long format):**
 ```
 $ truffle ls -l
 
-  NODE                  STATUS     ROLE        IP            OS       LATENCY   CAPABILITIES
-  james-macbook         ● online   secondary   100.64.0.3    darwin   —         file-transfer, sync
-  living-room-server    ● online   primary     100.64.0.1    linux    2ms       file-transfer, sync, http
-  work-desktop          ● online   secondary   100.64.0.5    linux    14ms      file-transfer, sync
+  NODE                  STATUS     CONNECTION   IP            OS       LATENCY   CAPABILITIES
+  james-macbook         ● online   —            100.64.0.3    darwin   —         file-transfer, sync
+  living-room-server    ● online   direct       100.64.0.1    linux    2ms       file-transfer, sync, http
+  work-desktop          ● online   relayed      100.64.0.5    linux    14ms      file-transfer, sync
 
   3 nodes online
 ```
@@ -411,11 +409,11 @@ $ truffle ls -l
 ```
 $ truffle ls -a
 
-  NODE                  STATUS      ROLE        LATENCY
-  james-macbook         ● online    secondary   —
-  living-room-server    ● online    primary     2ms
-  work-desktop          ● online    secondary   14ms
-  old-laptop            ○ offline   —           —
+  NODE                  STATUS      CONNECTION   LATENCY
+  james-macbook         ● online    —            —
+  living-room-server    ● online    direct       2ms
+  work-desktop          ● online    relayed      14ms
+  old-laptop            ○ offline   —            —
 
   3 nodes online, 1 offline
 ```
@@ -427,7 +425,7 @@ $ truffle ls --json
   {
     "name": "james-macbook",
     "status": "online",
-    "role": "secondary",
+    "connection": "direct",
     "ip": "100.64.0.3",
     "os": "darwin",
     "latency_ms": null,
@@ -696,6 +694,8 @@ $ truffle send laptop "are you there?" --wait
 
 **Copy files between nodes (like scp).**
 
+File transfer uses Tailscale's built-in Taildrop API for efficient peer-to-peer data transfer, wrapped with truffle's progress reporting and SHA-256 verification.
+
 ```
 truffle cp <source> <node>:<path>     # upload
 truffle cp <node>:<path> <dest>       # download
@@ -766,7 +766,6 @@ $ truffle doctor
   ✓ Sidecar binary found           /usr/local/bin/truffle-sidecar
   ✓ Config file valid              ~/.config/truffle/config.toml
   ✓ Mesh reachable                 3 nodes responding
-  ✓ Primary node healthy           living-room-server (2ms)
   ✓ Key expiry                     89 days remaining
 
   All checks passed. Your mesh is healthy.
@@ -883,7 +882,7 @@ truffle store sync --clear         # clear local store
 
 Options:
   --status          Show sync status (default when no flags)
-  --reset           Force a full resync from primary
+  --reset           Force a full resync from peers
   --clear           Clear the local store
 ```
 
@@ -897,7 +896,6 @@ $ truffle store sync
   Status        ● synced
   Last sync     12 seconds ago
   Entries       142 keys across 3 devices
-  Primary       living-room-server
 
   Per-device:
     james-macbook         48 keys   ● current
@@ -1069,21 +1067,21 @@ Truffle uses a restrained, professional color palette that works on both dark an
 ### `truffle ls` Output
 
 ```
-  NODE                  STATUS     ROLE        LATENCY
-  james-macbook         ● online   secondary   —
-  living-room-server    ● online   primary     2ms
-  work-desktop          ● online   secondary   14ms
+  NODE                  STATUS     CONNECTION   LATENCY
+  james-macbook         ● online   —            —
+  living-room-server    ● online   direct       2ms
+  work-desktop          ● online   relayed      14ms
 
   3 nodes online
 ```
 
 - Column headers are **dim/gray** (not bold -- they are metadata, not data)
 - Status dots are colored: green for online, dim gray for offline
-- "primary" is subtly highlighted (bold or different color)
+- CONNECTION column shows "direct" or "relayed" (from `tsnet:ping` results)
 - Latency right-aligned in its column
 - Bottom summary line is dimmed
 - Columns auto-size to content (no fixed widths)
-- Self (current node) has `—` for latency and is listed first
+- Self (current node) has `—` for both CONNECTION and LATENCY, and is listed first
 
 ### `truffle status` Output
 
@@ -1094,8 +1092,6 @@ Truffle uses a restrained, professional color palette that works on both dark an
   Status      ● online
   IP          100.64.0.3
   DNS         truffle-desktop-a1b2.tailnet.ts.net
-  Role        secondary
-  Primary     living-room-server
   Uptime      2h 14m
 
   Mesh
@@ -1217,17 +1213,37 @@ Every error follows this structure:
 
 ---
 
+## Part 5.5: Streaming Protocol Over Unix Socket
+
+Commands like `truffle tcp`, `truffle ws`, and `truffle chat` require long-lived bidirectional data streams, not simple request-response. The Unix socket between CLI and daemon supports this via a protocol upgrade pattern (similar to HTTP upgrading to WebSocket):
+
+1. **JSON-RPC handshake.** The CLI sends a normal JSON-RPC request (e.g., `tcp_connect` with `{ "target": "server:5432" }`).
+2. **Upgrade response.** The daemon responds with `{ "result": { "stream": true, "handle": "tcp-a1b2c3" } }`. This is the last JSON-RPC message on this connection.
+3. **Raw byte stream.** After the upgrade, the Unix socket becomes a raw bidirectional pipe. For `truffle tcp`, bytes flow through unframed. For `truffle ws`, each line from stdin becomes a WebSocket text frame, and received frames are written as lines to stdout. For `truffle chat`, the stream uses newline-delimited JSON events:
+
+```
+← {"type":"message","from":"laptop","text":"hello","ts":"14:23:01"}
+→ {"type":"message","text":"got it"}
+← {"type":"presence","node":"laptop","status":"typing"}
+```
+
+This design keeps interactive commands pipe-friendly (`echo "hello" | truffle tcp server:9000`) while supporting rich bidirectional communication for chat.
+
+---
+
 ## Part 6: Addressing Scheme
 
 ### The Resolution Order
 
 When you type a node reference, truffle resolves it in this order:
 
-1. **Exact mesh node name** -- `laptop` matches the node named "laptop" in the mesh
-2. **Alias from config** -- `db` matches an alias defined in `~/.config/truffle/config.toml`
-3. **Tailscale hostname prefix** -- `truffle-desktop-a1b2` matches the full Tailscale hostname
+1. **Config alias** -- `db` matches an alias defined in `~/.config/truffle/config.toml`
+2. **Mesh device_name** -- `laptop` matches the `device_name` from a truffle peer's `device-announce` message
+3. **Tailscale HostName** -- `truffle-desktop-a1b2` matches the Tailscale `HostName` field from the coordination server
 4. **Tailscale IP** -- `100.64.0.3` matches by IP address
 5. **Full DNS name** -- `truffle-desktop-a1b2.tailnet.ts.net` matches the FQDN
+
+The daemon maintains a correlation table mapping mesh `device_name` (from `device-announce`) to Tailscale `HostName` (from the sidecar's `monitorState` peer list). For truffle peers, users can refer to nodes by their friendly mesh name. For non-truffle Tailscale peers (regular devices on the same tailnet that are not running truffle), only Tailscale HostName, IP, and DNS resolution apply -- no mesh name is available.
 
 ### Port Syntax
 
@@ -1316,7 +1332,7 @@ Port completion is populated from known exposed services on that node.
 ### `truffle up`
 
 - **Junior developer test**: "Start your mesh node" -- yes, anyone understands `up`.
-- **Beautiful output**: Live dashboard with status, role, peer count. Passes.
+- **Beautiful output**: Live dashboard with status, peer count. Passes.
 - **Does the obvious thing**: Starts the node. No flags needed. Passes.
 - **Fails gracefully**: Tells you what is missing (Tailscale, sidecar) and how to fix it. Passes.
 - **Steve Jobs test**: One command to start. Status immediately visible. Nothing to configure. Approved.

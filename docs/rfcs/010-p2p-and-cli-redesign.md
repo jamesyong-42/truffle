@@ -575,6 +575,33 @@ pub struct DeviceListPayload {
 
 The `device-list` message type is retained for bootstrapping: when a node connects to a peer, it may receive a `device-list` telling it about other nodes the peer knows about. This is useful for mesh discovery but carries no role information.
 
+### 2.5 New Sidecar Commands (Dynamic Listeners + Ping)
+
+The Go sidecar's bridge protocol gains three new command pairs to support CLI features that require dynamic Tailscale networking:
+
+| Request | Response | Description |
+|---------|----------|-------------|
+| `tsnet:listen {"port": 3000, "tls": false}` | `tsnet:listening {"port": 3000}` | Start listening on a port via tsnet. Used by `truffle expose`. |
+| `tsnet:unlisten {"port": 3000}` | `tsnet:unlistened {"port": 3000}` | Stop listening on a port. Used by `truffle expose` teardown. |
+| `tsnet:ping {"target": "100.64.0.3"}` | `tsnet:pingResult {"latency_ms": 2.1, "direct": true, "relay": ""}` | Ping a Tailscale peer via tsnet. Returns latency, whether the path is direct, and relay name if relayed. Used by `truffle ping` and `truffle ls -l`. |
+
+These extend the existing bridge protocol (binary-framed, newline-delimited JSON commands) without changing its framing. The `tsnet:listen` command creates a listener in the Go sidecar that accepts connections and bridges them back to Rust via the existing bridge transport. The `tsnet:ping` command wraps Tailscale's `Ping()` API to provide accurate latency measurements.
+
+### 2.6 Taildrop for File Transfer (`truffle cp`)
+
+For `truffle cp`, truffle uses Tailscale's built-in Taildrop API for file transfer rather than a custom HTTP-based protocol. This leverages Tailscale's optimized peer-to-peer data path and avoids reimplementing file transfer semantics.
+
+New sidecar commands for Taildrop:
+
+| Request | Response | Description |
+|---------|----------|-------------|
+| `tsnet:pushFile {"target": "100.64.0.3", "name": "report.pdf", "size": 4200000}` | `tsnet:pushFileProgress {"bytes_sent": ..., "done": false}` | Push a file to a peer via Taildrop. The file data follows as raw bytes on the bridge after the command. |
+| `tsnet:waitingFiles {}` | `tsnet:waitingFilesList {"files": [...]}` | List files waiting to be received via Taildrop. |
+| `tsnet:getWaitingFile {"name": "report.pdf"}` | Raw file bytes on bridge | Retrieve a waiting file's contents. |
+| `tsnet:deleteWaitingFile {"name": "report.pdf"}` | `tsnet:deletedWaitingFile {"name": "report.pdf"}` | Delete a received file from the waiting queue. |
+
+The custom HTTP PUT mechanism (used by `FileTransferAdapter`) is retained for internal store sync and as a fallback for non-Taildrop scenarios. Truffle wraps Taildrop with its own progress reporting and SHA-256 post-transfer verification.
+
 ---
 
 ## 3. CLI Daemon Architecture
@@ -701,7 +728,28 @@ Methods:
 | `ping` | `{ "node": "name" }` | Connectivity check |
 | `send_message` | `{ "device_id": "..", "namespace": "..", "type": "..", "payload": {} }` | Send mesh message |
 
-### 3.4 The "Golden 7" Commands
+### 3.4 Streaming Protocol for Interactive Commands
+
+Some commands (`tcp_connect`, `ws_connect`, `chat_start`) require long-lived bidirectional data streams, not simple request-response. The Unix socket supports this via a protocol upgrade pattern, similar to HTTP upgrading to WebSocket:
+
+1. **Handshake phase.** The CLI sends a normal JSON-RPC request (e.g., `tcp_connect` with `{ "target": "server:5432" }`).
+2. **Upgrade response.** The daemon responds with `{ "result": { "stream": true, "handle": "tcp-a1b2c3" } }`. This is the last JSON-RPC message on this socket.
+3. **Raw byte stream.** After the upgrade response, the Unix socket becomes a raw bidirectional pipe. Bytes written by the CLI go to the remote target; bytes from the remote target are relayed back to the CLI. No framing, no JSON -- just raw bytes (for TCP) or framed messages (for WebSocket/chat).
+
+For chat sessions, the stream phase uses newline-delimited JSON events instead of raw bytes:
+
+```
+← {"type":"message","from":"laptop","text":"hello","ts":"14:23:01"}
+← {"type":"message","from":"server","text":"deploy done","ts":"14:23:05"}
+→ {"type":"message","text":"got it"}
+← {"type":"presence","node":"laptop","status":"typing"}
+```
+
+The daemon manages the lifecycle of the underlying connection. If the CLI disconnects from the Unix socket, the daemon tears down the corresponding TCP/WebSocket/chat connection. If the remote side disconnects, the daemon closes its end of the Unix socket, which the CLI detects as EOF.
+
+This pattern keeps the JSON-RPC protocol simple (all methods are still request-response) while enabling interactive commands to work naturally with stdin/stdout piping.
+
+### 3.5 The "Golden 6" Commands
 
 These are the core commands that make truffle useful as a standalone CLI tool. They are verb-first, intent-driven, and cover 90% of use cases.
 
@@ -709,11 +757,12 @@ These are the core commands that make truffle useful as a standalone CLI tool. T
 1. truffle up          Start/resume the daemon
 2. truffle ls          List tailnet nodes
 3. truffle tcp         Raw TCP connect (stdin/stdout, like netcat)
-4. truffle udp         Raw UDP
-5. truffle ws          WebSocket REPL
-6. truffle proxy       Pull remote to local (port forwarding)
-7. truffle expose      Push local to tailnet
+4. truffle ws          WebSocket REPL
+5. truffle proxy       Pull remote to local (port forwarding)
+6. truffle expose      Push local to tailnet
 ```
+
+> **Note:** `truffle udp` was originally in this list but has been moved to Future Commands (Section 12.4). The Go sidecar's bridge is TCP-only and has no UDP listener support. Adding UDP requires bridge-level changes and is deferred.
 
 #### `truffle up`
 
@@ -757,13 +806,6 @@ truffle tcp db:5432                    # interactive TCP
 echo "hello" | truffle tcp echo:9000   # pipe data
 truffle tcp db:5432 --check            # test connectivity only
 truffle tcp file-sink:7000 < dump.bin  # send file
-```
-
-#### `truffle udp <target>`
-
-```
-truffle udp dns:53                     # interactive UDP
-echo "ping" | truffle udp echo:9000 --once  # send one datagram
 ```
 
 #### `truffle ws <target>`
@@ -816,7 +858,7 @@ exposing localhost:3000 on tailnet
   accessible at: james-mbp.tail1234.ts.net:3000
 ```
 
-### 3.5 Unified Target Addressing
+### 3.6 Unified Target Addressing
 
 All commands that take a `<target>` argument use the same addressing format:
 
@@ -826,11 +868,15 @@ node/service           chat-server/ws
 scheme://node:port     ws://chat:3000/ws
 ```
 
-Target resolution:
+Target resolution order:
 
-1. Check config aliases (see 3.6)
-2. Resolve node name via Tailscale MagicDNS
-3. Connect via Tailscale tunnel
+1. **Config alias** -- Check `[aliases]` in `config.toml` (see 3.7)
+2. **Mesh device_name** -- Match against `device_name` from mesh `device-announce` messages (truffle peers only)
+3. **Tailscale HostName** -- Match against Tailscale's `HostName` field from the coordination server (works for all Tailscale peers, including non-truffle devices)
+4. **Tailscale IP** -- Match by Tailscale IP address (100.64.x.x)
+5. **Full DNS** -- Resolve as a full DNS name (e.g., `truffle-desktop-a1b2.tailnet.ts.net`)
+
+The daemon maintains a **correlation table** mapping mesh `device_name` (from `device-announce`) to Tailscale `HostName` (from `monitorState` peer list). This allows users to refer to truffle peers by their friendly mesh name while the daemon resolves the underlying Tailscale address. For non-truffle Tailscale peers (regular devices on the same tailnet), only Tailscale HostName, IP, and DNS resolution work -- mesh names are not available since those devices do not participate in the truffle mesh.
 
 ```rust
 /// Parsed target address.
@@ -888,7 +934,7 @@ impl Target {
 }
 ```
 
-### 3.6 Config File
+### 3.7 Config File
 
 `~/.config/truffle/config.toml`:
 
@@ -956,7 +1002,7 @@ pub struct DaemonConfig {
 }
 ```
 
-### 3.7 Full Command Tree
+### 3.8 Full Command Tree
 
 ```
 truffle up                              # start daemon
@@ -964,7 +1010,6 @@ truffle down                            # stop daemon
 truffle ls                              # list peers
 truffle status                          # show this node's status
 truffle tcp <target>                    # raw TCP (netcat-style)
-truffle udp <target>                    # raw UDP
 truffle ws <target>                     # WebSocket REPL
 truffle proxy <local-port> <target>     # port forward (pull remote to local)
 truffle expose <port>                   # expose local to tailnet
@@ -982,7 +1027,7 @@ truffle dev events                             # stream mesh events (SSE-style)
 truffle dev connections                        # dump WebSocket connections
 ```
 
-### 3.8 Clap Command Structure
+### 3.9 Clap Command Structure
 
 ```rust
 #[derive(Parser)]
@@ -1042,14 +1087,7 @@ enum Commands {
         check: bool,
     },
 
-    /// Raw UDP connection
-    Udp {
-        /// Target (node:port)
-        target: String,
-        /// Send one datagram and exit
-        #[arg(long)]
-        once: bool,
-    },
+    // Note: Udp variant deferred to future (Section 12.4)
 
     /// WebSocket REPL
     Ws {
@@ -1477,9 +1515,9 @@ The implementation is phased to keep each step reviewable and testable independe
 
 **Estimated: +400 lines.**
 
-### Phase 7: Implement Golden 7 Commands
+### Phase 7: Implement Golden 6 Commands
 
-**New files:** `truffle-cli/src/commands/{up,down,ls,status,tcp,udp,ws,proxy,expose,ping,doctor}.rs`
+**New files:** `truffle-cli/src/commands/{up,down,ls,status,tcp,ws,proxy,expose,ping,doctor}.rs`
 
 1. Implement each command as a module
 2. Each command connects to daemon socket, sends JSON-RPC request, formats output
@@ -1537,7 +1575,7 @@ The implementation is phased to keep each step reviewable and testable independe
 | `truffle send <device_id> <ns> <type> <payload>` | `truffle dev send <device_id> <ns> <type> <payload>` |
 | `truffle proxy <prefix> <target>` | `truffle http proxy <prefix> <target>` |
 | `truffle serve <dir>` | `truffle http serve <dir>` |
-| (none) | `truffle up`, `truffle down`, `truffle tcp`, `truffle udp`, `truffle ws`, `truffle proxy`, `truffle expose`, `truffle ping`, `truffle doctor` |
+| (none) | `truffle up`, `truffle down`, `truffle tcp`, `truffle ws`, `truffle proxy`, `truffle expose`, `truffle ping`, `truffle doctor` |
 
 ---
 
@@ -1683,9 +1721,62 @@ truffle tunnel remote-box -L 5432:localhost:5432
 
 This would combine `proxy` with more powerful forwarding semantics. Deferred to a future RFC.
 
+### 12.4 `truffle udp` (Raw UDP)
+
+Originally included in the "Golden 7" command list, `truffle udp` has been deferred because:
+
+- The Go sidecar's bridge protocol is TCP-only (binary-framed TCP between Go and Rust)
+- The sidecar has no `tsnet:listenUDP` or UDP relay support
+- Adding UDP requires bridge-level changes to support datagram semantics (no framing, no guaranteed ordering)
+
+When implemented, it would look like:
+
+```
+truffle udp dns:53                     # interactive UDP
+echo "ping" | truffle udp echo:9000 --once  # send one datagram
+```
+
+This requires a new bridge transport mode or a separate UDP sidecar channel.
+
 ---
 
-## 13. Appendix A: File-Level Change Map
+## 13. Sleep/Wake Handling
+
+Laptop sleep/wake is a first-class concern for truffle. When a device sleeps, all network connections drop. The recovery path:
+
+1. **Tailscale layer.** On wake, Tailscale automatically re-establishes WireGuard tunnels and re-registers with the coordination server. This is handled entirely by Tailscale -- truffle does not need to intervene.
+
+2. **Sidecar layer.** The Go sidecar receives a `monitorState` notification when Tailscale comes back online. This triggers peer re-discovery.
+
+3. **Daemon layer.** The daemon detects peer re-appearance via the sidecar's `monitorState` events and re-dials WebSocket connections to all known peers. The existing reconnection logic (exponential backoff in `reconnect.rs`) handles the re-dial.
+
+4. **Connection layer.** WebSocket connections that were open before sleep will have timed out. The daemon establishes fresh connections and re-sends `device-announce` to each peer.
+
+5. **Application layer.** Active chat sessions display a `reconnecting...` status message when the connection drops and automatically resume when reconnected. File transfers that were in progress must be restarted (or resumed if `--resume` was used). Port forwarding (`truffle proxy`, `truffle expose`) re-establishes automatically.
+
+The user experience: close your laptop lid, open it later, and truffle is back online within a few seconds of Tailscale reconnecting. No manual intervention required.
+
+---
+
+## 14. Platform Support
+
+### 14.1 macOS and Linux
+
+Fully supported. The daemon uses a Unix domain socket (`~/.config/truffle/truffle.sock`) for CLI-to-daemon IPC.
+
+### 14.2 Windows (Deferred)
+
+Windows support is deferred. The daemon IPC uses Unix sockets, which are not available on Windows. A Windows port would require:
+
+- Named pipes for CLI-to-daemon IPC (replacing the Unix socket)
+- Windows service integration (replacing daemonization with PID files)
+- Path changes for config/state directories (`%APPDATA%` instead of `~/.config`)
+
+This is a non-trivial porting effort and is out of scope for the initial release.
+
+---
+
+## 15. Appendix A: File-Level Change Map
 
 ```
 crates/truffle-core/src/mesh/
@@ -1734,7 +1825,6 @@ crates/truffle-cli/src/
     ls.rs            NEW (replaces peers.rs)
     status.rs        REWRITE
     tcp.rs           NEW
-    udp.rs           NEW
     ws.rs            NEW
     proxy.rs         REWRITE (port forwarding, not HTTP prefix proxy)
     expose.rs        NEW
@@ -1751,7 +1841,7 @@ crates/truffle-cli/src/
 
 ---
 
-## 14. Appendix B: Decision Log
+## 16. Appendix B: Decision Log
 
 | Decision | Alternatives Considered | Rationale |
 |----------|------------------------|-----------|
