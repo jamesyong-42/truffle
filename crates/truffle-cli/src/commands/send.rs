@@ -4,6 +4,10 @@ use truffle_core::runtime::TruffleEvent;
 use super::build_runtime;
 
 /// Send a message to a specific device via the mesh bus.
+///
+/// **Legacy**: This function creates its own runtime. New code should use
+/// `truffle send` or `truffle dev send` which goes through the daemon.
+#[allow(dead_code)]
 pub async fn run(
     hostname: &str,
     sidecar: Option<&str>,

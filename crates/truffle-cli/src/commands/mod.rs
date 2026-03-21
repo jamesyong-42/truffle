@@ -1,8 +1,20 @@
+pub mod chat;
+pub mod completion;
+pub mod cp;
+pub mod doctor;
+pub mod down;
+pub mod expose;
+pub mod http;
+pub mod ls;
 pub mod peers;
+pub mod ping;
 pub mod proxy;
 pub mod send;
 pub mod serve;
 pub mod status;
+pub mod tcp;
+pub mod up;
+pub mod ws;
 
 use std::path::PathBuf;
 
@@ -11,6 +23,11 @@ use truffle_core::runtime::{TruffleEvent, TruffleRuntime};
 /// Build and start a TruffleRuntime from common CLI args.
 ///
 /// Returns the runtime and a receiver for events.
+///
+/// **Deprecated for new commands**: New commands should use the daemon
+/// architecture instead of building a runtime directly. This function
+/// is kept for backward compatibility with legacy commands.
+#[allow(dead_code)]
 pub async fn build_runtime(
     hostname: &str,
     sidecar: Option<&str>,
@@ -40,6 +57,7 @@ pub async fn build_runtime(
 }
 
 /// Wait for Ctrl+C (SIGINT), then stop the runtime.
+#[allow(dead_code)]
 pub async fn wait_for_shutdown(runtime: &TruffleRuntime) {
     tokio::signal::ctrl_c()
         .await

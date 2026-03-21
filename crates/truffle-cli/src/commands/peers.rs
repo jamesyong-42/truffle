@@ -3,6 +3,10 @@ use truffle_core::runtime::TruffleEvent;
 use super::build_runtime;
 
 /// List discovered peers with connection quality info.
+///
+/// **Legacy**: This function creates its own runtime. New code should use
+/// `truffle ls` which goes through the daemon.
+#[allow(dead_code)]
 pub async fn run(
     hostname: &str,
     sidecar: Option<&str>,
@@ -84,6 +88,7 @@ pub async fn run(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s

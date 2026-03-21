@@ -3,6 +3,10 @@ use truffle_core::runtime::TruffleEvent;
 use super::{build_runtime, wait_for_shutdown};
 
 /// Start a reverse proxy route. Runs until Ctrl+C.
+///
+/// **Legacy**: This function creates its own runtime. New code should use
+/// `truffle proxy` which goes through the daemon.
+#[allow(dead_code)]
 pub async fn run(
     hostname: &str,
     sidecar: Option<&str>,

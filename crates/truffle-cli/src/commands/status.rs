@@ -3,6 +3,10 @@ use truffle_core::runtime::TruffleEvent;
 use super::build_runtime;
 
 /// Show local node status: device ID, role, Tailscale IP, auth status.
+///
+/// **Legacy**: This function creates its own runtime. New code should use
+/// `truffle status` which goes through the daemon.
+#[allow(dead_code)]
 pub async fn run(
     hostname: &str,
     sidecar: Option<&str>,
