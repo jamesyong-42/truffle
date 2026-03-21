@@ -10,7 +10,7 @@ use crate::protocol::message_types::{
     DeviceAnnouncePayload, MeshMessage,
 };
 use crate::protocol::types::MeshPayload;
-use crate::transport::connection::{ConnectionManager, ConnectionStatus};
+use crate::transport::connection::ConnectionManager;
 use super::device::DeviceManager;
 use super::message_bus::{BusMessage, MeshMessageBus};
 use super::node::{IncomingMeshMessage, MeshNodeConfig, MeshNodeEvent};
@@ -136,12 +136,11 @@ impl TransportHandler {
                 self.handle_mesh_envelope(connection_id, &from_device_id, &envelope)
                     .await;
             } else {
-                self.handle_route_envelope(
+                tracing::warn!(
                     connection_id,
-                    from_device_id.as_deref(),
-                    &envelope,
-                )
-                .await;
+                    msg_type = %envelope.msg_type,
+                    "Unknown mesh namespace message type"
+                );
             }
         } else {
             self.handle_app_message(connection_id, from_device_id, &envelope)
@@ -201,13 +200,6 @@ impl TransportHandler {
                     .await
                     .handle_device_goodbye(&msg.from);
             }
-            Ok(MeshPayload::RouteMessage(_)) | Ok(MeshPayload::RouteBroadcast(_)) => {
-                tracing::warn!(
-                    msg_type = %msg.msg_type,
-                    from = %msg.from,
-                    "Route message received via dispatch_mesh_message -- should use handle_route_envelope"
-                );
-            }
             Err(e) => {
                 tracing::warn!(
                     msg_type = %msg.msg_type,
@@ -215,97 +207,6 @@ impl TransportHandler {
                     error = %e,
                     "Failed to parse mesh message"
                 );
-            }
-        }
-    }
-
-    async fn handle_route_envelope(
-        &self,
-        connection_id: &str,
-        from_device_id: Option<&str>,
-        envelope: &MeshEnvelope,
-    ) {
-        match envelope.msg_type.as_str() {
-            "route-message" => {
-                if let (Some(target), Some(inner)) = (
-                    envelope.payload.get("targetDeviceId").and_then(|v| v.as_str()),
-                    envelope.payload.get("envelope"),
-                ) {
-                    let inner_env = match serde_json::from_value::<MeshEnvelope>(inner.clone()) {
-                        Ok(env) => env,
-                        Err(e) => {
-                            tracing::warn!(connection_id, error = %e, "Failed to parse inner envelope in route-message");
-                            return;
-                        }
-                    };
-
-                    if inner_env.namespace == MESH_NAMESPACE && inner_env.msg_type.starts_with("route-") {
-                        tracing::warn!(connection_id, inner_type = %inner_env.msg_type, "Nested route envelope rejected (max depth 1)");
-                        return;
-                    }
-
-                    if let Some(conn) = self.connection_manager.get_connection_by_device(target).await {
-                        let mut env_ts = inner_env;
-                        if env_ts.timestamp.is_none() {
-                            env_ts.timestamp = Some(crate::util::current_timestamp_ms());
-                        }
-                        self.send_envelope_to_conn(&conn.id, &env_ts).await;
-                    } else {
-                        tracing::warn!(target_device_id = target, "route-message target device not connected");
-                    }
-                } else {
-                    tracing::warn!(connection_id, "route-message missing targetDeviceId or envelope field");
-                }
-            }
-            "route-broadcast" => {
-                let inner = match envelope.payload.get("envelope") {
-                    Some(inner) => inner,
-                    None => {
-                        tracing::warn!(connection_id, "route-broadcast missing envelope field");
-                        return;
-                    }
-                };
-
-                let inner_env = match serde_json::from_value::<MeshEnvelope>(inner.clone()) {
-                    Ok(env) => env,
-                    Err(e) => {
-                        tracing::warn!(connection_id, error = %e, "Failed to parse inner envelope in route-broadcast");
-                        return;
-                    }
-                };
-
-                if inner_env.namespace == MESH_NAMESPACE {
-                    tracing::warn!(connection_id, inner_type = %inner_env.msg_type, "route-broadcast with mesh namespace rejected");
-                    return;
-                }
-
-                if inner_env.msg_type.starts_with("route-") {
-                    tracing::warn!(connection_id, inner_type = %inner_env.msg_type, "Nested route envelope rejected (max depth 1)");
-                    return;
-                }
-
-                let conns = self.connection_manager.get_connections().await;
-                for c in &conns {
-                    if let Some(ref did) = c.device_id {
-                        if from_device_id != Some(did.as_str()) && c.status == ConnectionStatus::Connected {
-                            let mut env_ts = inner_env.clone();
-                            if env_ts.timestamp.is_none() {
-                                env_ts.timestamp = Some(crate::util::current_timestamp_ms());
-                            }
-                            self.send_envelope_to_conn(&c.id, &env_ts).await;
-                        }
-                    }
-                }
-                self.deliver_app_message(connection_id, from_device_id.map(|s| s.to_string()), &inner_env);
-                self.message_bus.dispatch(&BusMessage {
-                    from: from_device_id.map(|s| s.to_string()),
-                    namespace: inner_env.namespace.clone(),
-                    msg_type: inner_env.msg_type.clone(),
-                    payload: inner_env.payload.clone(),
-                }).await;
-            }
-            _ => {
-                tracing::warn!(connection_id, msg_type = %envelope.msg_type, "Unknown route envelope type in mesh namespace");
             }
         }
     }

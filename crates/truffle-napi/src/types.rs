@@ -515,7 +515,7 @@ mod tests {
     fn normalize_msg_type_mesh_kebab() {
         assert_eq!(normalize_msg_type("mesh", "device-announce"), "device-announce");
         assert_eq!(normalize_msg_type("mesh", "device-list"), "device-list");
-        assert_eq!(normalize_msg_type("mesh", "route-broadcast"), "route-broadcast");
+        assert_eq!(normalize_msg_type("mesh", "device-goodbye"), "device-goodbye");
     }
 
     #[test]

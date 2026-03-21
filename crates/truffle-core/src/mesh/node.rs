@@ -473,8 +473,7 @@ impl MeshNode {
         dm.set_local_online(tailscale_ip, started_at, dns_name);
     }
 
-    // Dead code methods (handle_incoming_data, handle_route_envelope, handle_mesh_message)
-    // removed per CS-5 (ARCH-2). Logic now lives in mesh/handler.rs TransportHandler.
+    // Dead code methods removed per CS-5 (ARCH-2). Logic now lives in mesh/handler.rs TransportHandler.
 
     // ── Internal: messaging helpers ───────────────────────────────────────
 

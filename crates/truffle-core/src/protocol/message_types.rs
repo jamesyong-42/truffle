@@ -6,17 +6,17 @@ use crate::types::BaseDevice;
 ///
 /// Future work: Flatten `from`, `to`, `correlation_id` fields into `MeshEnvelope`
 /// and remove this struct. The addressing fields are duplicated between MeshMessage
-/// and MeshEnvelope. Deferred because MeshMessage is deeply embedded in test helpers,
-/// node.rs event loops, and election broadcasting.
+/// and MeshEnvelope. Deferred because MeshMessage is deeply embedded in test helpers
+/// and node.rs event loops.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshMessage {
-    /// Message type (e.g., "device-announce", "election-start").
+    /// Message type (e.g., "device-announce", "device-goodbye").
     #[serde(rename = "type")]
     pub msg_type: String,
     /// Source device ID.
     pub from: String,
-    /// Target device ID (for routed messages, omit for broadcast).
+    /// Target device ID (optional, omit for broadcast).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
     /// Message payload.
@@ -55,7 +55,7 @@ fn default_protocol_version() -> u32 {
     2
 }
 
-/// Device list payload (response from primary).
+/// Device list payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceListPayload {
@@ -69,21 +69,6 @@ pub struct DeviceListPayload {
 pub struct DeviceGoodbyePayload {
     pub device_id: String,
     pub reason: String,
-}
-
-/// Route message payload (wraps another envelope for routing via primary).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RouteMessagePayload {
-    pub target_device_id: String,
-    pub envelope: serde_json::Value,
-}
-
-/// Route broadcast payload (wraps an envelope for broadcast via primary).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RouteBroadcastPayload {
-    pub envelope: serde_json::Value,
 }
 
 fn current_timestamp_ms() -> u64 {

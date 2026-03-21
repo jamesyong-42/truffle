@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::protocol::message_types::{
-    DeviceAnnouncePayload, DeviceGoodbyePayload, DeviceListPayload, RouteBroadcastPayload,
-    RouteMessagePayload,
+    DeviceAnnouncePayload, DeviceGoodbyePayload, DeviceListPayload,
 };
 
 // ---------------------------------------------------------------------------
@@ -12,15 +11,13 @@ use crate::protocol::message_types::{
 
 /// Message types for the `mesh` namespace.
 ///
-/// Wire strings use kebab-case: `"device-announce"`, `"election-start"`, etc.
+/// Wire strings use kebab-case: `"device-announce"`, `"device-list"`, etc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MeshMessageType {
     DeviceAnnounce,
     DeviceList,
     DeviceGoodbye,
-    RouteMessage,
-    RouteBroadcast,
 }
 
 impl MeshMessageType {
@@ -30,8 +27,6 @@ impl MeshMessageType {
             "device-announce" => Some(Self::DeviceAnnounce),
             "device-list" => Some(Self::DeviceList),
             "device-goodbye" => Some(Self::DeviceGoodbye),
-            "route-message" => Some(Self::RouteMessage),
-            "route-broadcast" => Some(Self::RouteBroadcast),
             _ => None,
         }
     }
@@ -42,8 +37,6 @@ impl MeshMessageType {
             Self::DeviceAnnounce => "device-announce",
             Self::DeviceList => "device-list",
             Self::DeviceGoodbye => "device-goodbye",
-            Self::RouteMessage => "route-message",
-            Self::RouteBroadcast => "route-broadcast",
         }
     }
 }
@@ -174,8 +167,6 @@ pub enum MeshPayload {
     DeviceAnnounce(DeviceAnnouncePayload),
     DeviceList(DeviceListPayload),
     DeviceGoodbye(DeviceGoodbyePayload),
-    RouteMessage(RouteMessagePayload),
-    RouteBroadcast(RouteBroadcastPayload),
 }
 
 impl MeshPayload {
@@ -204,14 +195,6 @@ impl MeshPayload {
                 let p = serde_json::from_value(payload)?;
                 Ok(Self::DeviceGoodbye(p))
             }
-            MeshMessageType::RouteMessage => {
-                let p = serde_json::from_value(payload)?;
-                Ok(Self::RouteMessage(p))
-            }
-            MeshMessageType::RouteBroadcast => {
-                let p = serde_json::from_value(payload)?;
-                Ok(Self::RouteBroadcast(p))
-            }
         }
     }
 
@@ -221,8 +204,6 @@ impl MeshPayload {
             Self::DeviceAnnounce(_) => MeshMessageType::DeviceAnnounce,
             Self::DeviceList(_) => MeshMessageType::DeviceList,
             Self::DeviceGoodbye(_) => MeshMessageType::DeviceGoodbye,
-            Self::RouteMessage(_) => MeshMessageType::RouteMessage,
-            Self::RouteBroadcast(_) => MeshMessageType::RouteBroadcast,
         }
     }
 }
@@ -253,14 +234,6 @@ mod tests {
             MeshMessageType::from_str("device-goodbye"),
             Some(MeshMessageType::DeviceGoodbye)
         );
-        assert_eq!(
-            MeshMessageType::from_str("route-message"),
-            Some(MeshMessageType::RouteMessage)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("route-broadcast"),
-            Some(MeshMessageType::RouteBroadcast)
-        );
     }
 
     #[test]
@@ -268,7 +241,6 @@ mod tests {
         // Legacy colon-separated names are no longer accepted
         assert_eq!(MeshMessageType::from_str("device:announce"), None);
         assert_eq!(MeshMessageType::from_str("device:list"), None);
-        assert_eq!(MeshMessageType::from_str("route:message"), None);
     }
 
     #[test]
@@ -277,10 +249,13 @@ mod tests {
         assert_eq!(MeshMessageType::from_str("unknown"), None);
         assert_eq!(MeshMessageType::from_str("device_announce"), None);
         assert_eq!(MeshMessageType::from_str("DEVICE-ANNOUNCE"), None);
-        // Election types removed (RFC 010)
+        // Election types removed (RFC 010 Phase 1)
         assert_eq!(MeshMessageType::from_str("election-start"), None);
         assert_eq!(MeshMessageType::from_str("election-candidate"), None);
         assert_eq!(MeshMessageType::from_str("election-result"), None);
+        // Route types removed (RFC 010 Phase 2)
+        assert_eq!(MeshMessageType::from_str("route-message"), None);
+        assert_eq!(MeshMessageType::from_str("route-broadcast"), None);
     }
 
     #[test]
@@ -288,8 +263,6 @@ mod tests {
         assert_eq!(MeshMessageType::DeviceAnnounce.as_str(), "device-announce");
         assert_eq!(MeshMessageType::DeviceList.as_str(), "device-list");
         assert_eq!(MeshMessageType::DeviceGoodbye.as_str(), "device-goodbye");
-        assert_eq!(MeshMessageType::RouteMessage.as_str(), "route-message");
-        assert_eq!(MeshMessageType::RouteBroadcast.as_str(), "route-broadcast");
     }
 
     #[test]
@@ -298,8 +271,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::RouteMessage,
-            MeshMessageType::RouteBroadcast,
         ];
         for v in variants {
             let json = serde_json::to_string(&v).unwrap();
@@ -315,15 +286,15 @@ mod tests {
             r#""device-announce""#
         );
         assert_eq!(
-            serde_json::to_string(&MeshMessageType::RouteBroadcast).unwrap(),
-            r#""route-broadcast""#
+            serde_json::to_string(&MeshMessageType::DeviceGoodbye).unwrap(),
+            r#""device-goodbye""#
         );
     }
 
     #[test]
     fn mesh_message_type_display() {
         assert_eq!(format!("{}", MeshMessageType::DeviceAnnounce), "device-announce");
-        assert_eq!(format!("{}", MeshMessageType::RouteMessage), "route-message");
+        assert_eq!(format!("{}", MeshMessageType::DeviceGoodbye), "device-goodbye");
     }
 
     #[test]
@@ -332,8 +303,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::RouteMessage,
-            MeshMessageType::RouteBroadcast,
         ];
         for v in variants {
             let s = v.as_str();
@@ -661,34 +630,18 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_route_message() {
-        let payload = serde_json::json!({
+    fn mesh_payload_parse_route_types_now_rejected() {
+        // Route types removed (RFC 010 Phase 2)
+        let result = MeshPayload::parse("route-message", serde_json::json!({
             "targetDeviceId": "dev-3",
             "envelope": {"namespace": "sync", "type": "sync-full", "payload": {}}
-        });
-        let result = MeshPayload::parse("route-message", payload).unwrap();
-        assert!(matches!(result, MeshPayload::RouteMessage(_)));
-        assert_eq!(result.message_type(), MeshMessageType::RouteMessage);
-    }
+        }));
+        assert!(result.is_err(), "route-message should be rejected after RFC 010 Phase 2");
 
-    #[test]
-    fn mesh_payload_parse_route_broadcast() {
-        let payload = serde_json::json!({
+        let result = MeshPayload::parse("route-broadcast", serde_json::json!({
             "envelope": {"namespace": "sync", "type": "sync-update", "payload": {}}
-        });
-        let result = MeshPayload::parse("route-broadcast", payload).unwrap();
-        assert!(matches!(result, MeshPayload::RouteBroadcast(_)));
-        assert_eq!(result.message_type(), MeshMessageType::RouteBroadcast);
-    }
-
-    #[test]
-    fn mesh_payload_parse_route_message_legacy_rejected() {
-        let payload = serde_json::json!({
-            "targetDeviceId": "dev-3",
-            "envelope": {"namespace": "sync", "type": "sync-full", "payload": {}}
-        });
-        let result = MeshPayload::parse("route:message", payload);
-        assert!(result.is_err(), "legacy colon-separated names should be rejected");
+        }));
+        assert!(result.is_err(), "route-broadcast should be rejected after RFC 010 Phase 2");
     }
 
     #[test]
@@ -745,8 +698,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::RouteMessage,
-            MeshMessageType::RouteBroadcast,
         ];
         for v in variants {
             let packed = rmp_serde::to_vec_named(&v).unwrap();
