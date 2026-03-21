@@ -16,7 +16,6 @@ pub struct DeviceInfo {
     pub tailscale_hostname: String,
     pub tailscale_dns_name: Option<String>,
     pub tailscale_ip: Option<String>,
-    pub role: Option<String>,
     pub status: String,
     pub capabilities: Vec<String>,
     pub metadata: Option<serde_json::Value>,
@@ -35,7 +34,6 @@ impl From<&truffle_core::types::BaseDevice> for DeviceInfo {
             tailscale_hostname: d.tailscale_hostname.clone(),
             tailscale_dns_name: d.tailscale_dns_name.clone(),
             tailscale_ip: d.tailscale_ip.clone(),
-            role: None,
             status: match d.status {
                 truffle_core::types::DeviceStatus::Online => "online".to_string(),
                 truffle_core::types::DeviceStatus::Offline => "offline".to_string(),

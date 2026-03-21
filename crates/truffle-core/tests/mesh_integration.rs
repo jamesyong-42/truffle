@@ -411,7 +411,7 @@ async fn test_mesh_node_emits_auth_events() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Spawn 2 full TruffleRuntime nodes. After connection, both should emit
-/// DeviceDiscovered for the other node.
+/// PeerDiscovered for the other node.
 #[tokio::test]
 #[ignore] // Requires Tailscale auth (2 nodes)
 async fn test_two_nodes_discover_each_other() {
@@ -427,12 +427,12 @@ async fn test_two_nodes_discover_each_other() {
     let event_a = wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node A: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node A: PeerDiscovered",
     )
     .await;
 
-    if let TruffleEvent::DeviceDiscovered(device) = &event_a {
+    if let TruffleEvent::PeerDiscovered(device) = &event_a {
         eprintln!("Node A discovered: {} ({})", device.name, device.id);
         assert!(!device.id.is_empty());
     }
@@ -441,12 +441,12 @@ async fn test_two_nodes_discover_each_other() {
     let event_b = wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node B: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node B: PeerDiscovered",
     )
     .await;
 
-    if let TruffleEvent::DeviceDiscovered(device) = &event_b {
+    if let TruffleEvent::PeerDiscovered(device) = &event_b {
         eprintln!("Node B discovered: {} ({})", device.name, device.id);
         assert!(!device.id.is_empty());
     }
@@ -475,16 +475,16 @@ async fn test_two_nodes_exchange_device_announce() {
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_) | TruffleEvent::DevicesChanged(_)),
-        "Node A: device discovered/changed",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_) | TruffleEvent::PeersChanged(_)),
+        "Node A: peer discovered/changed",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_) | TruffleEvent::DevicesChanged(_)),
-        "Node B: device discovered/changed",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_) | TruffleEvent::PeersChanged(_)),
+        "Node B: peer discovered/changed",
     )
     .await;
 
@@ -520,7 +520,7 @@ async fn test_two_nodes_exchange_device_announce() {
 
 // test_primary_sends_device_list_on_connect removed -- election system deleted (RFC 010)
 
-/// Node A stops. Node B should receive DeviceOffline event for Node A.
+/// Node A stops. Node B should receive PeerOffline event for Node A.
 #[tokio::test]
 #[ignore] // Requires Tailscale auth (2 nodes)
 async fn test_node_stop_triggers_goodbye() {
@@ -536,16 +536,16 @@ async fn test_node_stop_triggers_goodbye() {
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node A: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node A: PeerDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node B: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node B: PeerDiscovered",
     )
     .await;
 
@@ -554,16 +554,16 @@ async fn test_node_stop_triggers_goodbye() {
     eprintln!("Stopping Node A (id={id})");
     node_a.runtime.stop().await;
 
-    // Node B should see DeviceOffline
+    // Node B should see PeerOffline
     let event = wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(15),
-        |e| matches!(e, TruffleEvent::DeviceOffline(_)),
-        "Node B: DeviceOffline after goodbye",
+        |e| matches!(e, TruffleEvent::PeerOffline(_)),
+        "Node B: PeerOffline after goodbye",
     )
     .await;
 
-    if let TruffleEvent::DeviceOffline(offline_id) = &event {
+    if let TruffleEvent::PeerOffline(offline_id) = &event {
         eprintln!("Device went offline: {offline_id}");
     }
 
@@ -591,16 +591,16 @@ async fn test_broadcast_message_reaches_all_nodes() {
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node A: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node A: PeerDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node B: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node B: PeerDiscovered",
     )
     .await;
 
@@ -657,16 +657,16 @@ async fn test_send_targeted_message() {
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node A: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node A: PeerDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
-        "Node B: DeviceDiscovered",
+        |e| matches!(e, TruffleEvent::PeerDiscovered(_)),
+        "Node B: PeerDiscovered",
     )
     .await;
 

@@ -438,7 +438,6 @@ mod tests {
 
         let payload = DeviceListPayload {
             devices: vec![device],
-            primary_id: "remote-1".to_string(),
         };
 
         mgr.handle_device_list("remote-1", &payload);
@@ -831,7 +830,6 @@ mod tests {
 
         let payload = DeviceListPayload {
             devices: vec![local_device, remote_device],
-            primary_id: "local-1".to_string(),
         };
 
         mgr.handle_device_list("remote-1", &payload);
@@ -918,14 +916,13 @@ mod tests {
             "clear() must emit DevicesChanged with empty device list");
     }
 
-    /// device_list with empty primary_id and no devices.
+    /// device_list with no devices.
     #[test]
-    fn device_list_empty_primary_id() {
+    fn device_list_empty() {
         let (mut mgr, _rx) = make_manager();
 
         let payload = DeviceListPayload {
             devices: vec![],
-            primary_id: String::new(),
         };
 
         mgr.handle_device_list("remote-1", &payload);

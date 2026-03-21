@@ -18,8 +18,8 @@ pub async fn run(
             _ = tokio::time::sleep_until(deadline) => break,
             event = event_rx.recv() => {
                 match event {
-                    Ok(TruffleEvent::DevicesChanged(_)) => {
-                        // Devices updated, give a brief moment for more updates
+                    Ok(TruffleEvent::PeersChanged(_)) => {
+                        // Peers updated, give a brief moment for more updates
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         break;
                     }

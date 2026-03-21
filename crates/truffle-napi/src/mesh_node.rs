@@ -22,8 +22,7 @@ use crate::types::{
 /// Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
 /// and MeshNode via the unified `TruffleRuntime`. The sidecar provides Tailscale
 /// connectivity; the bridge routes TCP streams; the connection manager upgrades
-/// them to WebSocket; and the mesh node handles device discovery, election,
-/// and messaging.
+/// them to WebSocket; and the mesh node handles peer discovery and messaging.
 ///
 /// ## RFC 008 Phase 3
 /// This wrapper now delegates to `TruffleRuntime` instead of manually wiring
@@ -236,7 +235,7 @@ impl NapiMeshNode {
     /// Subscribe to mesh events.
     ///
     /// Uses ThreadsafeFunction with Blocking mode per RFC 003:
-    /// - Critical events (device join/leave, election, errors) are never dropped
+    /// - Critical events (peer join/leave, errors) are never dropped
     /// - If the JS event queue is full, Rust waits rather than dropping events
     ///
     /// The callback receives NapiMeshEvent objects with event_type, device_id, and payload.

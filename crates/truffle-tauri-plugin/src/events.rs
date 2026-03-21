@@ -51,25 +51,41 @@ pub fn emit_mesh_event<R: Runtime>(app: &AppHandle<R>, event: &MeshNodeEvent) {
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        MeshNodeEvent::DeviceDiscovered(device) => MeshEventPayload {
-            event_type: "deviceDiscovered".to_string(),
+        MeshNodeEvent::PeerDiscovered(device) => MeshEventPayload {
+            event_type: "peerDiscovered".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        MeshNodeEvent::DeviceUpdated(device) => MeshEventPayload {
-            event_type: "deviceUpdated".to_string(),
+        MeshNodeEvent::PeerUpdated(device) => MeshEventPayload {
+            event_type: "peerUpdated".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        MeshNodeEvent::DeviceOffline(id) => MeshEventPayload {
-            event_type: "deviceOffline".to_string(),
+        MeshNodeEvent::PeerOffline(id) => MeshEventPayload {
+            event_type: "peerOffline".to_string(),
             device_id: Some(id.clone()),
             payload: serde_json::Value::Null,
         },
-        MeshNodeEvent::DevicesChanged(devices) => MeshEventPayload {
-            event_type: "devicesChanged".to_string(),
+        MeshNodeEvent::PeersChanged(devices) => MeshEventPayload {
+            event_type: "peersChanged".to_string(),
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
+        },
+        MeshNodeEvent::PeerConnected { connection_id, peer_dns } => MeshEventPayload {
+            event_type: "peerConnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "peerDns": peer_dns,
+            }),
+        },
+        MeshNodeEvent::PeerDisconnected { connection_id, reason } => MeshEventPayload {
+            event_type: "peerDisconnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "reason": reason,
+            }),
         },
         MeshNodeEvent::Message(msg) => MeshEventPayload {
             event_type: "message".to_string(),

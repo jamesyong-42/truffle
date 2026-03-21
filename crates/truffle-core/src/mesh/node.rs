@@ -57,10 +57,14 @@ pub enum MeshNodeEvent {
     AuthRequired(String),
     /// Tailscale authentication completed successfully.
     AuthComplete,
-    DeviceDiscovered(BaseDevice),
-    DeviceUpdated(BaseDevice),
-    DeviceOffline(String),
-    DevicesChanged(Vec<BaseDevice>),
+    PeerDiscovered(BaseDevice),
+    PeerUpdated(BaseDevice),
+    PeerOffline(String),
+    PeersChanged(Vec<BaseDevice>),
+    /// A WebSocket transport connection was established with a peer.
+    PeerConnected { connection_id: String, peer_dns: Option<String> },
+    /// A WebSocket transport connection was closed.
+    PeerDisconnected { connection_id: String, reason: String },
     /// Application-level message received (non-mesh namespace).
     Message(IncomingMeshMessage),
     Error(String),
@@ -564,16 +568,16 @@ impl MeshNode {
             while let Some(event) = device_event_rx.recv().await {
                 match &event {
                     DeviceEvent::DeviceDiscovered(d) => {
-                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceDiscovered(d.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::PeerDiscovered(d.clone()));
                     }
                     DeviceEvent::DeviceUpdated(d) => {
-                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceUpdated(d.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::PeerUpdated(d.clone()));
                     }
                     DeviceEvent::DeviceOffline(id) => {
-                        let _ = event_tx_dev.send(MeshNodeEvent::DeviceOffline(id.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::PeerOffline(id.clone()));
                     }
                     DeviceEvent::DevicesChanged(devs) => {
-                        let _ = event_tx_dev.send(MeshNodeEvent::DevicesChanged(devs.clone()));
+                        let _ = event_tx_dev.send(MeshNodeEvent::PeersChanged(devs.clone()));
                     }
                     DeviceEvent::LocalDeviceChanged(_) => {
                         // Could trigger a broadcast announce, but we handle that

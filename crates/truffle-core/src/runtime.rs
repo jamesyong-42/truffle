@@ -74,15 +74,19 @@ pub enum TruffleEvent {
     /// Tailscale health subsystem warnings.
     SidecarHealthWarning { warnings: Vec<String> },
 
-    // -- Device --
-    /// A new device was discovered in the mesh.
-    DeviceDiscovered(BaseDevice),
-    /// An existing device's state was updated.
-    DeviceUpdated(BaseDevice),
-    /// A device went offline.
-    DeviceOffline(String),
-    /// The full device list changed.
-    DevicesChanged(Vec<BaseDevice>),
+    // -- Peer --
+    /// A new peer was discovered in the mesh.
+    PeerDiscovered(BaseDevice),
+    /// An existing peer's state was updated.
+    PeerUpdated(BaseDevice),
+    /// A peer went offline.
+    PeerOffline(String),
+    /// The full peer list changed.
+    PeersChanged(Vec<BaseDevice>),
+    /// A WebSocket transport connection was established with a peer.
+    PeerConnected { connection_id: String, peer_dns: Option<String> },
+    /// A WebSocket transport connection was closed.
+    PeerDisconnected { connection_id: String, reason: String },
 
     // -- Message --
     /// An application-level message was received from a peer.
@@ -799,10 +803,14 @@ pub fn mesh_event_to_truffle(event: MeshNodeEvent) -> TruffleEvent {
         MeshNodeEvent::Stopped => TruffleEvent::Stopped,
         MeshNodeEvent::AuthRequired(url) => TruffleEvent::AuthRequired { auth_url: url },
         MeshNodeEvent::AuthComplete => TruffleEvent::AuthComplete,
-        MeshNodeEvent::DeviceDiscovered(d) => TruffleEvent::DeviceDiscovered(d),
-        MeshNodeEvent::DeviceUpdated(d) => TruffleEvent::DeviceUpdated(d),
-        MeshNodeEvent::DeviceOffline(id) => TruffleEvent::DeviceOffline(id),
-        MeshNodeEvent::DevicesChanged(devices) => TruffleEvent::DevicesChanged(devices),
+        MeshNodeEvent::PeerDiscovered(d) => TruffleEvent::PeerDiscovered(d),
+        MeshNodeEvent::PeerUpdated(d) => TruffleEvent::PeerUpdated(d),
+        MeshNodeEvent::PeerOffline(id) => TruffleEvent::PeerOffline(id),
+        MeshNodeEvent::PeersChanged(devices) => TruffleEvent::PeersChanged(devices),
+        MeshNodeEvent::PeerConnected { connection_id, peer_dns } =>
+            TruffleEvent::PeerConnected { connection_id, peer_dns },
+        MeshNodeEvent::PeerDisconnected { connection_id, reason } =>
+            TruffleEvent::PeerDisconnected { connection_id, reason },
         MeshNodeEvent::Message(msg) => TruffleEvent::Message(msg),
         MeshNodeEvent::Error(err) => TruffleEvent::Error(err),
     }
@@ -1107,9 +1115,12 @@ mod tests {
             TruffleEvent::Stopped,
             TruffleEvent::AuthRequired { auth_url: "https://login.tailscale.com/a/xxx".to_string() },
             TruffleEvent::Online { ip: "100.64.0.1".to_string(), dns_name: "app.tail.ts.net".to_string() },
-            TruffleEvent::DeviceDiscovered(test_base_device()),
-            TruffleEvent::DeviceUpdated(test_base_device()),
-            TruffleEvent::DeviceOffline("dev-abc".to_string()),
+            TruffleEvent::PeerDiscovered(test_base_device()),
+            TruffleEvent::PeerUpdated(test_base_device()),
+            TruffleEvent::PeerOffline("dev-abc".to_string()),
+            TruffleEvent::PeersChanged(vec![test_base_device()]),
+            TruffleEvent::PeerConnected { connection_id: "c1".to_string(), peer_dns: Some("peer.ts.net".to_string()) },
+            TruffleEvent::PeerDisconnected { connection_id: "c1".to_string(), reason: "closed".to_string() },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("something went wrong".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "panic".to_string() },
@@ -1129,9 +1140,12 @@ mod tests {
             TruffleEvent::Stopped,
             TruffleEvent::AuthRequired { auth_url: "https://login.tailscale.com/a/xxx".to_string() },
             TruffleEvent::Online { ip: "100.64.0.1".to_string(), dns_name: "app.tail.ts.net".to_string() },
-            TruffleEvent::DeviceDiscovered(test_base_device()),
-            TruffleEvent::DeviceUpdated(test_base_device()),
-            TruffleEvent::DeviceOffline("dev-abc".to_string()),
+            TruffleEvent::PeerDiscovered(test_base_device()),
+            TruffleEvent::PeerUpdated(test_base_device()),
+            TruffleEvent::PeerOffline("dev-abc".to_string()),
+            TruffleEvent::PeersChanged(vec![test_base_device()]),
+            TruffleEvent::PeerConnected { connection_id: "c1".to_string(), peer_dns: None },
+            TruffleEvent::PeerDisconnected { connection_id: "c1".to_string(), reason: "timeout".to_string() },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("err".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: None, stderr_tail: String::new() },
@@ -1151,9 +1165,12 @@ mod tests {
         let _stopped = TruffleEvent::Stopped;
         let _auth = TruffleEvent::AuthRequired { auth_url: "https://example.com".to_string() };
         let _online = TruffleEvent::Online { ip: "100.64.0.1".to_string(), dns_name: "host.ts.net".to_string() };
-        let _discovered = TruffleEvent::DeviceDiscovered(test_base_device());
-        let _updated = TruffleEvent::DeviceUpdated(test_base_device());
-        let _offline = TruffleEvent::DeviceOffline("some-id".to_string());
+        let _discovered = TruffleEvent::PeerDiscovered(test_base_device());
+        let _updated = TruffleEvent::PeerUpdated(test_base_device());
+        let _offline = TruffleEvent::PeerOffline("some-id".to_string());
+        let _changed = TruffleEvent::PeersChanged(vec![test_base_device()]);
+        let _connected = TruffleEvent::PeerConnected { connection_id: "c1".to_string(), peer_dns: Some("p.ts.net".to_string()) };
+        let _disconnected = TruffleEvent::PeerDisconnected { connection_id: "c1".to_string(), reason: "bye".to_string() };
         let _msg = TruffleEvent::Message(test_incoming_message());
         let _err = TruffleEvent::Error("test error".to_string());
         let _crash = TruffleEvent::SidecarCrashed { exit_code: Some(137), stderr_tail: "killed".to_string() };
@@ -1234,17 +1251,31 @@ mod tests {
         assert!(matches!(err, TruffleEvent::Error(msg) if msg == "something broke"));
 
         let device = test_base_device();
-        let discovered = mesh_event_to_truffle(MeshNodeEvent::DeviceDiscovered(device.clone()));
-        assert!(matches!(discovered, TruffleEvent::DeviceDiscovered(d) if d.id == "dev-abc"));
+        let discovered = mesh_event_to_truffle(MeshNodeEvent::PeerDiscovered(device.clone()));
+        assert!(matches!(discovered, TruffleEvent::PeerDiscovered(d) if d.id == "dev-abc"));
 
-        let updated = mesh_event_to_truffle(MeshNodeEvent::DeviceUpdated(device.clone()));
-        assert!(matches!(updated, TruffleEvent::DeviceUpdated(d) if d.id == "dev-abc"));
+        let updated = mesh_event_to_truffle(MeshNodeEvent::PeerUpdated(device.clone()));
+        assert!(matches!(updated, TruffleEvent::PeerUpdated(d) if d.id == "dev-abc"));
 
-        let offline = mesh_event_to_truffle(MeshNodeEvent::DeviceOffline("dev-abc".into()));
-        assert!(matches!(offline, TruffleEvent::DeviceOffline(id) if id == "dev-abc"));
+        let offline = mesh_event_to_truffle(MeshNodeEvent::PeerOffline("dev-abc".into()));
+        assert!(matches!(offline, TruffleEvent::PeerOffline(id) if id == "dev-abc"));
 
-        let devices_changed = mesh_event_to_truffle(MeshNodeEvent::DevicesChanged(vec![device]));
-        assert!(matches!(devices_changed, TruffleEvent::DevicesChanged(devices) if devices.len() == 1));
+        let peers_changed = mesh_event_to_truffle(MeshNodeEvent::PeersChanged(vec![device]));
+        assert!(matches!(peers_changed, TruffleEvent::PeersChanged(devices) if devices.len() == 1));
+
+        let connected = mesh_event_to_truffle(MeshNodeEvent::PeerConnected {
+            connection_id: "c1".into(),
+            peer_dns: Some("peer.ts.net".into()),
+        });
+        assert!(matches!(connected, TruffleEvent::PeerConnected { connection_id, peer_dns }
+            if connection_id == "c1" && peer_dns == Some("peer.ts.net".to_string())));
+
+        let disconnected = mesh_event_to_truffle(MeshNodeEvent::PeerDisconnected {
+            connection_id: "c2".into(),
+            reason: "timeout".into(),
+        });
+        assert!(matches!(disconnected, TruffleEvent::PeerDisconnected { connection_id, reason }
+            if connection_id == "c2" && reason == "timeout"));
 
         let msg = mesh_event_to_truffle(MeshNodeEvent::Message(test_incoming_message()));
         assert!(matches!(msg, TruffleEvent::Message(_)));

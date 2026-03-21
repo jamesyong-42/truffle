@@ -60,7 +60,6 @@ fn default_protocol_version() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceListPayload {
     pub devices: Vec<BaseDevice>,
-    pub primary_id: String,
 }
 
 /// Device goodbye payload.

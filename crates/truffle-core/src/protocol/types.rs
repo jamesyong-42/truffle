@@ -600,8 +600,7 @@ mod tests {
                     "status": "online",
                     "capabilities": []
                 }
-            ],
-            "primaryId": "dev-1"
+            ]
         });
         let result = MeshPayload::parse("device-list", payload).unwrap();
         assert!(matches!(result, MeshPayload::DeviceList(_)));

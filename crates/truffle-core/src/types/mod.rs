@@ -59,7 +59,7 @@ pub struct BaseDevice {
     /// Last seen timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
-    /// Startup timestamp (used for primary election).
+    /// Startup timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
     /// OS information.

@@ -35,7 +35,6 @@ pub struct NapiMeshNodeConfig {
     pub sidecar_path: Option<String>,
     pub state_dir: Option<String>,
     pub auth_key: Option<String>,
-    pub prefer_primary: Option<bool>,
     pub static_path: Option<String>,
     pub capabilities: Option<Vec<String>>,
     pub timing: Option<NapiMeshTimingConfig>,
@@ -50,8 +49,6 @@ pub struct NapiMeshNodeConfig {
 pub struct NapiMeshTimingConfig {
     pub announce_interval_ms: Option<u32>,
     pub discovery_timeout_ms: Option<u32>,
-    pub election_timeout_ms: Option<u32>,
-    pub primary_loss_grace_ms: Option<u32>,
     pub heartbeat_ping_ms: Option<u32>,
     pub heartbeat_timeout_ms: Option<u32>,
 }
@@ -65,7 +62,6 @@ pub struct NapiBaseDevice {
     pub tailscale_hostname: String,
     pub tailscale_dns_name: Option<String>,
     pub tailscale_ip: Option<String>,
-    pub role: Option<String>,
     pub status: String,
     pub capabilities: Vec<String>,
     pub metadata: Option<serde_json::Value>,
@@ -114,7 +110,6 @@ impl From<&BaseDevice> for NapiBaseDevice {
             tailscale_hostname: d.tailscale_hostname.clone(),
             tailscale_dns_name: d.tailscale_dns_name.clone(),
             tailscale_ip: d.tailscale_ip.clone(),
-            role: None,
             status: match d.status {
                 DeviceStatus::Online => "online".to_string(),
                 DeviceStatus::Offline => "offline".to_string(),
@@ -221,25 +216,41 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
             device_id: None,
             payload: serde_json::Value::Null,
         },
-        MeshNodeEvent::DeviceDiscovered(device) => NapiMeshEvent {
-            event_type: "deviceDiscovered".to_string(),
+        MeshNodeEvent::PeerDiscovered(device) => NapiMeshEvent {
+            event_type: "peerDiscovered".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        MeshNodeEvent::DeviceUpdated(device) => NapiMeshEvent {
-            event_type: "deviceUpdated".to_string(),
+        MeshNodeEvent::PeerUpdated(device) => NapiMeshEvent {
+            event_type: "peerUpdated".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        MeshNodeEvent::DeviceOffline(id) => NapiMeshEvent {
-            event_type: "deviceOffline".to_string(),
+        MeshNodeEvent::PeerOffline(id) => NapiMeshEvent {
+            event_type: "peerOffline".to_string(),
             device_id: Some(id.clone()),
             payload: serde_json::Value::Null,
         },
-        MeshNodeEvent::DevicesChanged(devices) => NapiMeshEvent {
-            event_type: "devicesChanged".to_string(),
+        MeshNodeEvent::PeersChanged(devices) => NapiMeshEvent {
+            event_type: "peersChanged".to_string(),
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
+        },
+        MeshNodeEvent::PeerConnected { connection_id, peer_dns } => NapiMeshEvent {
+            event_type: "peerConnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "peerDns": peer_dns,
+            }),
+        },
+        MeshNodeEvent::PeerDisconnected { connection_id, reason } => NapiMeshEvent {
+            event_type: "peerDisconnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "reason": reason,
+            }),
         },
         MeshNodeEvent::Message(msg) => {
             let ns = normalize_namespace(&msg.namespace);
@@ -339,25 +350,41 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiMeshEvent {
             device_id: None,
             payload: serde_json::to_value(warnings).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceDiscovered(device) => NapiMeshEvent {
-            event_type: "deviceDiscovered".to_string(),
+        TruffleEvent::PeerDiscovered(device) => NapiMeshEvent {
+            event_type: "peerDiscovered".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceUpdated(device) => NapiMeshEvent {
-            event_type: "deviceUpdated".to_string(),
+        TruffleEvent::PeerUpdated(device) => NapiMeshEvent {
+            event_type: "peerUpdated".to_string(),
             device_id: Some(device.id.clone()),
             payload: serde_json::to_value(device).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::DeviceOffline(id) => NapiMeshEvent {
-            event_type: "deviceOffline".to_string(),
+        TruffleEvent::PeerOffline(id) => NapiMeshEvent {
+            event_type: "peerOffline".to_string(),
             device_id: Some(id.clone()),
             payload: serde_json::Value::Null,
         },
-        TruffleEvent::DevicesChanged(devices) => NapiMeshEvent {
-            event_type: "devicesChanged".to_string(),
+        TruffleEvent::PeersChanged(devices) => NapiMeshEvent {
+            event_type: "peersChanged".to_string(),
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
+        },
+        TruffleEvent::PeerConnected { connection_id, peer_dns } => NapiMeshEvent {
+            event_type: "peerConnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "peerDns": peer_dns,
+            }),
+        },
+        TruffleEvent::PeerDisconnected { connection_id, reason } => NapiMeshEvent {
+            event_type: "peerDisconnected".to_string(),
+            device_id: None,
+            payload: serde_json::json!({
+                "connectionId": connection_id,
+                "reason": reason,
+            }),
         },
         TruffleEvent::Message(msg) => {
             let ns = normalize_namespace(&msg.namespace);
@@ -442,9 +469,12 @@ mod tests {
             TruffleEvent::Stopped,
             TruffleEvent::AuthRequired { auth_url: "https://login.tailscale.com/a/xxx".to_string() },
             TruffleEvent::Online { ip: "100.64.0.1".to_string(), dns_name: "app.tail.ts.net".to_string() },
-            TruffleEvent::DeviceDiscovered(test_base_device()),
-            TruffleEvent::DeviceUpdated(test_base_device()),
-            TruffleEvent::DeviceOffline("dev-abc".to_string()),
+            TruffleEvent::PeerDiscovered(test_base_device()),
+            TruffleEvent::PeerUpdated(test_base_device()),
+            TruffleEvent::PeerOffline("dev-abc".to_string()),
+            TruffleEvent::PeersChanged(vec![test_base_device()]),
+            TruffleEvent::PeerConnected { connection_id: "conn-1".to_string(), peer_dns: Some("peer.ts.net".to_string()) },
+            TruffleEvent::PeerDisconnected { connection_id: "conn-1".to_string(), reason: "closed".to_string() },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("something went wrong".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "panic".to_string() },
@@ -465,9 +495,12 @@ mod tests {
             (TruffleEvent::Stopped, "stopped"),
             (TruffleEvent::AuthRequired { auth_url: "url".to_string() }, "authRequired"),
             (TruffleEvent::Online { ip: "1.2.3.4".to_string(), dns_name: "x".to_string() }, "online"),
-            (TruffleEvent::DeviceDiscovered(test_base_device()), "deviceDiscovered"),
-            (TruffleEvent::DeviceUpdated(test_base_device()), "deviceUpdated"),
-            (TruffleEvent::DeviceOffline("id".to_string()), "deviceOffline"),
+            (TruffleEvent::PeerDiscovered(test_base_device()), "peerDiscovered"),
+            (TruffleEvent::PeerUpdated(test_base_device()), "peerUpdated"),
+            (TruffleEvent::PeerOffline("id".to_string()), "peerOffline"),
+            (TruffleEvent::PeersChanged(vec![test_base_device()]), "peersChanged"),
+            (TruffleEvent::PeerConnected { connection_id: "c1".to_string(), peer_dns: None }, "peerConnected"),
+            (TruffleEvent::PeerDisconnected { connection_id: "c1".to_string(), reason: "bye".to_string() }, "peerDisconnected"),
             (TruffleEvent::Message(test_incoming_message()), "message"),
             (TruffleEvent::Error("err".to_string()), "error"),
             (TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "x".to_string() }, "sidecarCrashed"),
@@ -624,10 +657,12 @@ mod tests {
             MeshNodeEvent::Stopped,
             MeshNodeEvent::AuthRequired("https://example.com".to_string()),
             MeshNodeEvent::AuthComplete,
-            MeshNodeEvent::DeviceDiscovered(test_base_device()),
-            MeshNodeEvent::DeviceUpdated(test_base_device()),
-            MeshNodeEvent::DeviceOffline("dev-abc".to_string()),
-            MeshNodeEvent::DevicesChanged(vec![test_base_device()]),
+            MeshNodeEvent::PeerDiscovered(test_base_device()),
+            MeshNodeEvent::PeerUpdated(test_base_device()),
+            MeshNodeEvent::PeerOffline("dev-abc".to_string()),
+            MeshNodeEvent::PeersChanged(vec![test_base_device()]),
+            MeshNodeEvent::PeerConnected { connection_id: "c1".to_string(), peer_dns: Some("peer.ts.net".to_string()) },
+            MeshNodeEvent::PeerDisconnected { connection_id: "c1".to_string(), reason: "closed".to_string() },
             MeshNodeEvent::Message(test_incoming_message()),
             MeshNodeEvent::Error("err".to_string()),
         ];

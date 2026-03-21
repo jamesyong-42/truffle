@@ -91,6 +91,17 @@ impl TransportHandler {
         if let Some(envelope) = Self::wrap_mesh_message(&announce) {
             self.send_envelope_to_conn(&conn.id, &envelope).await;
         }
+
+        // Emit PeerConnected event
+        let peer_dns = if conn.remote_dns_name.is_empty() {
+            None
+        } else {
+            Some(conn.remote_dns_name.clone())
+        };
+        let _ = self.event_tx.send(MeshNodeEvent::PeerConnected {
+            connection_id: conn.id.clone(),
+            peer_dns,
+        });
     }
 
     pub async fn handle_disconnected(&self, connection_id: &str, reason: &str) {
@@ -106,6 +117,12 @@ impl TransportHandler {
                 dm.mark_device_offline(&device.id);
             }
         }
+
+        // Emit PeerDisconnected event
+        let _ = self.event_tx.send(MeshNodeEvent::PeerDisconnected {
+            connection_id: connection_id.to_string(),
+            reason: reason.to_string(),
+        });
     }
 
     pub async fn handle_message(
@@ -301,14 +318,14 @@ mod tests {
         while let Ok(event) = dev_rx.try_recv() {
             if let DeviceEvent::DeviceDiscovered(d) = event { assert_eq!(d.id, "remote-1"); found = true; }
         }
-        assert!(found, "Must emit DeviceDiscovered");
+        assert!(found, "Must emit DeviceDiscovered (internal DeviceEvent)");
     }
 
     #[tokio::test]
     async fn test_device_list_adds_multiple_devices() {
         let (handler, _event_rx, _dev_rx) = make_handler();
         let devices = vec![make_device("dev-a", "A"), make_device("dev-b", "B"), make_device("dev-c", "C")];
-        let msg = MeshMessage::new("device-list", "primary-node", serde_json::to_value(&DeviceListPayload { devices, primary_id: "primary-node".to_string() }).unwrap());
+        let msg = MeshMessage::new("device-list", "primary-node", serde_json::to_value(&DeviceListPayload { devices }).unwrap());
         handler.dispatch_mesh_message(&msg).await;
         let dm = handler.device_manager.read().await;
         assert!(dm.device_by_id("dev-a").is_some());

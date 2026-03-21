@@ -43,10 +43,10 @@ pub fn wire_store_sync(
                     };
                     adapt.handle_sync_message(&sync_msg).await;
                 }
-                Ok(MeshNodeEvent::DeviceDiscovered(device)) => {
+                Ok(MeshNodeEvent::PeerDiscovered(device)) => {
                     adapt.handle_device_discovered(&device.id).await;
                 }
-                Ok(MeshNodeEvent::DeviceOffline(id)) => {
+                Ok(MeshNodeEvent::PeerOffline(id)) => {
                     adapt.handle_device_offline(&id).await;
                 }
                 Ok(_) => {}
