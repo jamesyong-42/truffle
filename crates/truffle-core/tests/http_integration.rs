@@ -23,7 +23,7 @@
 //!
 //! - **Tailscale networking** — All connections are local (127.0.0.1).
 //! - **Bridge protocol** — BridgeHeaders are synthesised, not received from Go.
-//! - **Mesh protocol** — No device discovery or election.
+//! - **Mesh protocol** — No device discovery or peer management.
 //! - **TLS** — All connections are plaintext TCP.
 //!
 //! ## Running

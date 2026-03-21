@@ -32,7 +32,7 @@
 //!
 //! - **WebSocket upgrade** — Bridge connections are raw TCP. The transport layer
 //!   upgrades them to WebSocket.
-//! - **Mesh protocol** — No device:announce, election messages, or STAR routing.
+//! - **Mesh protocol** — No device-announce or P2P mesh messages.
 //! - **Application features** — No store sync, file transfer, or message bus.
 //! - **Reconnection** — Single dial only, no retry or reconnect logic.
 //!

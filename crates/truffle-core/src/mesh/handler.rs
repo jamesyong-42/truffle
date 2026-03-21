@@ -325,7 +325,7 @@ mod tests {
     async fn test_device_list_adds_multiple_devices() {
         let (handler, _event_rx, _dev_rx) = make_handler();
         let devices = vec![make_device("dev-a", "A"), make_device("dev-b", "B"), make_device("dev-c", "C")];
-        let msg = MeshMessage::new("device-list", "primary-node", serde_json::to_value(&DeviceListPayload { devices }).unwrap());
+        let msg = MeshMessage::new("device-list", "sender-node", serde_json::to_value(&DeviceListPayload { devices }).unwrap());
         handler.dispatch_mesh_message(&msg).await;
         let dm = handler.device_manager.read().await;
         assert!(dm.device_by_id("dev-a").is_some());

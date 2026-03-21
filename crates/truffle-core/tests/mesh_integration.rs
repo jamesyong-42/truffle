@@ -1,26 +1,21 @@
 //! # Mesh Layer Integration Tests (Layer 3)
 //!
 //! These tests validate the **mesh networking layer** in truffle:
-//! device discovery, primary election, STAR routing, and message delivery.
+//! device discovery, P2P messaging, and peer lifecycle events.
 //!
 //! ## What's proven at this layer
 //!
 //! 1. **Single-node mesh lifecycle** — MeshNode start/stop cycle emits correct
-//!    events, auth state transitions work, and a lone node self-elects as primary
-//!    after the discovery timeout.
+//!    events and auth state transitions work.
 //!
 //! 2. **Two-node discovery** — Two TruffleRuntime nodes on the same Tailscale
-//!    tailnet discover each other via device:announce messages after connection.
+//!    tailnet discover each other via device-announce messages after connection.
 //!
-//! 3. **Primary election** — With two nodes, exactly one becomes Primary and the
-//!    other Secondary. Election follows the rules: user-designated > uptime >
-//!    lexicographic device ID.
+//! 3. **Direct P2P messaging** — Broadcast and targeted messages are delivered
+//!    directly between peers (no routing through a primary node).
 //!
-//! 4. **Message routing** — Broadcast and targeted messages are delivered through
-//!    the STAR topology (secondary -> primary -> secondary).
-//!
-//! 5. **Graceful shutdown** — When a node stops, it broadcasts device:goodbye and
-//!    peers mark it offline. If the primary stops, the secondary undergoes failover.
+//! 4. **Graceful shutdown** — When a node stops, it broadcasts device-goodbye and
+//!    peers mark it offline.
 //!
 //! ## What's NOT tested at this layer
 //!

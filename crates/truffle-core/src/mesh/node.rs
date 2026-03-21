@@ -538,7 +538,7 @@ impl MeshNode {
         self.broadcast_mesh_message(&goodbye).await;
     }
 
-    // broadcast_device_list() removed per CS-5 (logic moved to handler.rs and election event handler)
+    // broadcast_device_list() removed per CS-5 (logic moved to handler.rs)
 
     // ── Internal: event loop ──────────────────────────────────────────────
 

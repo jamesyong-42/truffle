@@ -11,7 +11,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Namespace {
-    /// Internal mesh protocol: device discovery, election, routing.
+    /// Internal mesh protocol: device discovery, peer management.
     Mesh,
     /// Store synchronization.
     Sync,
