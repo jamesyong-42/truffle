@@ -1,8 +1,54 @@
 # Examples
 
-The `examples/` directory contains working examples demonstrating different Truffle features.
+## CLI Examples
 
-## Device Discovery
+The fastest way to try truffle is with the CLI.
+
+### Device Discovery
+
+```sh
+# Start your node
+truffle up
+
+# See all nodes on the mesh
+truffle ls
+```
+
+### Messaging
+
+```sh
+# Send a one-shot message
+truffle send laptop "build finished"
+
+# Start a live chat
+truffle chat laptop
+```
+
+### File Transfer
+
+```sh
+# Copy a file to another node
+truffle cp ./report.pdf server:/tmp/
+
+# Copy from remote to local
+truffle cp server:/var/log/app.log ./
+```
+
+### Port Forwarding
+
+```sh
+# Expose local port 3000 on the mesh
+truffle expose 3000
+
+# Forward a remote port to localhost
+truffle proxy server:5432
+```
+
+## Library Examples
+
+The `examples/` directory contains working examples demonstrating programmatic usage with the Rust/Node.js library.
+
+### Device Discovery
 
 Discovers peers on the tailnet and logs device events.
 
@@ -34,7 +80,7 @@ node.on('devicesChanged', (devices) => {
 await node.start();
 ```
 
-## Cross-Device Chat
+### Cross-Device Chat
 
 A simple chat app using the MessageBus.
 
@@ -45,7 +91,7 @@ npx tsx index.ts
 
 Uses `bus.broadcast('chat', 'message', { text })` to send messages and `bus.subscribe('chat', handler)` to receive them.
 
-## Shared State
+### Shared State
 
 Synchronizes a todo list across devices using `StoreSyncAdapter`.
 
@@ -56,7 +102,7 @@ npx tsx index.ts
 
 Demonstrates `ISyncableStore` implementation with automatic sync across all connected devices.
 
-## Running Examples
+### Running Library Examples
 
 1. Build the sidecar: `cd packages/sidecar && make build`
 2. Build packages: `pnpm run build`

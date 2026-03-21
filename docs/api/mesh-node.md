@@ -30,7 +30,6 @@ interface MeshNodeConfig {
   sidecarPath: string;
   stateDir: string;
   authKey?: string;
-  preferPrimary?: boolean;
   staticPath?: string;
   capabilities?: string[];
   metadata?: Record<string, unknown>;
@@ -61,14 +60,6 @@ Returns the local device info.
 
 Returns all known remote devices.
 
-### `isPrimary(): boolean`
-
-Returns whether this node is the elected primary.
-
-### `getRole(): DeviceRole`
-
-Returns `'primary'` or `'secondary'`.
-
 ### `getMessageBus(): IMessageBus`
 
 Returns the message bus for pub/sub messaging.
@@ -84,8 +75,6 @@ interface MeshNodeEvents {
   deviceUpdated: (device: BaseDevice) => void;
   deviceOffline: (deviceId: string) => void;
   devicesChanged: (devices: BaseDevice[]) => void;
-  roleChanged: (role: DeviceRole, isPrimary: boolean) => void;
-  primaryChanged: (primaryId: string | null) => void;
   message: (message: IncomingMeshMessage) => void;
   error: (error: Error) => void;
 }

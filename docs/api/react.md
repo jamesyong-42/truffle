@@ -17,9 +17,7 @@ function MeshStatus({ node }: { node: MeshNode | null }) {
   const {
     devices,
     localDevice,
-    isPrimary,
     isConnected,
-    role,
     broadcast,
     sendTo,
   } = useMesh(node);
@@ -27,7 +25,6 @@ function MeshStatus({ node }: { node: MeshNode | null }) {
   return (
     <div>
       <p>Status: {isConnected ? 'Connected' : 'Disconnected'}</p>
-      <p>Role: {role} {isPrimary && '(primary)'}</p>
       <p>Devices: {devices.length}</p>
       <ul>
         {devices.map(d => (
@@ -51,9 +48,7 @@ function MeshStatus({ node }: { node: MeshNode | null }) {
 |-------|------|-------------|
 | `devices` | `BaseDevice[]` | All known remote devices |
 | `localDevice` | `BaseDevice \| null` | Local device info |
-| `isPrimary` | `boolean` | Whether this node is primary |
 | `isConnected` | `boolean` | Whether the node is running |
-| `role` | `DeviceRole` | Current role |
 | `broadcast` | `(ns, type, payload) => void` | Broadcast a message |
 | `sendTo` | `(deviceId, ns, type, payload) => boolean` | Send to a device |
 

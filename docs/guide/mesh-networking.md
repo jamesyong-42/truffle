@@ -26,7 +26,8 @@ const node = createMeshNode({
 | `sidecarPath` | `string` | Yes | Path to sidecar binary |
 | `stateDir` | `string` | Yes | Tailscale state directory |
 | `authKey` | `string` | No | Tailscale auth key |
-| `preferPrimary` | `boolean` | No | Prefer this device as primary |
+| `capabilities` | `string[]` | No | Advertised capabilities |
+| `metadata` | `Record<string, unknown>` | No | Custom metadata |
 | `logger` | `Logger` | No | Custom logger |
 | `timing` | `MeshTimingConfig` | No | Timing overrides |
 
@@ -38,8 +39,6 @@ const node = createMeshNode({
   timing: {
     announceIntervalMs: 30000,   // Device announce interval
     discoveryTimeoutMs: 5000,    // Peer discovery timeout
-    electionTimeoutMs: 3000,     // Election round timeout
-    primaryLossGraceMs: 5000,    // Grace period before re-election
     heartbeatPingMs: 2000,       // Heartbeat ping interval
     heartbeatTimeoutMs: 5000,    // Heartbeat timeout
   },
@@ -54,7 +53,6 @@ node.on('stopped', () => { /* Node stopped */ });
 node.on('deviceDiscovered', (device) => { /* New peer found */ });
 node.on('deviceOffline', (deviceId) => { /* Peer went offline */ });
 node.on('devicesChanged', (devices) => { /* Device list updated */ });
-node.on('roleChanged', (role, isPrimary) => { /* Role changed */ });
 node.on('authRequired', (authUrl) => { /* Tailscale auth needed */ });
 node.on('error', (error) => { /* Error occurred */ });
 ```
@@ -86,10 +84,8 @@ unsubscribe();
 await node.start();
 
 // Check status
-console.log(node.isRunning());     // true
-console.log(node.isPrimary());     // true/false
-console.log(node.getRole());       // 'primary' | 'secondary'
-console.log(node.getDevices());    // BaseDevice[]
+console.log(node.isRunning());      // true
+console.log(node.getDevices());     // BaseDevice[]
 console.log(node.getLocalDevice()); // BaseDevice
 
 // Stop the node

@@ -2,70 +2,98 @@
 
 ## Prerequisites
 
-- **Node.js** >= 18
-- **Tailscale** installed and authenticated (or use an auth key)
-- **Go** >= 1.21 (to build the sidecar binary)
+- **Tailscale** installed and authenticated on each device you want to connect
+- That's it. Truffle handles the rest.
 
-## Installation
+## Install
 
-```bash
-npm install @vibecook/truffle
+::: code-group
+
+```sh [macOS / Linux]
+curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
 ```
 
-For the sidecar binary (prebuilt, when available):
-
-```bash
-npm install @vibecook/truffle-sidecar-bin
+```powershell [Windows]
+iwr -useb https://jamesyong-42.github.io/truffle/install.ps1 | iex
 ```
+
+```sh [Homebrew]
+brew install jamesyong-42/tap/truffle
+```
+
+:::
+
+The installer downloads the `truffle` CLI and the `sidecar-slim` binary, places them in `~/.config/truffle/bin` (Unix) or `%LOCALAPPDATA%\truffle\bin` (Windows), and adds them to your PATH.
 
 ## Quick Start
 
-```typescript
-import { createMeshNode } from '@vibecook/truffle';
+### 1. Start your node
 
-const node = createMeshNode({
-  deviceId: 'my-device-id',
-  deviceName: 'My Laptop',
-  deviceType: 'desktop',
-  hostnamePrefix: 'myapp',
-  sidecarPath: './path/to/sidecar',
-  stateDir: './tailscale-state',
-});
-
-node.on('deviceDiscovered', (device) => {
-  console.log('Found device:', device.name);
-});
-
-node.on('roleChanged', (role, isPrimary) => {
-  console.log(`Role: ${role}, isPrimary: ${isPrimary}`);
-});
-
-await node.start();
+```sh
+truffle up
 ```
 
-## Using the CLI
+Output:
 
-```bash
-# Initialize a project
-npx @vibecook/truffle-cli init
+```
+  truffle
+  ───────────────────────────────────────
 
-# Start a dev node
-npx @vibecook/truffle-cli dev --prefix myapp
-
-# Check status
-npx @vibecook/truffle-cli status
+  Node        james-macbook
+  Status      ● online
+  IP          100.64.0.3
+  DNS         truffle-desktop-a1b2.tailnet.ts.net
+  Mesh        3 nodes online
+  Uptime      just started
 ```
 
-## Packages
+### 2. See who's on the mesh
 
-| Package | Description |
-|---------|-------------|
-| `@vibecook/truffle` | Unified entry point — install this |
-| `@vibecook/truffle-types` | Type definitions and Zod schemas |
-| `@vibecook/truffle-protocol` | Wire format and message bus interface |
-| `@vibecook/truffle-sidecar-client` | TypeScript client for the Go sidecar |
-| `@vibecook/truffle-transport` | WebSocket transport layer |
-| `@vibecook/truffle-mesh` | Discovery, routing, primary election |
-| `@vibecook/truffle-store-sync` | Cross-device state synchronization |
-| `@vibecook/truffle-react` | React hooks for mesh networking |
-| `@vibecook/truffle-cli` | CLI for project scaffolding and dev |
+```sh
+truffle ls
+```
+
+```
+  NAME              IP             OS       STATUS
+  james-macbook     100.64.0.3     macOS    ● online
+  work-desktop      100.64.0.5     Linux    ● online
+  home-server       100.64.0.7     Linux    ● online
+```
+
+### 3. Ping a node
+
+```sh
+truffle ping work-desktop
+```
+
+### 4. Send a message
+
+```sh
+truffle send work-desktop "build is done"
+```
+
+### 5. Copy a file
+
+```sh
+truffle cp ./report.pdf work-desktop:/tmp/
+```
+
+### 6. Stop your node
+
+```sh
+truffle down
+```
+
+## What's happening under the hood
+
+1. `truffle up` starts the Go sidecar, which joins your Tailscale network
+2. Truffle discovers other truffle nodes on the tailnet automatically
+3. Direct P2P WebSocket connections are established between all nodes -- no coordinator, no hub
+4. You can now send messages, copy files, proxy ports, and sync state across your devices
+
+## Next Steps
+
+- [CLI Quick Start](/guide/cli) -- full command reference
+- [Installation](/guide/install) -- detailed install options
+- [Architecture](/guide/architecture) -- how it works
+- [Mesh Networking](/guide/mesh-networking) -- programmatic usage with the Rust/Node.js library

@@ -15,7 +15,6 @@ npm install @vibecook/truffle
 | `createMeshNode` | truffle-mesh | Create a new mesh node |
 | `MeshNode` | truffle-mesh | Mesh node class |
 | `DeviceManager` | truffle-mesh | Device state manager |
-| `PrimaryElection` | truffle-mesh | Election coordinator |
 | `MeshMessageBus` | truffle-mesh | Message bus implementation |
 | `StoreSyncAdapter` | truffle-store-sync | Store synchronization adapter |
 | `createLogger` | truffle-types | Default logger factory |
@@ -29,7 +28,6 @@ npm install @vibecook/truffle
 | `MeshNodeEvents` | Event map for MeshNode |
 | `MeshTimingConfig` | Timing configuration |
 | `BaseDevice` | Device information |
-| `DeviceRole` | `'primary' \| 'secondary'` |
 | `DeviceSlice<T>` | Store slice with data, version, timestamps |
 | `MeshEnvelope` | Wire format for mesh messages |
 | `ISyncableStore<T>` | Interface for syncable stores |
