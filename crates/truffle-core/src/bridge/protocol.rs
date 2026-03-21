@@ -44,6 +44,66 @@ pub struct DialCommandData {
     pub port: u16,
 }
 
+/// Data payload for `tsnet:listen`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenCommandData {
+    /// Port to listen on via tsnet.
+    pub port: u16,
+    /// If true, listen with TLS (ListenTLS).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
+}
+
+/// Data payload for `tsnet:unlisten`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlistenCommandData {
+    /// Port to stop listening on.
+    pub port: u16,
+}
+
+/// Data payload for `tsnet:ping`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PingCommandData {
+    /// Tailscale IP of the target to ping.
+    pub target: String,
+    /// Ping type: "TSMP" (default), "disco", "ICMP", "peerapi".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ping_type: Option<String>,
+}
+
+/// Data payload for `tsnet:pushFile`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushFileCommandData {
+    /// Tailscale stable node ID of the target.
+    pub target_node_id: String,
+    /// Name of the file to send.
+    pub file_name: String,
+    /// Local path to the file to send.
+    pub file_path: String,
+}
+
+/// Data payload for `tsnet:getWaitingFile`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetWaitingFileCommandData {
+    /// Name of the waiting file to retrieve.
+    pub file_name: String,
+    /// Local path to save the file to.
+    pub save_path: String,
+}
+
+/// Data payload for `tsnet:deleteWaitingFile`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWaitingFileCommandData {
+    /// Name of the waiting file to delete.
+    pub file_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Events: Go shim → Rust (received as JSON lines on stdout)
 // ---------------------------------------------------------------------------
@@ -69,6 +129,13 @@ pub mod event_type {
     pub const PEERS: &str = "tsnet:peers";
     pub const DIAL_RESULT: &str = "bridge:dialResult";
     pub const ERROR: &str = "tsnet:error";
+    pub const LISTENING: &str = "tsnet:listening";
+    pub const UNLISTENED: &str = "tsnet:unlistened";
+    pub const PING_RESULT: &str = "tsnet:pingResult";
+    pub const PUSH_FILE_RESULT: &str = "tsnet:pushFileResult";
+    pub const WAITING_FILES_RESULT: &str = "tsnet:waitingFilesResult";
+    pub const GET_WAITING_FILE_RESULT: &str = "tsnet:getWaitingFileResult";
+    pub const DELETE_WAITING_FILE_RESULT: &str = "tsnet:deleteWaitingFileResult";
 }
 
 /// Well-known command type strings.
@@ -77,6 +144,13 @@ pub mod command_type {
     pub const STOP: &str = "tsnet:stop";
     pub const GET_PEERS: &str = "tsnet:getPeers";
     pub const DIAL: &str = "bridge:dial";
+    pub const LISTEN: &str = "tsnet:listen";
+    pub const UNLISTEN: &str = "tsnet:unlisten";
+    pub const PING: &str = "tsnet:ping";
+    pub const PUSH_FILE: &str = "tsnet:pushFile";
+    pub const WAITING_FILES: &str = "tsnet:waitingFiles";
+    pub const GET_WAITING_FILE: &str = "tsnet:getWaitingFile";
+    pub const DELETE_WAITING_FILE: &str = "tsnet:deleteWaitingFile";
 }
 
 /// Data from `tsnet:status` event.
@@ -222,6 +296,92 @@ pub struct DialResultEventData {
 pub struct ErrorEventData {
     pub code: String,
     pub message: String,
+}
+
+/// Data from `tsnet:listening` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningEventData {
+    pub port: u16,
+}
+
+/// Data from `tsnet:unlistened` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlistenedEventData {
+    pub port: u16,
+}
+
+/// Data from `tsnet:pingResult` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PingResultEventData {
+    /// Tailscale IP that was pinged.
+    #[serde(default)]
+    pub target: String,
+    /// Round-trip latency in milliseconds.
+    #[serde(default)]
+    pub latency_ms: f64,
+    /// Whether the connection is direct (not relayed).
+    #[serde(default)]
+    pub direct: bool,
+    /// DERP relay region code if relayed (e.g. "sea"), empty if direct.
+    #[serde(default)]
+    pub relay: String,
+    /// Direct peer address (e.g. "192.168.1.5:41641"), empty if relayed.
+    #[serde(default)]
+    pub peer_addr: String,
+    /// Error message, empty on success.
+    #[serde(default)]
+    pub error: String,
+}
+
+/// Data from `tsnet:pushFileResult` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushFileResultEventData {
+    pub success: bool,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// A single waiting file entry from Taildrop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingFileInfo {
+    pub name: String,
+    pub size: i64,
+}
+
+/// Data from `tsnet:waitingFilesResult` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingFilesResultEventData {
+    pub files: Vec<WaitingFileInfo>,
+}
+
+/// Data from `tsnet:getWaitingFileResult` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetWaitingFileResultEventData {
+    pub success: bool,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub save_path: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+/// Data from `tsnet:deleteWaitingFileResult` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWaitingFileResultEventData {
+    pub success: bool,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub error: String,
 }
 
 #[cfg(test)]
@@ -1154,5 +1314,306 @@ mod tests {
         assert_eq!(identity.display_name, "");
         assert_eq!(identity.profile_pic_url, "");
         assert_eq!(identity.node_id, "");
+    }
+
+    // ── Phase 5: New sidecar commands ────────────────────────────────────
+
+    #[test]
+    fn serialize_listen_command() {
+        let data = ListenCommandData {
+            port: 3000,
+            tls: None,
+        };
+        let cmd = ShimCommand {
+            command: command_type::LISTEN,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:listen\""));
+        assert!(json.contains("\"port\":3000"));
+        // tls=None should be omitted
+        assert!(!json.contains("\"tls\""), "tls=None should be omitted");
+    }
+
+    #[test]
+    fn serialize_listen_command_with_tls() {
+        let data = ListenCommandData {
+            port: 443,
+            tls: Some(true),
+        };
+        let cmd = ShimCommand {
+            command: command_type::LISTEN,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"tls\":true"));
+    }
+
+    #[test]
+    fn serialize_unlisten_command() {
+        let data = UnlistenCommandData { port: 3000 };
+        let cmd = ShimCommand {
+            command: command_type::UNLISTEN,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:unlisten\""));
+        assert!(json.contains("\"port\":3000"));
+    }
+
+    #[test]
+    fn serialize_ping_command() {
+        let data = PingCommandData {
+            target: "100.64.0.3".to_string(),
+            ping_type: Some("TSMP".to_string()),
+        };
+        let cmd = ShimCommand {
+            command: command_type::PING,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:ping\""));
+        assert!(json.contains("\"target\":\"100.64.0.3\""));
+        assert!(json.contains("\"pingType\":\"TSMP\""));
+    }
+
+    #[test]
+    fn serialize_ping_command_default_type() {
+        let data = PingCommandData {
+            target: "100.64.0.5".to_string(),
+            ping_type: None,
+        };
+        let value = serde_json::to_value(&data).unwrap();
+        assert!(!value.as_object().unwrap().contains_key("pingType"),
+            "pingType=None should be omitted");
+    }
+
+    #[test]
+    fn deserialize_ping_result_success() {
+        let json = r#"{"event":"tsnet:pingResult","data":{"target":"100.64.0.3","latencyMs":2.1,"direct":true,"relay":"","peerAddr":"10.0.0.5:41641"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::PING_RESULT);
+        let data: PingResultEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.target, "100.64.0.3");
+        assert!((data.latency_ms - 2.1).abs() < 0.001);
+        assert!(data.direct);
+        assert_eq!(data.relay, "");
+        assert_eq!(data.peer_addr, "10.0.0.5:41641");
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn deserialize_ping_result_relayed() {
+        let json = r#"{"target":"100.64.0.4","latencyMs":45.7,"direct":false,"relay":"sea","peerAddr":""}"#;
+        let data: PingResultEventData = serde_json::from_str(json).unwrap();
+        assert!(!data.direct);
+        assert_eq!(data.relay, "sea");
+        assert_eq!(data.peer_addr, "");
+    }
+
+    #[test]
+    fn deserialize_ping_result_error() {
+        let json = r#"{"target":"100.64.0.99","latencyMs":0,"direct":false,"error":"ping failed: context deadline exceeded"}"#;
+        let data: PingResultEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.target, "100.64.0.99");
+        assert!(data.error.contains("context deadline exceeded"));
+    }
+
+    #[test]
+    fn serialize_push_file_command() {
+        let data = PushFileCommandData {
+            target_node_id: "nXXXX".to_string(),
+            file_name: "report.pdf".to_string(),
+            file_path: "/tmp/report.pdf".to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::PUSH_FILE,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:pushFile\""));
+        assert!(json.contains("\"targetNodeId\":\"nXXXX\""));
+        assert!(json.contains("\"fileName\":\"report.pdf\""));
+        assert!(json.contains("\"filePath\":\"/tmp/report.pdf\""));
+    }
+
+    #[test]
+    fn deserialize_push_file_result_success() {
+        let json = r#"{"event":"tsnet:pushFileResult","data":{"success":true}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::PUSH_FILE_RESULT);
+        let data: PushFileResultEventData = serde_json::from_value(event.data).unwrap();
+        assert!(data.success);
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn deserialize_push_file_result_failure() {
+        let json = r#"{"success":false,"error":"push file failed: connection refused"}"#;
+        let data: PushFileResultEventData = serde_json::from_str(json).unwrap();
+        assert!(!data.success);
+        assert!(data.error.contains("connection refused"));
+    }
+
+    #[test]
+    fn serialize_waiting_files_command() {
+        let cmd = ShimCommand {
+            command: command_type::WAITING_FILES,
+            data: None,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"command":"tsnet:waitingFiles"}"#);
+    }
+
+    #[test]
+    fn deserialize_waiting_files_result() {
+        let json = r#"{"event":"tsnet:waitingFilesResult","data":{"files":[{"name":"report.pdf","size":12345},{"name":"photo.jpg","size":98765}]}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::WAITING_FILES_RESULT);
+        let data: WaitingFilesResultEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.files.len(), 2);
+        assert_eq!(data.files[0].name, "report.pdf");
+        assert_eq!(data.files[0].size, 12345);
+        assert_eq!(data.files[1].name, "photo.jpg");
+        assert_eq!(data.files[1].size, 98765);
+    }
+
+    #[test]
+    fn deserialize_waiting_files_result_empty() {
+        let json = r#"{"files":[]}"#;
+        let data: WaitingFilesResultEventData = serde_json::from_str(json).unwrap();
+        assert!(data.files.is_empty());
+    }
+
+    #[test]
+    fn serialize_get_waiting_file_command() {
+        let data = GetWaitingFileCommandData {
+            file_name: "report.pdf".to_string(),
+            save_path: "/tmp/report.pdf".to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::GET_WAITING_FILE,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:getWaitingFile\""));
+        assert!(json.contains("\"fileName\":\"report.pdf\""));
+        assert!(json.contains("\"savePath\":\"/tmp/report.pdf\""));
+    }
+
+    #[test]
+    fn deserialize_get_waiting_file_result_success() {
+        let json = r#"{"success":true,"fileName":"report.pdf","savePath":"/tmp/report.pdf"}"#;
+        let data: GetWaitingFileResultEventData = serde_json::from_str(json).unwrap();
+        assert!(data.success);
+        assert_eq!(data.file_name, "report.pdf");
+        assert_eq!(data.save_path, "/tmp/report.pdf");
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn deserialize_get_waiting_file_result_failure() {
+        let json = r#"{"success":false,"fileName":"missing.txt","savePath":"/tmp/missing.txt","error":"get waiting file failed: file not found"}"#;
+        let data: GetWaitingFileResultEventData = serde_json::from_str(json).unwrap();
+        assert!(!data.success);
+        assert!(data.error.contains("file not found"));
+    }
+
+    #[test]
+    fn serialize_delete_waiting_file_command() {
+        let data = DeleteWaitingFileCommandData {
+            file_name: "report.pdf".to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::DELETE_WAITING_FILE,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:deleteWaitingFile\""));
+        assert!(json.contains("\"fileName\":\"report.pdf\""));
+    }
+
+    #[test]
+    fn deserialize_delete_waiting_file_result_success() {
+        let json = r#"{"event":"tsnet:deleteWaitingFileResult","data":{"success":true,"fileName":"report.pdf"}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::DELETE_WAITING_FILE_RESULT);
+        let data: DeleteWaitingFileResultEventData = serde_json::from_value(event.data).unwrap();
+        assert!(data.success);
+        assert_eq!(data.file_name, "report.pdf");
+        assert_eq!(data.error, "");
+    }
+
+    #[test]
+    fn deserialize_delete_waiting_file_result_failure() {
+        let json = r#"{"success":false,"fileName":"gone.txt","error":"delete waiting file failed: not found"}"#;
+        let data: DeleteWaitingFileResultEventData = serde_json::from_str(json).unwrap();
+        assert!(!data.success);
+        assert!(data.error.contains("not found"));
+    }
+
+    #[test]
+    fn deserialize_listening_event() {
+        let json = r#"{"event":"tsnet:listening","data":{"port":3000}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::LISTENING);
+        let data: ListeningEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.port, 3000);
+    }
+
+    #[test]
+    fn deserialize_unlistened_event() {
+        let json = r#"{"event":"tsnet:unlistened","data":{"port":3000}}"#;
+        let event: ShimEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, event_type::UNLISTENED);
+        let data: UnlistenedEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.port, 3000);
+    }
+
+    #[test]
+    fn event_type_phase5_constants_match_go_sidecar() {
+        assert_eq!(event_type::LISTENING, "tsnet:listening");
+        assert_eq!(event_type::UNLISTENED, "tsnet:unlistened");
+        assert_eq!(event_type::PING_RESULT, "tsnet:pingResult");
+        assert_eq!(event_type::PUSH_FILE_RESULT, "tsnet:pushFileResult");
+        assert_eq!(event_type::WAITING_FILES_RESULT, "tsnet:waitingFilesResult");
+        assert_eq!(event_type::GET_WAITING_FILE_RESULT, "tsnet:getWaitingFileResult");
+        assert_eq!(event_type::DELETE_WAITING_FILE_RESULT, "tsnet:deleteWaitingFileResult");
+    }
+
+    #[test]
+    fn command_type_phase5_constants_match_go_sidecar() {
+        assert_eq!(command_type::LISTEN, "tsnet:listen");
+        assert_eq!(command_type::UNLISTEN, "tsnet:unlisten");
+        assert_eq!(command_type::PING, "tsnet:ping");
+        assert_eq!(command_type::PUSH_FILE, "tsnet:pushFile");
+        assert_eq!(command_type::WAITING_FILES, "tsnet:waitingFiles");
+        assert_eq!(command_type::GET_WAITING_FILE, "tsnet:getWaitingFile");
+        assert_eq!(command_type::DELETE_WAITING_FILE, "tsnet:deleteWaitingFile");
+    }
+
+    #[test]
+    fn waiting_file_info_roundtrip() {
+        let info = WaitingFileInfo {
+            name: "test.txt".to_string(),
+            size: 42,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let roundtripped: WaitingFileInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.name, info.name);
+        assert_eq!(roundtripped.size, info.size);
+    }
+
+    #[test]
+    fn ping_result_all_defaults() {
+        // Minimal JSON - all optional fields default
+        let json = r#"{}"#;
+        let data: PingResultEventData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.target, "");
+        assert_eq!(data.latency_ms, 0.0);
+        assert!(!data.direct);
+        assert_eq!(data.relay, "");
+        assert_eq!(data.peer_addr, "");
+        assert_eq!(data.error, "");
     }
 }

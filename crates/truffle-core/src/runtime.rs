@@ -782,6 +782,49 @@ impl TruffleRuntime {
                     Ok(ShimLifecycleEvent::Stopped) => {
                         let _ = event_tx.send(TruffleEvent::SidecarStopped);
                     }
+                    // Phase 5: New sidecar events — forwarded via lifecycle broadcast.
+                    // These are consumed by higher-level code (e.g. CLI daemon) via
+                    // GoShim::subscribe(), not by the runtime's mesh forwarder.
+                    Ok(ShimLifecycleEvent::Listening { port }) => {
+                        tracing::info!("Dynamic listener started on port {port}");
+                    }
+                    Ok(ShimLifecycleEvent::Unlistened { port }) => {
+                        tracing::info!("Dynamic listener stopped on port {port}");
+                    }
+                    Ok(ShimLifecycleEvent::PingResult(data)) => {
+                        if data.error.is_empty() {
+                            tracing::debug!(
+                                "Ping result: {} latency={:.1}ms direct={}",
+                                data.target, data.latency_ms, data.direct
+                            );
+                        } else {
+                            tracing::debug!("Ping failed for {}: {}", data.target, data.error);
+                        }
+                    }
+                    Ok(ShimLifecycleEvent::PushFileResult(data)) => {
+                        if data.success {
+                            tracing::debug!("File push succeeded");
+                        } else {
+                            tracing::debug!("File push failed: {}", data.error);
+                        }
+                    }
+                    Ok(ShimLifecycleEvent::WaitingFilesResult(data)) => {
+                        tracing::debug!("Waiting files: {} file(s)", data.files.len());
+                    }
+                    Ok(ShimLifecycleEvent::GetWaitingFileResult(data)) => {
+                        if data.success {
+                            tracing::debug!("Got waiting file: {}", data.file_name);
+                        } else {
+                            tracing::debug!("Get waiting file failed: {}", data.error);
+                        }
+                    }
+                    Ok(ShimLifecycleEvent::DeleteWaitingFileResult(data)) => {
+                        if data.success {
+                            tracing::debug!("Deleted waiting file: {}", data.file_name);
+                        } else {
+                            tracing::debug!("Delete waiting file failed: {}", data.error);
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("Lifecycle receiver lagged by {n}");
                     }

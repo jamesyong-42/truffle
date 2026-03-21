@@ -10,7 +10,8 @@ use tokio::net::TcpStream;
 
 use super::protocol::{
     command_type, event_type, DialCommandData, DialResultEventData, ShimCommand, ShimEvent,
-    StartCommandData,
+    StartCommandData, ListenCommandData, UnlistenCommandData, PingCommandData,
+    PushFileCommandData, GetWaitingFileCommandData, DeleteWaitingFileCommandData,
 };
 
 /// Maximum exponential backoff delay for auto-restart.
@@ -79,6 +80,20 @@ pub enum ShimLifecycleEvent {
     Stopped,
     /// A dial request failed. Caller should remove from BridgeManager::pending_dials.
     DialFailed { request_id: String, error: String },
+    /// A dynamic listener started successfully.
+    Listening { port: u16 },
+    /// A dynamic listener was stopped.
+    Unlistened { port: u16 },
+    /// A ping result was received.
+    PingResult(super::protocol::PingResultEventData),
+    /// A file push completed (success or failure).
+    PushFileResult(super::protocol::PushFileResultEventData),
+    /// Waiting files list received.
+    WaitingFilesResult(super::protocol::WaitingFilesResultEventData),
+    /// A waiting file was downloaded (success or failure).
+    GetWaitingFileResult(super::protocol::GetWaitingFileResultEventData),
+    /// A waiting file was deleted (success or failure).
+    DeleteWaitingFileResult(super::protocol::DeleteWaitingFileResultEventData),
 }
 
 /// Configuration for spawning the Go shim.
@@ -535,6 +550,45 @@ impl GoShim {
                     tracing::error!("shim error [{}]: {}", data.code, data.message);
                 }
             }
+            event_type::LISTENING => {
+                if let Ok(data) = serde_json::from_value::<super::protocol::ListeningEventData>(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::Listening {
+                        port: data.port,
+                    });
+                }
+            }
+            event_type::UNLISTENED => {
+                if let Ok(data) = serde_json::from_value::<super::protocol::UnlistenedEventData>(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::Unlistened {
+                        port: data.port,
+                    });
+                }
+            }
+            event_type::PING_RESULT => {
+                if let Ok(data) = serde_json::from_value(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::PingResult(data));
+                }
+            }
+            event_type::PUSH_FILE_RESULT => {
+                if let Ok(data) = serde_json::from_value(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::PushFileResult(data));
+                }
+            }
+            event_type::WAITING_FILES_RESULT => {
+                if let Ok(data) = serde_json::from_value(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::WaitingFilesResult(data));
+                }
+            }
+            event_type::GET_WAITING_FILE_RESULT => {
+                if let Ok(data) = serde_json::from_value(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::GetWaitingFileResult(data));
+                }
+            }
+            event_type::DELETE_WAITING_FILE_RESULT => {
+                if let Ok(data) = serde_json::from_value(event.data) {
+                    let _ = lifecycle_tx.send(ShimLifecycleEvent::DeleteWaitingFileResult(data));
+                }
+            }
             other => {
                 tracing::debug!("unknown shim event: {other}");
             }
@@ -586,6 +640,101 @@ impl GoShim {
         let cmd = ShimCommand {
             command: command_type::STOP,
             data: None,
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Start listening on a port via tsnet.
+    /// If `tls` is true, uses ListenTLS for TLS-terminated connections.
+    pub async fn listen(&self, port: u16, tls: bool) -> Result<(), ShimError> {
+        let data = ListenCommandData {
+            port,
+            tls: if tls { Some(true) } else { None },
+        };
+        let cmd = ShimCommand {
+            command: command_type::LISTEN,
+            data: Some(serde_json::to_value(&data)?),
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Stop listening on a port.
+    pub async fn unlisten(&self, port: u16) -> Result<(), ShimError> {
+        let data = UnlistenCommandData { port };
+        let cmd = ShimCommand {
+            command: command_type::UNLISTEN,
+            data: Some(serde_json::to_value(&data)?),
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Ping a Tailscale peer by IP address.
+    /// `ping_type` can be "TSMP", "disco", "ICMP", or "peerapi". Default is "TSMP".
+    pub async fn ping(&self, target: &str, ping_type: Option<&str>) -> Result<(), ShimError> {
+        let data = PingCommandData {
+            target: target.to_string(),
+            ping_type: ping_type.map(|s| s.to_string()),
+        };
+        let cmd = ShimCommand {
+            command: command_type::PING,
+            data: Some(serde_json::to_value(&data)?),
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Push a file to a peer via Taildrop.
+    pub async fn push_file(
+        &self,
+        target_node_id: &str,
+        file_name: &str,
+        file_path: &str,
+    ) -> Result<(), ShimError> {
+        let data = PushFileCommandData {
+            target_node_id: target_node_id.to_string(),
+            file_name: file_name.to_string(),
+            file_path: file_path.to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::PUSH_FILE,
+            data: Some(serde_json::to_value(&data)?),
+        };
+        self.send_command(cmd).await
+    }
+
+    /// List files waiting to be received via Taildrop.
+    pub async fn waiting_files(&self) -> Result<(), ShimError> {
+        let cmd = ShimCommand {
+            command: command_type::WAITING_FILES,
+            data: None,
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Download a waiting file from Taildrop and save it to `save_path`.
+    pub async fn get_waiting_file(
+        &self,
+        file_name: &str,
+        save_path: &str,
+    ) -> Result<(), ShimError> {
+        let data = GetWaitingFileCommandData {
+            file_name: file_name.to_string(),
+            save_path: save_path.to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::GET_WAITING_FILE,
+            data: Some(serde_json::to_value(&data)?),
+        };
+        self.send_command(cmd).await
+    }
+
+    /// Delete a waiting file from the Taildrop queue.
+    pub async fn delete_waiting_file(&self, file_name: &str) -> Result<(), ShimError> {
+        let data = DeleteWaitingFileCommandData {
+            file_name: file_name.to_string(),
+        };
+        let cmd = ShimCommand {
+            command: command_type::DELETE_WAITING_FILE,
+            data: Some(serde_json::to_value(&data)?),
         };
         self.send_command(cmd).await
     }

@@ -19,12 +19,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"tailscale.com/client/tailscale"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -118,6 +120,93 @@ type peerIdentityData struct {
 	NodeID        string `json:"nodeId,omitempty"`
 }
 
+// listenData is the payload for tsnet:listen commands.
+type listenData struct {
+	Port uint16 `json:"port"`
+	TLS  bool   `json:"tls,omitempty"`
+}
+
+// listeningData is the payload for tsnet:listening events.
+type listeningData struct {
+	Port uint16 `json:"port"`
+}
+
+// unlistenData is the payload for tsnet:unlisten commands.
+type unlistenData struct {
+	Port uint16 `json:"port"`
+}
+
+// unlistenedData is the payload for tsnet:unlistened events.
+type unlistenedData struct {
+	Port uint16 `json:"port"`
+}
+
+// pingData is the payload for tsnet:ping commands.
+type pingData struct {
+	Target   string `json:"target"`
+	PingType string `json:"pingType,omitempty"` // "TSMP", "Disco", "ICMP" (default: "TSMP")
+}
+
+// pingResultData is the payload for tsnet:pingResult events.
+type pingResultData struct {
+	Target    string  `json:"target"`
+	LatencyMs float64 `json:"latencyMs"`
+	Direct    bool    `json:"direct"`
+	Relay     string  `json:"relay,omitempty"`
+	PeerAddr  string  `json:"peerAddr,omitempty"`
+	Error     string  `json:"error,omitempty"`
+}
+
+// pushFileData is the payload for tsnet:pushFile commands.
+type pushFileData struct {
+	TargetNodeID string `json:"targetNodeId"`
+	FileName     string `json:"fileName"`
+	FilePath     string `json:"filePath"`
+}
+
+// pushFileResultData is the payload for tsnet:pushFileResult events.
+type pushFileResultData struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// waitingFileInfo represents a single waiting file in Taildrop.
+type waitingFileInfo struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+// waitingFilesResultData is the payload for tsnet:waitingFilesResult events.
+type waitingFilesResultData struct {
+	Files []waitingFileInfo `json:"files"`
+}
+
+// getWaitingFileData is the payload for tsnet:getWaitingFile commands.
+type getWaitingFileData struct {
+	FileName string `json:"fileName"`
+	SavePath string `json:"savePath"`
+}
+
+// getWaitingFileResultData is the payload for tsnet:getWaitingFileResult events.
+type getWaitingFileResultData struct {
+	Success  bool   `json:"success"`
+	FileName string `json:"fileName"`
+	SavePath string `json:"savePath"`
+	Error    string `json:"error,omitempty"`
+}
+
+// deleteWaitingFileData is the payload for tsnet:deleteWaitingFile commands.
+type deleteWaitingFileData struct {
+	FileName string `json:"fileName"`
+}
+
+// deleteWaitingFileResultData is the payload for tsnet:deleteWaitingFileResult events.
+type deleteWaitingFileResultData struct {
+	Success  bool   `json:"success"`
+	FileName string `json:"fileName,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 // stateChangeData is the payload for tsnet:stateChange events.
 type stateChangeData struct {
 	State string `json:"state"`
@@ -146,6 +235,10 @@ type shim struct {
 	listenerMu sync.Mutex   // protects listeners
 	listeners  []net.Listener // active listeners (TLS :443, TCP :9417)
 
+	// dynamicListeners tracks listeners created via tsnet:listen, keyed by port.
+	dynamicListenerMu sync.Mutex
+	dynamicListeners  map[uint16]net.Listener
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -155,9 +248,10 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &shim{
-		writer: json.NewEncoder(os.Stdout),
-		ctx:    ctx,
-		cancel: cancel,
+		writer:           json.NewEncoder(os.Stdout),
+		dynamicListeners: make(map[uint16]net.Listener),
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -184,6 +278,20 @@ func main() {
 			s.handleGetPeers()
 		case "bridge:dial":
 			s.handleDial(cmd.Data)
+		case "tsnet:listen":
+			s.handleListen(cmd.Data)
+		case "tsnet:unlisten":
+			s.handleUnlisten(cmd.Data)
+		case "tsnet:ping":
+			s.handlePing(cmd.Data)
+		case "tsnet:pushFile":
+			s.handlePushFile(cmd.Data)
+		case "tsnet:waitingFiles":
+			s.handleWaitingFiles()
+		case "tsnet:getWaitingFile":
+			s.handleGetWaitingFile(cmd.Data)
+		case "tsnet:deleteWaitingFile":
+			s.handleDeleteWaitingFile(cmd.Data)
 		default:
 			s.sendError("UNKNOWN_CMD", fmt.Sprintf("unknown command: %s", cmd.Command))
 		}
@@ -371,6 +479,16 @@ func (s *shim) handleStop() {
 	s.listeners = nil
 	s.listenerMu.Unlock()
 
+	// Close dynamic listeners
+	s.dynamicListenerMu.Lock()
+	for port, ln := range s.dynamicListeners {
+		if err := ln.Close(); err != nil {
+			log.Printf("dynamic listener :%d close error: %v", port, err)
+		}
+	}
+	s.dynamicListeners = make(map[uint16]net.Listener)
+	s.dynamicListenerMu.Unlock()
+
 	if s.server != nil {
 		if err := s.server.Close(); err != nil {
 			log.Printf("server close error: %v", err)
@@ -476,6 +594,392 @@ func (s *shim) handleDial(data json.RawMessage) {
 
 		// Bridge to Rust
 		s.bridgeToRust(conn, d.Port, dirOutgoing, d.RequestID, addr, d.Target)
+	}()
+}
+
+func (s *shim) handleListen(data json.RawMessage) {
+	var d listenData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("LISTEN_ERROR", fmt.Sprintf("invalid listen data: %v", err))
+		return
+	}
+
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	// Check if already listening on this port
+	s.dynamicListenerMu.Lock()
+	if _, exists := s.dynamicListeners[d.Port]; exists {
+		s.dynamicListenerMu.Unlock()
+		s.sendError("LISTEN_ERROR", fmt.Sprintf("already listening on port %d", d.Port))
+		return
+	}
+	s.dynamicListenerMu.Unlock()
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendError("LISTEN_ERROR", fmt.Sprintf("failed to get local client: %v", err))
+			return
+		}
+
+		addr := fmt.Sprintf(":%d", d.Port)
+		var ln net.Listener
+
+		if d.TLS {
+			ln, err = s.server.ListenTLS("tcp", addr)
+		} else {
+			ln, err = s.server.Listen("tcp", addr)
+		}
+		if err != nil {
+			s.sendError("LISTEN_ERROR", fmt.Sprintf("Listen :%d: %v", d.Port, err))
+			return
+		}
+
+		s.dynamicListenerMu.Lock()
+		s.dynamicListeners[d.Port] = ln
+		s.dynamicListenerMu.Unlock()
+
+		// Also track in the main listener list for cleanup on stop
+		s.trackListener(ln)
+
+		s.sendEvent("tsnet:listening", listeningData{Port: d.Port})
+
+		proto := "TCP"
+		if d.TLS {
+			proto = "TLS"
+		}
+		log.Printf("listening %s on :%d (dynamic)", proto, d.Port)
+
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				if s.ctx.Err() != nil {
+					return
+				}
+				// Check if this was a deliberate close (unlisten)
+				s.dynamicListenerMu.Lock()
+				_, stillActive := s.dynamicListeners[d.Port]
+				s.dynamicListenerMu.Unlock()
+				if !stillActive {
+					return
+				}
+				log.Printf("accept :%d error: %v", d.Port, err)
+				continue
+			}
+			peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
+			go s.bridgeToRust(conn, d.Port, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
+		}
+	}()
+}
+
+func (s *shim) handleUnlisten(data json.RawMessage) {
+	var d unlistenData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("UNLISTEN_ERROR", fmt.Sprintf("invalid unlisten data: %v", err))
+		return
+	}
+
+	s.dynamicListenerMu.Lock()
+	ln, exists := s.dynamicListeners[d.Port]
+	if !exists {
+		s.dynamicListenerMu.Unlock()
+		s.sendError("UNLISTEN_ERROR", fmt.Sprintf("no listener on port %d", d.Port))
+		return
+	}
+	delete(s.dynamicListeners, d.Port)
+	s.dynamicListenerMu.Unlock()
+
+	if err := ln.Close(); err != nil {
+		log.Printf("close listener :%d error: %v", d.Port, err)
+	}
+
+	log.Printf("stopped listening on :%d (dynamic)", d.Port)
+	s.sendEvent("tsnet:unlistened", unlistenedData{Port: d.Port})
+}
+
+func (s *shim) handlePing(data json.RawMessage) {
+	var d pingData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("PING_ERROR", fmt.Sprintf("invalid ping data: %v", err))
+		return
+	}
+
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendEvent("tsnet:pingResult", pingResultData{
+				Target: d.Target,
+				Error:  fmt.Sprintf("failed to get local client: %v", err),
+			})
+			return
+		}
+
+		addr, err := netip.ParseAddr(d.Target)
+		if err != nil {
+			s.sendEvent("tsnet:pingResult", pingResultData{
+				Target: d.Target,
+				Error:  fmt.Sprintf("failed to parse target IP: %v", err),
+			})
+			return
+		}
+
+		// Map user-facing ping type to tailcfg.PingType.
+		// Valid values: "TSMP" (default), "disco", "ICMP", "peerapi".
+		var pt tailcfg.PingType
+		switch strings.ToUpper(d.PingType) {
+		case "DISCO":
+			pt = tailcfg.PingDisco
+		case "ICMP":
+			pt = tailcfg.PingICMP
+		case "PEERAPI":
+			pt = tailcfg.PingPeerAPI
+		case "TSMP", "":
+			pt = tailcfg.PingTSMP
+		default:
+			s.sendEvent("tsnet:pingResult", pingResultData{
+				Target: d.Target,
+				Error:  fmt.Sprintf("unknown ping type: %s (valid: TSMP, disco, ICMP, peerapi)", d.PingType),
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+		defer cancel()
+
+		result, err := lc.Ping(ctx, addr, pt)
+		if err != nil {
+			s.sendEvent("tsnet:pingResult", pingResultData{
+				Target: d.Target,
+				Error:  fmt.Sprintf("ping failed: %v", err),
+			})
+			return
+		}
+
+		// If the PingResult contains an error string, report it.
+		if result.Err != "" {
+			s.sendEvent("tsnet:pingResult", pingResultData{
+				Target: d.Target,
+				Error:  result.Err,
+			})
+			return
+		}
+
+		s.sendEvent("tsnet:pingResult", pingResultData{
+			Target:    d.Target,
+			LatencyMs: result.LatencySeconds * 1000.0,
+			Direct:    result.Endpoint != "" && result.DERPRegionID == 0,
+			Relay:     result.DERPRegionCode,
+			PeerAddr:  result.Endpoint,
+		})
+	}()
+}
+
+func (s *shim) handlePushFile(data json.RawMessage) {
+	var d pushFileData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("PUSH_FILE_ERROR", fmt.Sprintf("invalid pushFile data: %v", err))
+		return
+	}
+
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendEvent("tsnet:pushFileResult", pushFileResultData{
+				Success: false,
+				Error:   fmt.Sprintf("failed to get local client: %v", err),
+			})
+			return
+		}
+
+		f, err := os.Open(d.FilePath)
+		if err != nil {
+			s.sendEvent("tsnet:pushFileResult", pushFileResultData{
+				Success: false,
+				Error:   fmt.Sprintf("failed to open file: %v", err),
+			})
+			return
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil {
+			s.sendEvent("tsnet:pushFileResult", pushFileResultData{
+				Success: false,
+				Error:   fmt.Sprintf("failed to stat file: %v", err),
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+		defer cancel()
+
+		err = lc.PushFile(ctx, tailcfg.StableNodeID(d.TargetNodeID), fi.Size(), d.FileName, f)
+		if err != nil {
+			s.sendEvent("tsnet:pushFileResult", pushFileResultData{
+				Success: false,
+				Error:   fmt.Sprintf("push file failed: %v", err),
+			})
+			return
+		}
+
+		s.sendEvent("tsnet:pushFileResult", pushFileResultData{
+			Success: true,
+		})
+	}()
+}
+
+func (s *shim) handleWaitingFiles() {
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendError("WAITING_FILES_ERROR", fmt.Sprintf("failed to get local client: %v", err))
+			return
+		}
+
+		files, err := lc.WaitingFiles(s.ctx)
+		if err != nil {
+			s.sendError("WAITING_FILES_ERROR", fmt.Sprintf("waiting files failed: %v", err))
+			return
+		}
+
+		var infos []waitingFileInfo
+		for _, f := range files {
+			infos = append(infos, waitingFileInfo{
+				Name: f.Name,
+				Size: f.Size,
+			})
+		}
+		if infos == nil {
+			infos = []waitingFileInfo{} // ensure non-null JSON array
+		}
+
+		s.sendEvent("tsnet:waitingFilesResult", waitingFilesResultData{
+			Files: infos,
+		})
+	}()
+}
+
+func (s *shim) handleGetWaitingFile(data json.RawMessage) {
+	var d getWaitingFileData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("GET_WAITING_FILE_ERROR", fmt.Sprintf("invalid getWaitingFile data: %v", err))
+		return
+	}
+
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				SavePath: d.SavePath,
+				Error:    fmt.Sprintf("failed to get local client: %v", err),
+			})
+			return
+		}
+
+		rc, _, err := lc.GetWaitingFile(s.ctx, d.FileName)
+		if err != nil {
+			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				SavePath: d.SavePath,
+				Error:    fmt.Sprintf("get waiting file failed: %v", err),
+			})
+			return
+		}
+		defer rc.Close()
+
+		outFile, err := os.Create(d.SavePath)
+		if err != nil {
+			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				SavePath: d.SavePath,
+				Error:    fmt.Sprintf("failed to create save file: %v", err),
+			})
+			return
+		}
+		defer outFile.Close()
+
+		if _, err := io.Copy(outFile, rc); err != nil {
+			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				SavePath: d.SavePath,
+				Error:    fmt.Sprintf("failed to write file: %v", err),
+			})
+			return
+		}
+
+		s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
+			Success:  true,
+			FileName: d.FileName,
+			SavePath: d.SavePath,
+		})
+	}()
+}
+
+func (s *shim) handleDeleteWaitingFile(data json.RawMessage) {
+	var d deleteWaitingFileData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("DELETE_WAITING_FILE_ERROR", fmt.Sprintf("invalid deleteWaitingFile data: %v", err))
+		return
+	}
+
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendEvent("tsnet:deleteWaitingFileResult", deleteWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				Error:    fmt.Sprintf("failed to get local client: %v", err),
+			})
+			return
+		}
+
+		err = lc.DeleteWaitingFile(s.ctx, d.FileName)
+		if err != nil {
+			s.sendEvent("tsnet:deleteWaitingFileResult", deleteWaitingFileResultData{
+				Success:  false,
+				FileName: d.FileName,
+				Error:    fmt.Sprintf("delete waiting file failed: %v", err),
+			})
+			return
+		}
+
+		s.sendEvent("tsnet:deleteWaitingFileResult", deleteWaitingFileResultData{
+			Success:  true,
+			FileName: d.FileName,
+		})
 	}()
 }
 
