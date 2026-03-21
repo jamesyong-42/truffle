@@ -246,6 +246,16 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         }
     }
 
+    // On Windows, use CREATE_NO_WINDOW to prevent a console window from
+    // flashing and to avoid the child being terminated when the parent
+    // console is closed.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     cmd.spawn()
         .map_err(|e| format!("Failed to start background daemon: {e}"))?;
 

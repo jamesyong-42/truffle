@@ -1,20 +1,23 @@
-//! Bidirectional pipe between stdin/stdout and a Unix socket.
+//! Bidirectional pipe between stdin/stdout and an IPC connection.
 //!
 //! Used by `tcp` and `ws` commands after the JSON-RPC handshake completes.
-//! Once the daemon has established the upstream connection, the Unix socket
+//! Once the daemon has established the upstream connection, the IPC transport
 //! becomes a raw byte pipe and this module copies data in both directions.
 
 use tokio::io::{self, AsyncRead, AsyncWrite};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
-/// Bidirectional pipe between stdin/stdout and a Unix socket.
+/// Bidirectional pipe between stdin/stdout and an IPC connection.
 ///
-/// Copies stdin -> socket and socket -> stdout concurrently.
+/// Copies stdin -> remote_write and remote_read -> stdout concurrently.
 /// Returns when either direction reaches EOF or encounters an error.
-pub async fn pipe_stdio(
-    read_half: OwnedReadHalf,
-    write_half: OwnedWriteHalf,
-) -> io::Result<()> {
+pub async fn pipe_stdio<RR, RW>(
+    read_half: RR,
+    write_half: RW,
+) -> io::Result<()>
+where
+    RR: AsyncRead + Unpin,
+    RW: AsyncWrite + Unpin,
+{
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 

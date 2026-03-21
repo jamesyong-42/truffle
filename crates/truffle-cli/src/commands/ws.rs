@@ -57,10 +57,9 @@ pub async fn run(
 
     // Get a connection for the streaming session
     let stream = client.connect().await.map_err(|e| e.to_string())?;
-    let (read_half, mut write_half) = stream.into_split();
+    let (mut read_half, mut write_half) = stream.into_split();
 
     // Send the ws_connect request
-    use tokio::io::AsyncWriteExt;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -74,21 +73,18 @@ pub async fn run(
             "json": json,
         }
     });
-    let mut req_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-    req_json.push('\n');
+    let req_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
     write_half
-        .write_all(req_json.as_bytes())
+        .write_line(&req_json)
         .await
         .map_err(|e| format!("Failed to send request: {e}"))?;
 
     // Read the upgrade response
-    use tokio::io::AsyncBufReadExt;
-    let mut buf_reader = tokio::io::BufReader::new(read_half);
-    let mut response_line = String::new();
-    buf_reader
-        .read_line(&mut response_line)
+    let response_line = read_half
+        .next_line()
         .await
-        .map_err(|e| format!("Failed to read response: {e}"))?;
+        .map_err(|e| format!("Failed to read response: {e}"))?
+        .ok_or_else(|| "Daemon closed connection without responding".to_string())?;
 
     let response: serde_json::Value = serde_json::from_str(response_line.trim())
         .map_err(|e| format!("Invalid response: {e}"))?;
@@ -104,7 +100,6 @@ pub async fn run(
     eprintln!("Type messages, one per line. Press Ctrl+C to disconnect.");
 
     // WebSocket REPL: lines from stdin become frames, received frames print to stdout
-    let read_half = buf_reader.into_inner();
     ws_repl(read_half, write_half, json).await?;
 
     eprintln!("\nDisconnected.");
@@ -113,24 +108,21 @@ pub async fn run(
 
 /// WebSocket REPL loop.
 ///
-/// Reads lines from stdin and sends them as text frames (via the Unix socket).
-/// Reads lines from the socket (received frames) and prints them to stdout.
+/// Reads lines from stdin and sends them as text frames (via the IPC connection).
+/// Reads lines from the connection (received frames) and prints them to stdout.
 ///
 /// In the streaming protocol, each line from stdin becomes a WS text frame,
 /// and each received WS frame is written as a line to the CLI.
 async fn ws_repl(
-    read_half: tokio::net::unix::OwnedReadHalf,
-    mut write_half: tokio::net::unix::OwnedWriteHalf,
+    mut read_half: crate::daemon::ipc::IpcReadHalf,
+    mut write_half: crate::daemon::ipc::IpcWriteHalf,
     pretty_json: bool,
 ) -> Result<(), String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncBufReadExt;
 
     let stdin = tokio::io::stdin();
     let stdin_reader = tokio::io::BufReader::new(stdin);
     let mut stdin_lines = stdin_reader.lines();
-
-    let socket_reader = tokio::io::BufReader::new(read_half);
-    let mut socket_lines = socket_reader.lines();
 
     loop {
         tokio::select! {
@@ -142,9 +134,7 @@ async fn ws_repl(
                             continue;
                         }
                         eprintln!("> {text}");
-                        let mut msg = text;
-                        msg.push('\n');
-                        if write_half.write_all(msg.as_bytes()).await.is_err() {
+                        if write_half.write_line(&text).await.is_err() {
                             break;
                         }
                     }
@@ -152,8 +142,8 @@ async fn ws_repl(
                     Err(_) => break,
                 }
             }
-            // Read a line from socket -> print to stdout
-            line = socket_lines.next_line() => {
+            // Read a line from the IPC connection -> print to stdout
+            line = read_half.next_line() => {
                 match line {
                     Ok(Some(text)) => {
                         if pretty_json {

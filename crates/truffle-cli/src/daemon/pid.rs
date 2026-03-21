@@ -34,10 +34,27 @@ pub fn read_pid(path: &Path) -> io::Result<Option<u32>> {
 
 /// Check if a process with the given PID is currently running.
 ///
-/// Uses `kill(pid, 0)` which checks existence without sending a signal.
+/// - Unix: Uses `kill(pid, 0)` which checks existence without sending a signal.
+/// - Windows: Uses `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`.
+#[cfg(unix)]
 pub fn is_process_running(pid: u32) -> bool {
     // Safety: signal 0 does not kill the process, just checks if it exists.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(windows)]
+pub fn is_process_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    }
 }
 
 /// Remove the PID file at the given path.

@@ -84,10 +84,9 @@ pub async fn run(config: &TruffleConfig, target: &str, check: bool) -> Result<()
 
     // Get a fresh connection for the streaming session
     let stream = client.connect().await.map_err(|e| e.to_string())?;
-    let (read_half, mut write_half) = stream.into_split();
+    let (mut read_half, mut write_half) = stream.into_split();
 
     // Send the streaming request on this connection
-    use tokio::io::AsyncWriteExt;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -99,21 +98,18 @@ pub async fn run(config: &TruffleConfig, target: &str, check: bool) -> Result<()
             "stream": true,
         }
     });
-    let mut req_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-    req_json.push('\n');
+    let req_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
     write_half
-        .write_all(req_json.as_bytes())
+        .write_line(&req_json)
         .await
         .map_err(|e| format!("Failed to send stream request: {e}"))?;
 
     // Read the upgrade response
-    use tokio::io::AsyncBufReadExt;
-    let mut buf_reader = tokio::io::BufReader::new(read_half);
-    let mut response_line = String::new();
-    buf_reader
-        .read_line(&mut response_line)
+    let response_line = read_half
+        .next_line()
         .await
-        .map_err(|e| format!("Failed to read stream response: {e}"))?;
+        .map_err(|e| format!("Failed to read stream response: {e}"))?
+        .ok_or_else(|| "Daemon closed connection without responding".to_string())?;
 
     let response: serde_json::Value = serde_json::from_str(response_line.trim())
         .map_err(|e| format!("Invalid stream response: {e}"))?;
@@ -125,9 +121,11 @@ pub async fn run(config: &TruffleConfig, target: &str, check: bool) -> Result<()
         ));
     }
 
-    // Now pipe stdin/stdout through the socket
-    let read_half = buf_reader.into_inner();
-    crate::stream::pipe_stdio(read_half, write_half)
+    // Now pipe stdin/stdout through the IPC connection.
+    // Extract the raw inner types for byte-level piping.
+    let raw_reader = read_half.into_inner();
+    let raw_writer = write_half.into_inner();
+    crate::stream::pipe_stdio(raw_reader, raw_writer)
         .await
         .map_err(|e| format!("Connection error: {e}"))?;
 

@@ -1,23 +1,24 @@
-//! Client connector: connect to the daemon's Unix socket and send requests.
+//! Client connector: connect to the daemon's IPC endpoint and send requests.
 //!
 //! CLI commands use `DaemonClient` to communicate with the running daemon.
 //! If no daemon is running and `auto_up` is enabled, the client will
 //! automatically start one.
+//!
+//! Uses Unix sockets on macOS/Linux and named pipes on Windows.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tracing::debug;
 
+use super::ipc;
 use super::pid;
 use super::protocol::{DaemonRequest, DaemonResponse};
 use crate::config::TruffleConfig;
 
 /// Client for communicating with the truffle daemon.
 pub struct DaemonClient {
-    /// Path to the daemon's Unix socket.
+    /// Path to the daemon's IPC endpoint (Unix socket or named pipe).
     socket_path: PathBuf,
     /// Path to the daemon's PID file.
     pid_path: PathBuf,
@@ -30,7 +31,7 @@ pub struct DaemonClient {
 pub enum ClientError {
     /// The daemon is not running.
     DaemonNotRunning,
-    /// Failed to connect to the Unix socket.
+    /// Failed to connect to the IPC endpoint.
     ConnectionFailed(String),
     /// Failed to send or receive data.
     IoError(String),
@@ -90,15 +91,15 @@ impl DaemonClient {
         }
     }
 
-    /// Connect to the daemon's Unix socket.
+    /// Connect to the daemon's IPC endpoint.
     ///
-    /// Returns a `UnixStream` for sending/receiving data.
-    pub async fn connect(&self) -> Result<UnixStream, ClientError> {
+    /// Returns an `IpcStream` for sending/receiving data.
+    pub async fn connect(&self) -> Result<ipc::IpcStream, ClientError> {
         if !self.is_daemon_running() {
             return Err(ClientError::DaemonNotRunning);
         }
 
-        UnixStream::connect(&self.socket_path)
+        ipc::IpcStream::connect(&self.socket_path)
             .await
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))
     }
@@ -113,25 +114,23 @@ impl DaemonClient {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
         let stream = self.connect().await?;
-        let (reader, mut writer) = stream.into_split();
+        let (mut reader, mut writer) = stream.into_split();
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = DaemonRequest::new(id, method, params);
 
-        let mut request_json =
+        let request_json =
             serde_json::to_string(&request).map_err(|e| ClientError::IoError(e.to_string()))?;
-        request_json.push('\n');
 
         debug!(method = method, id = id, "Sending request to daemon");
 
         writer
-            .write_all(request_json.as_bytes())
+            .write_line(&request_json)
             .await
             .map_err(|e| ClientError::IoError(e.to_string()))?;
 
         // Read response
-        let mut lines = BufReader::new(reader).lines();
-        let response_line = lines
+        let response_line = reader
             .next_line()
             .await
             .map_err(|e| ClientError::IoError(e.to_string()))?
@@ -181,16 +180,18 @@ impl DaemonClient {
         // Detach the child process so it continues running
         drop(child);
 
-        // Wait for daemon to be ready (poll the socket)
+        // Wait for daemon to be ready (poll the IPC endpoint).
+        // On Windows, named pipe paths don't respond to Path::exists(),
+        // so we skip the exists() check and try connecting directly.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
         loop {
             if tokio::time::Instant::now() > deadline {
                 return Err(ClientError::IoError("Timed out waiting for daemon to start".into()));
             }
 
-            if self.socket_path.exists() && self.is_daemon_running() {
-                // Try to connect
-                if UnixStream::connect(&self.socket_path).await.is_ok() {
+            if self.is_daemon_running() {
+                // Try to connect to the IPC endpoint
+                if ipc::IpcStream::connect(&self.socket_path).await.is_ok() {
                     return Ok(());
                 }
             }

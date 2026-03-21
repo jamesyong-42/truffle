@@ -182,9 +182,19 @@ impl TruffleConfig {
         config_dir().join("config.toml")
     }
 
-    /// The Unix socket path: `~/.config/truffle/truffle.sock`.
+    /// The IPC endpoint path for this platform.
+    ///
+    /// - Unix: `<config_dir>/truffle/truffle.sock` (Unix domain socket)
+    /// - Windows: `\\.\pipe\truffle-daemon` (named pipe)
     pub fn socket_path() -> PathBuf {
-        config_dir().join("truffle.sock")
+        #[cfg(unix)]
+        {
+            config_dir().join("truffle.sock")
+        }
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"\\.\pipe\truffle-daemon")
+        }
     }
 
     /// The PID file path: `~/.config/truffle/truffle.pid`.
@@ -318,7 +328,16 @@ api = "backend:3000"
         assert!(default.to_string_lossy().ends_with("config.toml"));
 
         let socket = TruffleConfig::socket_path();
-        assert!(socket.to_string_lossy().ends_with("truffle.sock"));
+        #[cfg(unix)]
+        assert!(
+            socket.to_string_lossy().ends_with("truffle.sock"),
+            "Unix socket path should end with truffle.sock"
+        );
+        #[cfg(windows)]
+        assert!(
+            socket.to_string_lossy().contains(r"\\.\pipe\"),
+            "Windows socket path should be a named pipe"
+        );
 
         let pid = TruffleConfig::pid_path();
         assert!(pid.to_string_lossy().ends_with("truffle.pid"));

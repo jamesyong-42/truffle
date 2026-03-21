@@ -76,9 +76,7 @@ pub async fn run(force: bool) -> Result<(), String> {
                 // Force kill via PID file
                 let pid_path = crate::config::TruffleConfig::pid_path();
                 if let Ok(Some(pid)) = crate::daemon::pid::read_pid(&pid_path) {
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                    }
+                    force_kill_process(pid);
                     crate::daemon::pid::remove_pid(&pid_path)
                         .map_err(|e| format!("Failed to remove PID file: {e}"))?;
                     println!();
@@ -97,5 +95,29 @@ pub async fn run(force: bool) -> Result<(), String> {
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Force-kill a process by PID.
+///
+/// - Unix: sends SIGKILL.
+/// - Windows: uses `TerminateProcess`.
+#[cfg(unix)]
+fn force_kill_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn force_kill_process(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle != 0 {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
     }
 }

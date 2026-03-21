@@ -1,19 +1,19 @@
-//! Daemon server: Unix socket listener with JSON-RPC dispatch.
+//! Daemon server: IPC listener with JSON-RPC dispatch.
 //!
-//! The server owns a `TruffleRuntime`, listens on a Unix socket, and
+//! The server owns a `TruffleRuntime`, listens on a platform-appropriate IPC
+//! transport (Unix socket on macOS/Linux, named pipe on Windows), and
 //! dispatches incoming JSON-RPC requests to the handler module.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tokio::sync::Notify;
 use tracing::{error, info};
 use truffle_core::runtime::TruffleRuntime;
 
 use super::handler;
+use super::ipc;
 use super::pid;
 use super::protocol::DaemonRequest;
 use crate::config::TruffleConfig;
@@ -110,7 +110,9 @@ impl DaemonServer {
         // Write PID file
         pid::write_pid(&pid_path).map_err(|e| format!("Failed to write PID file: {e}"))?;
 
-        // Remove stale socket file if it exists
+        // Remove stale socket file if it exists (Unix only; Windows named
+        // pipes are kernel objects and don't leave stale files).
+        #[cfg(unix)]
         if socket_path.exists() {
             std::fs::remove_file(&socket_path)
                 .map_err(|e| format!("Failed to remove stale socket: {e}"))?;
@@ -137,8 +139,8 @@ impl DaemonServer {
     /// requests. Runs until a shutdown signal is received (via `shutdown` RPC
     /// or SIGTERM/SIGINT).
     pub async fn run(&self) -> Result<(), String> {
-        let listener = UnixListener::bind(&self.socket_path)
-            .map_err(|e| format!("Failed to bind Unix socket at {}: {e}", self.socket_path.display()))?;
+        let listener = ipc::IpcListener::bind(&self.socket_path)
+            .map_err(|e| format!("Failed to bind IPC at {}: {e}", self.socket_path.display()))?;
 
         info!(
             socket = %self.socket_path.display(),
@@ -178,7 +180,7 @@ impl DaemonServer {
                 }
                 accept_result = listener.accept() => {
                     match accept_result {
-                        Ok((stream, _addr)) => {
+                        Ok(stream) => {
                             let runtime = self.runtime.clone();
                             let started_at = self.started_at;
                             let shutdown_clone = self.shutdown.clone();
@@ -202,15 +204,14 @@ impl DaemonServer {
     ///
     /// Reads newline-delimited JSON-RPC requests and sends back responses.
     async fn handle_connection(
-        stream: tokio::net::UnixStream,
+        stream: ipc::IpcStream,
         runtime: &Arc<TruffleRuntime>,
         started_at: Instant,
         shutdown_signal: &Arc<Notify>,
     ) {
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let (mut reader, mut writer) = stream.into_split();
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        while let Ok(Some(line)) = reader.next_line().await {
             if line.trim().is_empty() {
                 continue;
             }
@@ -223,9 +224,8 @@ impl DaemonServer {
                         super::protocol::error_code::PARSE_ERROR,
                         format!("Invalid JSON: {e}"),
                     );
-                    let mut resp_json = serde_json::to_string(&err_resp).unwrap_or_default();
-                    resp_json.push('\n');
-                    let _ = writer.write_all(resp_json.as_bytes()).await;
+                    let resp_json = serde_json::to_string(&err_resp).unwrap_or_default();
+                    let _ = writer.write_line(&resp_json).await;
                     continue;
                 }
             };
@@ -233,16 +233,15 @@ impl DaemonServer {
             let response =
                 handler::dispatch(&request, runtime, started_at, shutdown_signal).await;
 
-            let mut resp_json = match serde_json::to_string(&response) {
+            let resp_json = match serde_json::to_string(&response) {
                 Ok(j) => j,
                 Err(e) => {
                     error!("Failed to serialize response: {e}");
                     continue;
                 }
             };
-            resp_json.push('\n');
 
-            if writer.write_all(resp_json.as_bytes()).await.is_err() {
+            if writer.write_line(&resp_json).await.is_err() {
                 // Client disconnected
                 break;
             }
@@ -266,7 +265,8 @@ impl DaemonServer {
         info!("Stopping runtime...");
         self.runtime.stop().await;
 
-        // Remove socket file
+        // Remove socket file (Unix only; Windows named pipes are kernel objects).
+        #[cfg(unix)]
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }

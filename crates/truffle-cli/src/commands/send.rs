@@ -99,10 +99,9 @@ pub async fn run(
 
         // Connect a streaming session to receive the reply
         let stream = client.connect().await.map_err(|e| e.to_string())?;
-        let (read_half, mut write_half) = stream.into_split();
+        let (mut read_half, mut write_half) = stream.into_split();
 
         // Subscribe to incoming chat messages
-        use tokio::io::AsyncWriteExt;
         let subscribe = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -112,23 +111,17 @@ pub async fn run(
                 "wait_for_reply": true,
             }
         });
-        let mut sub_json = serde_json::to_string(&subscribe).map_err(|e| e.to_string())?;
-        sub_json.push('\n');
+        let sub_json = serde_json::to_string(&subscribe).map_err(|e| e.to_string())?;
         write_half
-            .write_all(sub_json.as_bytes())
+            .write_line(&sub_json)
             .await
             .map_err(|e| format!("Failed to subscribe: {e}"))?;
 
-        // Read the handshake response
-        use tokio::io::AsyncBufReadExt;
-        let buf_reader = tokio::io::BufReader::new(read_half);
-        let mut lines = buf_reader.lines();
-
         // Skip the handshake response
-        let _ = lines.next_line().await;
+        let _ = read_half.next_line().await;
 
         // Wait for the first incoming message (the reply)
-        match tokio::time::timeout(timeout, lines.next_line()).await {
+        match tokio::time::timeout(timeout, read_half.next_line()).await {
             Ok(Ok(Some(line))) => {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
                     if event["type"] == "message" {

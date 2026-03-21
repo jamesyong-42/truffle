@@ -32,7 +32,19 @@ pub fn init_color(mode: &str) {
 
 /// Check if stdout is a TTY.
 fn is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    #[cfg(unix)]
+    {
+        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE};
+        unsafe {
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut mode = 0;
+            GetConsoleMode(handle, &mut mode) != 0
+        }
+    }
 }
 
 /// Returns `true` if color output is currently enabled.
