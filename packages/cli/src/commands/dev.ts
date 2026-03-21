@@ -6,9 +6,8 @@ import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
 import type { NapiBaseDevice as BaseDevice, NapiMeshEvent } from '@vibecook/truffle';
 
 function formatDevice(device: BaseDevice): string {
-  const role = device.role === 'primary' ? ' [primary]' : '';
   const status = device.status === 'online' ? 'online' : 'offline';
-  return `  ${device.name} (${device.id}) - ${status}${role}`;
+  return `  ${device.name} (${device.id}) - ${status}`;
 }
 
 export const devCommand = defineCommand({
@@ -75,7 +74,7 @@ export const devCommand = defineCommand({
           consola.info('Waiting for peers...');
           break;
 
-        case 'devicesChanged':
+        case 'peersChanged':
           if (Array.isArray(event.payload)) {
             const devices = event.payload as BaseDevice[];
             consola.info(`Devices (${devices.length}):`);
@@ -85,7 +84,7 @@ export const devCommand = defineCommand({
           }
           break;
 
-        case 'deviceDiscovered':
+        case 'peerDiscovered':
           if (event.payload) {
             const device = event.payload as BaseDevice;
             consola.success(`Discovered: ${device.name} (${device.id})`);
@@ -94,16 +93,16 @@ export const devCommand = defineCommand({
           }
           break;
 
-        case 'deviceOffline':
+        case 'peerOffline':
           consola.warn(`Offline: ${event.deviceId ?? 'unknown'}`);
           break;
 
-        case 'roleChanged':
-          node.role().then((r) => {
-            node.isPrimary().then((p) => {
-              consola.info(`Role changed: ${r}${p ? ' (primary)' : ''}`);
-            });
-          });
+        case 'peerConnected':
+          consola.info(`Peer connected: ${event.payload?.peer_dns ?? event.deviceId ?? 'unknown'}`);
+          break;
+
+        case 'peerDisconnected':
+          consola.warn(`Peer disconnected: ${event.deviceId ?? 'unknown'}`);
           break;
 
         case 'authRequired':
