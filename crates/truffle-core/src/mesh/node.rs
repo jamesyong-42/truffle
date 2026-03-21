@@ -6,16 +6,14 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::protocol::envelope::{MeshEnvelope, MESH_NAMESPACE};
 use crate::protocol::message_types::{
-    DeviceAnnouncePayload, DeviceGoodbyePayload, DeviceListPayload,
+    DeviceAnnouncePayload, DeviceGoodbyePayload,
     MeshMessage,
 };
 use crate::transport::connection::{ConnectionManager, ConnectionStatus, TransportEvent};
-use crate::types::{AuthStatus, BaseDevice, DeviceRole, TailnetPeer};
+use crate::types::{AuthStatus, BaseDevice, TailnetPeer};
 
 use super::device::{DeviceEvent, DeviceIdentity, DeviceManager};
-use super::election::{ElectionConfig, ElectionEvent, ElectionTimingConfig, PrimaryElection};
 use super::message_bus::MeshMessageBus;
-use super::routing;
 
 /// Default announce interval (30 seconds).
 const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(30);
@@ -28,7 +26,6 @@ const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct MeshTimingConfig {
     pub announce_interval: Duration,
     pub discovery_timeout: Duration,
-    pub election: ElectionTimingConfig,
 }
 
 impl Default for MeshTimingConfig {
@@ -36,7 +33,6 @@ impl Default for MeshTimingConfig {
         Self {
             announce_interval: DEFAULT_ANNOUNCE_INTERVAL,
             discovery_timeout: DEFAULT_DISCOVERY_TIMEOUT,
-            election: ElectionTimingConfig::default(),
         }
     }
 }
@@ -48,7 +44,6 @@ pub struct MeshNodeConfig {
     pub device_name: String,
     pub device_type: String,
     pub hostname_prefix: String,
-    pub prefer_primary: bool,
     pub capabilities: Vec<String>,
     pub metadata: Option<HashMap<String, serde_json::Value>>,
     pub timing: MeshTimingConfig,
@@ -66,8 +61,6 @@ pub enum MeshNodeEvent {
     DeviceUpdated(BaseDevice),
     DeviceOffline(String),
     DevicesChanged(Vec<BaseDevice>),
-    RoleChanged { role: DeviceRole, is_primary: bool },
-    PrimaryChanged(Option<String>),
     /// Application-level message received (non-mesh namespace).
     Message(IncomingMeshMessage),
     Error(String),
@@ -85,8 +78,7 @@ pub struct IncomingMeshMessage {
 
 /// MeshNode - The main entry point for Truffle mesh networking.
 ///
-/// Orchestrates device discovery, STAR topology routing, primary election,
-/// and message serialization.
+/// Orchestrates device discovery and message serialization.
 /// Mutable lifecycle state, grouped under a single lock (CS-6, ARCH-11).
 struct MeshNodeLifecycle {
     running: bool,
@@ -117,14 +109,9 @@ impl Default for MeshNodeLifecycle {
 /// Always acquire locks in this order to prevent deadlocks:
 /// 1. `lifecycle`
 /// 2. `device_manager`
-/// 3. `election`
-///
-/// NEVER acquire `device_manager` while holding `election`, or vice versa,
-/// unless you acquire `device_manager` FIRST.
 pub struct MeshNode {
     config: MeshNodeConfig,
     device_manager: Arc<RwLock<DeviceManager>>,
-    election: Arc<RwLock<PrimaryElection>>,
     connection_manager: Arc<ConnectionManager>,
     message_bus: Arc<MeshMessageBus>,
 
@@ -134,11 +121,10 @@ pub struct MeshNode {
     /// Channel for MeshNode events to the application (broadcast supports multiple consumers).
     event_tx: broadcast::Sender<MeshNodeEvent>,
 
-    /// Event receivers from DeviceManager and PrimaryElection, stored here so
-    /// `start_event_loop()` can take them. Wrapped in Mutex<Option<>> because
-    /// they are moved into the event loop once and cannot be reused.
+    /// Event receiver from DeviceManager, stored here so
+    /// `start_event_loop()` can take it. Wrapped in Mutex<Option<>> because
+    /// it is moved into the event loop once and cannot be reused.
     device_event_rx: tokio::sync::Mutex<Option<mpsc::Receiver<DeviceEvent>>>,
-    election_event_rx: tokio::sync::Mutex<Option<mpsc::Receiver<ElectionEvent>>>,
 }
 
 impl MeshNode {
@@ -152,7 +138,6 @@ impl MeshNode {
     ) -> (Self, broadcast::Receiver<MeshNodeEvent>) {
         let (event_tx, event_rx) = broadcast::channel(256);
         let (device_event_tx, device_event_rx) = mpsc::channel(256);
-        let (election_event_tx, election_event_rx) = mpsc::channel(256);
         let (bus_event_tx, _bus_event_rx) = mpsc::channel(64);
 
         let identity = DeviceIdentity {
@@ -174,23 +159,16 @@ impl MeshNode {
             device_event_tx.clone(),
         );
 
-        let election = PrimaryElection::new(
-            config.timing.election.clone(),
-            election_event_tx.clone(),
-        );
-
         let message_bus = MeshMessageBus::new(bus_event_tx);
 
         let node = Self {
             config,
             device_manager: Arc::new(RwLock::new(device_manager)),
-            election: Arc::new(RwLock::new(election)),
             connection_manager,
             message_bus: Arc::new(message_bus),
             lifecycle: Arc::new(RwLock::new(MeshNodeLifecycle::default())),
             event_tx,
             device_event_rx: tokio::sync::Mutex::new(Some(device_event_rx)),
-            election_event_rx: tokio::sync::Mutex::new(Some(election_event_rx)),
         };
 
         (node, event_rx)
@@ -214,16 +192,6 @@ impl MeshNode {
             let mut lc = self.lifecycle.write().await;
             lc.started_at = now_ms;
             lc.running = true;
-        }
-
-        // Configure election
-        {
-            let mut election = self.election.write().await;
-            election.configure(ElectionConfig {
-                device_id: self.config.device_id.clone(),
-                started_at: now_ms,
-                prefer_primary: self.config.prefer_primary,
-            });
         }
 
         tracing::info!(
@@ -281,19 +249,12 @@ impl MeshNode {
             dm.set_local_offline();
             dm.clear();
         }
-        {
-            let mut election = self.election.write().await;
-            election.reset();
-        }
 
         // Recreate internal event channels so start() can be called again.
         {
             let (device_event_tx, device_event_rx) = mpsc::channel(256);
-            let (election_event_tx, election_event_rx) = mpsc::channel(256);
             self.device_manager.write().await.replace_event_tx(device_event_tx);
-            self.election.write().await.replace_event_tx(election_event_tx);
             *self.device_event_rx.lock().await = Some(device_event_rx);
-            *self.election_event_rx.lock().await = Some(election_event_rx);
         }
 
         let _ = self.event_tx.send(MeshNodeEvent::Stopped);
@@ -326,27 +287,9 @@ impl MeshNode {
         self.device_manager.read().await.device_by_id(id).cloned()
     }
 
-    // ── Role management ───────────────────────────────────────────────────
-
-    pub async fn is_primary(&self) -> bool {
-        self.election.read().await.is_primary()
-    }
-
-    pub async fn primary_id(&self) -> Option<String> {
-        self.election.read().await.primary_id().map(|s| s.to_string())
-    }
-
-    pub async fn role(&self) -> DeviceRole {
-        if self.is_primary().await {
-            DeviceRole::Primary
-        } else {
-            DeviceRole::Secondary
-        }
-    }
-
     // ── Messaging ─────────────────────────────────────────────────────────
 
-    /// Send an envelope to a specific device, using STAR routing if needed.
+    /// Send an envelope to a specific device.
     pub async fn send_envelope(&self, device_id: &str, envelope: &MeshEnvelope) -> bool {
         let local_id = self.config.device_id.clone();
 
@@ -368,16 +311,6 @@ impl MeshNode {
             return self.send_envelope_direct(device_id, envelope).await;
         }
 
-        // Route via primary if we're a secondary
-        if !self.is_primary().await {
-            if let Some(primary_id) = self.primary_id().await {
-                if let Some(route_envelope) = routing::wrap_route_message(device_id, envelope) {
-                    return self.send_envelope_direct(&primary_id, &route_envelope).await;
-                }
-                return false;
-            }
-        }
-
         tracing::warn!("No connection to device {device_id}");
         false
     }
@@ -386,8 +319,8 @@ impl MeshNode {
     pub async fn broadcast_envelope(&self, envelope: &MeshEnvelope) {
         let local_id = self.config.device_id.clone();
 
-        if self.is_primary().await {
-            // Primary: send directly to all connected devices
+        // Send directly to all connected devices
+        {
             let conns = self.connection_manager.get_connections().await;
             for conn in &conns {
                 if let Some(ref did) = conn.device_id {
@@ -404,13 +337,6 @@ impl MeshNode {
                 msg_type: envelope.msg_type.clone(),
                 payload: envelope.payload.clone(),
             }));
-        } else {
-            // Secondary: route broadcast through primary
-            if let Some(primary_id) = self.primary_id().await {
-                if let Some(route_envelope) = routing::wrap_route_broadcast(envelope) {
-                    self.send_envelope_direct(&primary_id, &route_envelope).await;
-                }
-            }
         }
     }
 
@@ -538,27 +464,6 @@ impl MeshNode {
             }
         }
 
-        let online_devices = self.device_manager.read().await.online_devices();
-        let has_primary = self.election.read().await.primary_id().is_some();
-
-        if !has_primary && online_devices.is_empty() {
-            tracing::info!("No other devices found, becoming primary");
-            let mut election = self.election.write().await;
-            // set_primary emits PrimaryElected which the election event loop
-            // converts into RoleChanged, so we don't emit RoleChanged manually.
-            election.set_primary(&identity.id);
-        } else if !has_primary && !online_devices.is_empty() {
-            // Wait for discovery timeout then start election if still no primary
-            let discovery_timeout = self.config.timing.discovery_timeout;
-            let election = self.election.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(discovery_timeout).await;
-                let mut election = election.write().await;
-                if election.primary_id().is_none() {
-                    election.handle_no_primary_on_startup();
-                }
-            });
-        }
     }
 
     /// Set the local device as online.
@@ -634,36 +539,28 @@ impl MeshNode {
 
     // ── Internal: event loop ──────────────────────────────────────────────
 
-    /// Start the event processing loop that handles transport events,
-    /// device events, and election events.
+    /// Start the event processing loop that handles transport events
+    /// and device events.
     async fn start_event_loop(&self) {
         let mut transport_rx = self.connection_manager.subscribe();
 
-        // Take the event receivers that were stored at construction.
-        // These are connected to the senders inside DeviceManager and PrimaryElection.
+        // Take the event receiver that was stored at construction.
+        // It is connected to the sender inside DeviceManager.
         let mut device_event_rx = self
             .device_event_rx
             .lock()
             .await
             .take()
             .expect("device_event_rx already taken (start_event_loop called twice?)");
-        let mut election_event_rx = self
-            .election_event_rx
-            .lock()
-            .await
-            .take()
-            .expect("election_event_rx already taken (start_event_loop called twice?)");
 
         let event_tx = self.event_tx.clone();
         let connection_manager = self.connection_manager.clone();
         let device_manager = self.device_manager.clone();
-        let election = self.election.clone();
         let config = self.config.clone();
         let message_bus = self.message_bus.clone();
 
         // Spawn a task to process device events
         let event_tx_dev = event_tx.clone();
-        let election_dev = election.clone();
         tokio::spawn(async move {
             while let Some(event) = device_event_rx.recv().await {
                 match &event {
@@ -675,156 +572,13 @@ impl MeshNode {
                     }
                     DeviceEvent::DeviceOffline(id) => {
                         let _ = event_tx_dev.send(MeshNodeEvent::DeviceOffline(id.clone()));
-                        // Check if the primary went offline
-                        let primary_id = election_dev.read().await.primary_id().map(|s| s.to_string());
-                        if primary_id.as_deref() == Some(id.as_str()) {
-                            let mut el = election_dev.write().await;
-                            el.handle_primary_lost(id);
-                        }
                     }
                     DeviceEvent::DevicesChanged(devs) => {
                         let _ = event_tx_dev.send(MeshNodeEvent::DevicesChanged(devs.clone()));
                     }
-                    DeviceEvent::PrimaryChanged(pid) => {
-                        let _ = event_tx_dev.send(MeshNodeEvent::PrimaryChanged(pid.clone()));
-                    }
                     DeviceEvent::LocalDeviceChanged(_) => {
                         // Could trigger a broadcast announce, but we handle that
                         // via the periodic announce interval.
-                    }
-                }
-            }
-        });
-
-        // Spawn a task to process election events
-        let event_tx_el = event_tx.clone();
-        let connection_manager_el = connection_manager.clone();
-        let device_manager_el = device_manager.clone();
-        let election_el = election.clone();
-        let config_el = config.clone();
-        tokio::spawn(async move {
-            while let Some(event) = election_event_rx.recv().await {
-                match event {
-                    ElectionEvent::PrimaryElected { device_id, is_local } => {
-                        tracing::info!("Primary elected: {device_id} (is_local={is_local})");
-
-                        let role = if is_local { DeviceRole::Primary } else { DeviceRole::Secondary };
-                        {
-                            let mut dm = device_manager_el.write().await;
-                            dm.set_local_role(role);
-                            // Update all device roles
-                            for device in dm.devices() {
-                                let dev_role = if device.id == device_id {
-                                    DeviceRole::Primary
-                                } else {
-                                    DeviceRole::Secondary
-                                };
-                                dm.set_device_role(&device.id, dev_role);
-                            }
-                        }
-
-                        let _ = event_tx_el.send(MeshNodeEvent::RoleChanged {
-                            role,
-                            is_primary: is_local,
-                        });
-
-                        if is_local {
-                            // BUG-5: Broadcast device list as new primary
-                            let local_device = device_manager_el.read().await.local_device().clone();
-                            let devices = {
-                                let dm = device_manager_el.read().await;
-                                let mut devs = vec![local_device];
-                                devs.extend(dm.devices());
-                                devs
-                            };
-                            let config_id = config_el.device_id.clone();
-                            let list_payload = match serde_json::to_value(&DeviceListPayload {
-                                devices,
-                                primary_id: config_id.clone(),
-                            }) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::error!("Failed to serialize DeviceListPayload: {e}");
-                                    continue;
-                                }
-                            };
-                            let list_msg = MeshMessage::new(
-                                "device-list",
-                                &config_id,
-                                list_payload,
-                            );
-                            let msg_payload = match serde_json::to_value(&list_msg) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::error!("Failed to serialize device:list MeshMessage: {e}");
-                                    continue;
-                                }
-                            };
-                            let envelope = MeshEnvelope {
-                                namespace: MESH_NAMESPACE.to_string(),
-                                msg_type: "message".to_string(),
-                                payload: msg_payload,
-                                timestamp: Some(current_timestamp_ms()),
-                            };
-                            match serde_json::to_value(&envelope) {
-                                Ok(value) => {
-                                    let conns = connection_manager_el.get_connections().await;
-                                    for conn in &conns {
-                                        if conn.status == ConnectionStatus::Connected {
-                                            let _ = connection_manager_el.send(&conn.id, &value).await;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to serialize device:list envelope: {e}");
-                                }
-                            }
-                        }
-                    }
-                    ElectionEvent::PrimaryLost { previous_primary_id } => {
-                        tracing::info!("Primary lost: {previous_primary_id}");
-                    }
-                    ElectionEvent::Broadcast(message) => {
-                        // Send mesh message to all peers
-                        let msg_payload = match serde_json::to_value(&message) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::error!("Failed to serialize election broadcast MeshMessage: {e}");
-                                continue;
-                            }
-                        };
-                        let envelope = MeshEnvelope {
-                            namespace: MESH_NAMESPACE.to_string(),
-                            msg_type: "message".to_string(),
-                            payload: msg_payload,
-                            timestamp: Some(current_timestamp_ms()),
-                        };
-                        match serde_json::to_value(&envelope) {
-                            Ok(value) => {
-                                let conns = connection_manager_el.get_connections().await;
-                                for conn in &conns {
-                                    if conn.status == ConnectionStatus::Connected {
-                                        let _ = connection_manager_el.send(&conn.id, &value).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to serialize election broadcast envelope: {e}");
-                            }
-                        }
-                    }
-                    ElectionEvent::ElectionStarted => {
-                        tracing::info!("Election started");
-                    }
-                    ElectionEvent::GracePeriodExpired => {
-                        tracing::info!("Grace period expired, starting election");
-                        let mut el = election_el.write().await;
-                        el.start_election();
-                    }
-                    ElectionEvent::DecideNow => {
-                        tracing::info!("Election timeout, deciding");
-                        let mut el = election_el.write().await;
-                        el.decide_election();
                     }
                 }
             }
@@ -835,7 +589,6 @@ impl MeshNode {
             config: config.clone(),
             connection_manager: connection_manager.clone(),
             device_manager: device_manager.clone(),
-            election: election.clone(),
             event_tx: event_tx.clone(),
             message_bus: message_bus.clone(),
         });
@@ -961,7 +714,6 @@ mod tests {
             device_name: "Test Device".to_string(),
             device_type: "desktop".to_string(),
             hostname_prefix: "app".to_string(),
-            prefer_primary: false,
             capabilities: vec![],
             metadata: None,
             timing: MeshTimingConfig::default(),
@@ -977,8 +729,6 @@ mod tests {
         let (node, _event_rx) = MeshNode::new(test_config(), conn_mgr);
 
         assert!(!node.is_running().await);
-        assert!(!node.is_primary().await);
-        assert!(node.primary_id().await.is_none());
         assert_eq!(node.device_id().await, "test-dev-1");
     }
 
@@ -1123,26 +873,6 @@ mod tests {
         // Devices list should be empty
         let devices = node.devices().await;
         assert!(devices.is_empty(), "stop() must clear remote devices");
-    }
-
-    /// stop() must reset election state.
-    #[tokio::test]
-    async fn stop_resets_election() {
-        let transport_config = TransportConfig::default();
-        let (conn_mgr, _rx) = ConnectionManager::new(transport_config);
-        let conn_mgr = Arc::new(conn_mgr);
-
-        let (node, mut event_rx) = MeshNode::new(test_config(), conn_mgr);
-
-        node.start().await;
-        let _ = event_rx.recv().await;
-
-        node.stop().await;
-
-        assert!(node.primary_id().await.is_none(),
-            "stop() must clear primary_id");
-        assert!(!node.is_primary().await,
-            "stop() must reset is_primary");
     }
 
     /// stop() must reset auth state.
@@ -1531,7 +1261,7 @@ mod tests {
         }
     }
 
-    /// After stop, local device is reset to offline, election is cleared.
+    /// After stop, local device is reset to offline.
     #[tokio::test]
     async fn stop_fully_resets_state() {
         let transport_config = TransportConfig::default();
@@ -1552,8 +1282,6 @@ mod tests {
 
         // Verify everything is reset
         assert!(!node.is_running().await);
-        assert!(!node.is_primary().await);
-        assert!(node.primary_id().await.is_none());
         assert_eq!(node.auth_status().await, AuthStatus::Unknown);
         assert!(node.auth_url().await.is_none());
 

@@ -65,10 +65,7 @@ pub async fn run(
                 .latency_ms
                 .map(|ms| format!("{ms:.1}ms"))
                 .unwrap_or_else(|| "-".to_string());
-            let role_badge = peer
-                .role
-                .map(|r| format!(" [{r:?}]"))
-                .unwrap_or_default();
+            let role_badge = String::new();
 
             println!(
                 "{:<36}  {:<16}  {:<10}  {:<10}  {:<16}  {}{}",

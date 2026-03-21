@@ -6,7 +6,7 @@ use truffle_core::protocol::types::{
     FileTransferMessageType, MeshMessageType, SyncMessageType,
 };
 use truffle_core::runtime::TruffleEvent;
-use truffle_core::types::{BaseDevice, DeviceRole, DeviceStatus};
+use truffle_core::types::{BaseDevice, DeviceStatus};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NAPI-exported JS object types
@@ -114,10 +114,7 @@ impl From<&BaseDevice> for NapiBaseDevice {
             tailscale_hostname: d.tailscale_hostname.clone(),
             tailscale_dns_name: d.tailscale_dns_name.clone(),
             tailscale_ip: d.tailscale_ip.clone(),
-            role: d.role.map(|r| match r {
-                DeviceRole::Primary => "primary".to_string(),
-                DeviceRole::Secondary => "secondary".to_string(),
-            }),
+            role: None,
             status: match d.status {
                 DeviceStatus::Online => "online".to_string(),
                 DeviceStatus::Offline => "offline".to_string(),
@@ -244,22 +241,6 @@ pub fn mesh_event_to_napi(event: &MeshNodeEvent) -> NapiMeshEvent {
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
         },
-        MeshNodeEvent::RoleChanged { role, is_primary } => NapiMeshEvent {
-            event_type: "roleChanged".to_string(),
-            device_id: None,
-            payload: serde_json::json!({
-                "role": match role {
-                    DeviceRole::Primary => "primary",
-                    DeviceRole::Secondary => "secondary",
-                },
-                "isPrimary": is_primary,
-            }),
-        },
-        MeshNodeEvent::PrimaryChanged(id) => NapiMeshEvent {
-            event_type: "primaryChanged".to_string(),
-            device_id: id.clone(),
-            payload: serde_json::Value::Null,
-        },
         MeshNodeEvent::Message(msg) => {
             let ns = normalize_namespace(&msg.namespace);
             let mt = normalize_msg_type(&ns, &msg.msg_type);
@@ -378,22 +359,6 @@ pub fn truffle_event_to_napi(event: &TruffleEvent) -> NapiMeshEvent {
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
         },
-        TruffleEvent::RoleChanged { role, is_primary } => NapiMeshEvent {
-            event_type: "roleChanged".to_string(),
-            device_id: None,
-            payload: serde_json::json!({
-                "role": match role {
-                    DeviceRole::Primary => "primary",
-                    DeviceRole::Secondary => "secondary",
-                },
-                "isPrimary": is_primary,
-            }),
-        },
-        TruffleEvent::PrimaryChanged { primary_id } => NapiMeshEvent {
-            event_type: "primaryChanged".to_string(),
-            device_id: primary_id.clone(),
-            payload: serde_json::Value::Null,
-        },
         TruffleEvent::Message(msg) => {
             let ns = normalize_namespace(&msg.namespace);
             let mt = normalize_msg_type(&ns, &msg.msg_type);
@@ -439,7 +404,7 @@ mod tests {
     use super::*;
     use truffle_core::mesh::node::IncomingMeshMessage;
     use truffle_core::runtime::TruffleEvent;
-    use truffle_core::types::{BaseDevice, DeviceRole, DeviceStatus};
+    use truffle_core::types::{BaseDevice, DeviceStatus};
 
     fn test_base_device() -> BaseDevice {
         BaseDevice {
@@ -449,7 +414,6 @@ mod tests {
             tailscale_hostname: "app-desktop-dev-abc".to_string(),
             tailscale_dns_name: Some("app-desktop-dev-abc.tail1234.ts.net".to_string()),
             tailscale_ip: Some("100.64.0.2".to_string()),
-            role: Some(DeviceRole::Secondary),
             status: DeviceStatus::Online,
             capabilities: vec!["pty".to_string()],
             metadata: None,
@@ -481,9 +445,6 @@ mod tests {
             TruffleEvent::DeviceDiscovered(test_base_device()),
             TruffleEvent::DeviceUpdated(test_base_device()),
             TruffleEvent::DeviceOffline("dev-abc".to_string()),
-            TruffleEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true },
-            TruffleEvent::PrimaryChanged { primary_id: Some("dev-abc".to_string()) },
-            TruffleEvent::PrimaryChanged { primary_id: None },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("something went wrong".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "panic".to_string() },
@@ -507,8 +468,6 @@ mod tests {
             (TruffleEvent::DeviceDiscovered(test_base_device()), "deviceDiscovered"),
             (TruffleEvent::DeviceUpdated(test_base_device()), "deviceUpdated"),
             (TruffleEvent::DeviceOffline("id".to_string()), "deviceOffline"),
-            (TruffleEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true }, "roleChanged"),
-            (TruffleEvent::PrimaryChanged { primary_id: None }, "primaryChanged"),
             (TruffleEvent::Message(test_incoming_message()), "message"),
             (TruffleEvent::Error("err".to_string()), "error"),
             (TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "x".to_string() }, "sidecarCrashed"),
@@ -556,7 +515,6 @@ mod tests {
     fn normalize_msg_type_mesh_kebab() {
         assert_eq!(normalize_msg_type("mesh", "device-announce"), "device-announce");
         assert_eq!(normalize_msg_type("mesh", "device-list"), "device-list");
-        assert_eq!(normalize_msg_type("mesh", "election-start"), "election-start");
         assert_eq!(normalize_msg_type("mesh", "route-broadcast"), "route-broadcast");
     }
 
@@ -670,8 +628,6 @@ mod tests {
             MeshNodeEvent::DeviceUpdated(test_base_device()),
             MeshNodeEvent::DeviceOffline("dev-abc".to_string()),
             MeshNodeEvent::DevicesChanged(vec![test_base_device()]),
-            MeshNodeEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true },
-            MeshNodeEvent::PrimaryChanged(Some("dev-abc".to_string())),
             MeshNodeEvent::Message(test_incoming_message()),
             MeshNodeEvent::Error("err".to_string()),
         ];

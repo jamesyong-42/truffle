@@ -138,7 +138,6 @@ mod tests {
                 device_name: "Test".to_string(),
                 device_type: "desktop".to_string(),
                 hostname_prefix: "app".to_string(),
-                prefer_primary: false,
                 capabilities: vec![],
                 metadata: None,
                 timing: MeshTimingConfig::default(),

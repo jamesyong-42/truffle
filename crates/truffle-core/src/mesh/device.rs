@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::protocol::hostname::parse_hostname;
 use crate::protocol::message_types::{DeviceAnnouncePayload, DeviceListPayload};
-use crate::types::{BaseDevice, DeviceRole, DeviceStatus, TailnetPeer};
+use crate::types::{BaseDevice, DeviceStatus, TailnetPeer};
 
 /// Identity of the local device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +22,6 @@ pub enum DeviceEvent {
     DeviceUpdated(BaseDevice),
     DeviceOffline(String),
     DevicesChanged(Vec<BaseDevice>),
-    PrimaryChanged(Option<String>),
     LocalDeviceChanged(BaseDevice),
 }
 
@@ -35,7 +34,6 @@ pub struct DeviceManager {
     hostname_prefix: String,
     local_device: BaseDevice,
     devices: HashMap<String, BaseDevice>,
-    primary_id: Option<String>,
     event_tx: mpsc::Sender<DeviceEvent>,
 }
 
@@ -54,7 +52,6 @@ impl DeviceManager {
             tailscale_hostname: identity.tailscale_hostname.clone(),
             tailscale_dns_name: None,
             tailscale_ip: None,
-            role: None,
             status: DeviceStatus::Offline,
             capabilities,
             metadata,
@@ -69,7 +66,6 @@ impl DeviceManager {
             hostname_prefix,
             local_device,
             devices: HashMap::new(),
-            primary_id: None,
             event_tx,
         }
     }
@@ -122,16 +118,6 @@ impl DeviceManager {
         self.emit(DeviceEvent::LocalDeviceChanged(self.local_device.clone()));
     }
 
-    pub fn set_local_role(&mut self, role: DeviceRole) {
-        if self.local_device.role != Some(role) {
-            self.local_device.role = Some(role);
-            if role == DeviceRole::Primary {
-                self.primary_id = Some(self.identity.id.clone());
-            }
-            self.emit(DeviceEvent::LocalDeviceChanged(self.local_device.clone()));
-        }
-    }
-
     pub fn update_device_name(&mut self, name: &str) {
         self.local_device.name = name.to_string();
         self.emit(DeviceEvent::LocalDeviceChanged(self.local_device.clone()));
@@ -162,30 +148,6 @@ impl DeviceManager {
             .filter(|d| d.status == DeviceStatus::Online)
             .cloned()
             .collect()
-    }
-
-    // ── Election support ──────────────────────────────────────────────────
-
-    pub fn set_device_role(&mut self, device_id: &str, role: DeviceRole) {
-        if let Some(device) = self.devices.get_mut(device_id) {
-            if device.role != Some(role) {
-                device.role = Some(role);
-                let device_clone = device.clone();
-                if role == DeviceRole::Primary {
-                    self.primary_id = Some(device_id.to_string());
-                    self.emit(DeviceEvent::PrimaryChanged(Some(device_id.to_string())));
-                }
-                self.emit(DeviceEvent::DeviceUpdated(device_clone));
-            }
-        }
-    }
-
-    pub fn primary_device(&self) -> Option<&BaseDevice> {
-        self.primary_id.as_ref().and_then(|id| self.device_by_id(id))
-    }
-
-    pub fn primary_id(&self) -> Option<&str> {
-        self.primary_id.as_deref()
     }
 
     // ── Device lifecycle ──────────────────────────────────────────────────
@@ -223,7 +185,6 @@ impl DeviceManager {
             tailscale_hostname: peer.hostname.clone(),
             tailscale_dns_name: Some(peer.dns_name.clone()),
             tailscale_ip: peer.tailscale_ips.first().cloned(),
-            role: None,
             status,
             capabilities: vec![],
             metadata: None,
@@ -279,26 +240,6 @@ impl DeviceManager {
             self.devices.insert(device.id.clone(), new_device);
         }
 
-        if !payload.primary_id.is_empty() {
-            self.primary_id = Some(payload.primary_id.clone());
-
-            if payload.primary_id == self.identity.id {
-                self.local_device.role = Some(DeviceRole::Primary);
-            } else {
-                self.local_device.role = Some(DeviceRole::Secondary);
-            }
-
-            for device in self.devices.values_mut() {
-                device.role = if device.id == payload.primary_id {
-                    Some(DeviceRole::Primary)
-                } else {
-                    Some(DeviceRole::Secondary)
-                };
-            }
-
-            self.emit(DeviceEvent::PrimaryChanged(Some(payload.primary_id.clone())));
-        }
-
         self.emit(DeviceEvent::DevicesChanged(self.devices()));
     }
 
@@ -311,17 +252,11 @@ impl DeviceManager {
             device.status = DeviceStatus::Offline;
             self.emit(DeviceEvent::DeviceOffline(device_id.to_string()));
             self.emit(DeviceEvent::DevicesChanged(self.devices()));
-
-            if self.primary_id.as_deref() == Some(device_id) {
-                self.primary_id = None;
-                self.emit(DeviceEvent::PrimaryChanged(None));
-            }
         }
     }
 
     pub fn clear(&mut self) {
         self.devices.clear();
-        self.primary_id = None;
         self.emit(DeviceEvent::DevicesChanged(vec![]));
     }
 
@@ -368,7 +303,6 @@ mod tests {
         assert_eq!(mgr.device_id(), "local-1");
         assert_eq!(mgr.local_device().status, DeviceStatus::Offline);
         assert!(mgr.devices().is_empty());
-        assert!(mgr.primary_id().is_none());
     }
 
     #[test]
@@ -462,7 +396,7 @@ mod tests {
             tailscale_hostname: "app-server-remote-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: Some("100.64.0.5".to_string()),
-            role: None,
+
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -483,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_device_list_sets_primary() {
+    fn handle_device_list_adds_devices() {
         let (mut mgr, _rx) = make_manager();
 
         let device = BaseDevice {
@@ -493,7 +427,6 @@ mod tests {
             tailscale_hostname: "app-desktop-remote-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: None,
-            role: None,
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -509,12 +442,11 @@ mod tests {
         };
 
         mgr.handle_device_list("remote-1", &payload);
-        assert_eq!(mgr.primary_id(), Some("remote-1"));
-        assert_eq!(mgr.local_device().role, Some(DeviceRole::Secondary));
+        assert_eq!(mgr.devices().len(), 1);
     }
 
     #[test]
-    fn mark_device_offline_clears_primary() {
+    fn mark_device_offline_sets_status() {
         let (mut mgr, _rx) = make_manager();
 
         // Add a device
@@ -532,11 +464,9 @@ mod tests {
             expired: false,
         };
         mgr.add_discovered_peer(&peer);
-        mgr.set_device_role("dev2", DeviceRole::Primary);
-        assert_eq!(mgr.primary_id(), Some("dev2"));
 
         mgr.mark_device_offline("dev2");
-        assert!(mgr.primary_id().is_none());
+        assert_eq!(mgr.device_by_id("dev2").unwrap().status, DeviceStatus::Offline);
     }
 
     #[test]
@@ -561,7 +491,6 @@ mod tests {
 
         mgr.clear();
         assert!(mgr.devices().is_empty());
-        assert!(mgr.primary_id().is_none());
     }
 
     // ── CS-4/CS-8 additional tests ────────────────────────────────────────
@@ -620,22 +549,6 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
-    }
-
-    /// set_local_role only emits event when role actually changes.
-    #[test]
-    fn set_local_role_emits_on_change() {
-        let (mut mgr, mut rx) = make_manager();
-
-        mgr.set_local_role(DeviceRole::Primary);
-        let event = rx.try_recv().unwrap();
-        assert!(matches!(event, DeviceEvent::LocalDeviceChanged(_)));
-        assert_eq!(mgr.local_device().role, Some(DeviceRole::Primary));
-        assert_eq!(mgr.primary_id(), Some("local-1"));
-
-        // Setting same role again should not emit
-        mgr.set_local_role(DeviceRole::Primary);
-        assert!(rx.try_recv().is_err(), "Should not emit when role unchanged");
     }
 
     /// replace_event_tx redirects events to new channel.
@@ -755,41 +668,6 @@ mod tests {
         assert_eq!(online[0].id, "on1");
     }
 
-    /// mark_device_offline on primary clears primary_id and emits PrimaryChanged(None).
-    #[test]
-    fn mark_primary_offline_emits_primary_changed_none() {
-        let (mut mgr, mut rx) = make_manager();
-
-        let peer = TailnetPeer {
-            id: "p".to_string(),
-            hostname: "app-desktop-dev2".to_string(),
-            dns_name: "app-desktop-dev2.ts.net".to_string(),
-            tailscale_ips: vec!["100.64.0.2".to_string()],
-            online: true,
-            os: None,
-            cur_addr: None,
-            relay: None,
-            last_seen: None,
-            key_expiry: None,
-            expired: false,
-        };
-        mgr.add_discovered_peer(&peer);
-        mgr.set_device_role("dev2", DeviceRole::Primary);
-        while rx.try_recv().is_ok() {} // drain
-
-        mgr.mark_device_offline("dev2");
-
-        assert!(mgr.primary_id().is_none());
-
-        // Should have emitted PrimaryChanged(None)
-        let mut found = false;
-        while let Ok(event) = rx.try_recv() {
-            if let DeviceEvent::PrimaryChanged(None) = event {
-                found = true;
-            }
-        }
-        assert!(found, "mark_device_offline on primary must emit PrimaryChanged(None)");
-    }
 
     // ══════════════════════════════════════════════════════════════════════
     // Adversarial / edge-case tests
@@ -824,7 +702,7 @@ mod tests {
             tailscale_hostname: "app-mobile-remote-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: Some("100.64.0.5".to_string()),
-            role: None,
+
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -867,7 +745,7 @@ mod tests {
             tailscale_hostname: "app-desktop-dev-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: Some("100.64.0.2".to_string()),
-            role: None,
+
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -925,7 +803,6 @@ mod tests {
             tailscale_hostname: "app-desktop-local-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: Some("100.64.0.1".to_string()),
-            role: Some(DeviceRole::Primary),
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -942,7 +819,7 @@ mod tests {
             tailscale_hostname: "app-desktop-remote-1".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: None,
-            role: None,
+
             status: DeviceStatus::Online,
             capabilities: vec![],
             metadata: None,
@@ -1002,52 +879,8 @@ mod tests {
             "There should be exactly 2 offline devices in the full list");
     }
 
-    /// 16. Primary device goes offline triggers PrimaryChanged(None).
-    ///     Verified via DeviceEvent stream.
-    #[test]
-    fn primary_goes_offline_emits_primary_changed_none() {
-        let (mut mgr, mut rx) = make_manager();
-
-        let peer = make_peer("app-desktop-dev2", true);
-        mgr.add_discovered_peer(&peer);
-        mgr.set_device_role("dev2", DeviceRole::Primary);
-        assert_eq!(mgr.primary_id(), Some("dev2"));
-        while rx.try_recv().is_ok() {} // drain
-
-        mgr.mark_device_offline("dev2");
-
-        assert!(mgr.primary_id().is_none(),
-            "primary_id must be None after primary goes offline");
-
-        let mut found_primary_none = false;
-        let mut found_device_offline = false;
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                DeviceEvent::PrimaryChanged(None) => found_primary_none = true,
-                DeviceEvent::DeviceOffline(id) if id == "dev2" => found_device_offline = true,
-                _ => {}
-            }
-        }
-        assert!(found_primary_none,
-            "Primary going offline must emit PrimaryChanged(None)");
-        assert!(found_device_offline,
-            "Primary going offline must emit DeviceOffline");
-    }
-
-    /// 17. set_device_role for a nonexistent device_id: must not panic.
-    #[test]
-    fn set_role_on_nonexistent_device_no_panic() {
-        let (mut mgr, _rx) = make_manager();
-
-        // This should be a silent no-op
-        mgr.set_device_role("nonexistent-device", DeviceRole::Primary);
-
-        // Verify no side effects
-        assert!(mgr.primary_id().is_none(),
-            "set_device_role on nonexistent device must not set primary_id");
-        assert!(mgr.devices().is_empty(),
-            "set_device_role on nonexistent device must not create entries");
-    }
+    // Tests 16-17 (primary_goes_offline, set_role_on_nonexistent_device)
+    // removed -- election/role system deleted (RFC 010)
 
     /// mark_device_offline on nonexistent device: must not panic.
     #[test]
@@ -1085,9 +918,9 @@ mod tests {
             "clear() must emit DevicesChanged with empty device list");
     }
 
-    /// device_list with empty primary_id: does not set primary.
+    /// device_list with empty primary_id and no devices.
     #[test]
-    fn device_list_empty_primary_id_no_primary_set() {
+    fn device_list_empty_primary_id() {
         let (mut mgr, _rx) = make_manager();
 
         let payload = DeviceListPayload {
@@ -1097,8 +930,8 @@ mod tests {
 
         mgr.handle_device_list("remote-1", &payload);
 
-        assert!(mgr.primary_id().is_none(),
-            "device:list with empty primary_id must not set a primary");
+        assert!(mgr.devices().is_empty(),
+            "device:list with no devices must leave device map empty");
     }
 
     /// add_discovered_peer updates existing device (doesn't duplicate).

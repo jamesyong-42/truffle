@@ -49,7 +49,6 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use truffle_core::mesh::node::{MeshNode, MeshNodeConfig, MeshNodeEvent, MeshTimingConfig};
-use truffle_core::mesh::election::ElectionTimingConfig;
 use truffle_core::protocol::envelope::MeshEnvelope;
 use truffle_core::runtime::{TruffleEvent, TruffleRuntime};
 use truffle_core::transport::connection::{ConnectionManager, TransportConfig};
@@ -169,16 +168,11 @@ fn fast_mesh_config(device_id: &str, device_name: &str) -> MeshNodeConfig {
         device_name: device_name.to_string(),
         device_type: "desktop".to_string(),
         hostname_prefix: "test".to_string(),
-        prefer_primary: false,
         capabilities: vec![],
         metadata: None,
         timing: MeshTimingConfig {
             announce_interval: Duration::from_secs(5),
             discovery_timeout: Duration::from_millis(500),
-            election: ElectionTimingConfig {
-                election_timeout: Duration::from_millis(500),
-                primary_loss_grace: Duration::from_millis(500),
-            },
         },
     }
 }
@@ -214,8 +208,6 @@ async fn spawn_runtime_node(name: &str) -> RuntimeNode {
         .auth_key(std::env::var("TS_AUTHKEY").ok().unwrap_or_default())
         .announce_interval(Duration::from_secs(5))
         .discovery_timeout(Duration::from_secs(2))
-        .election_timeout(Duration::from_secs(2))
-        .primary_loss_grace(Duration::from_secs(5))
         .build()
         .expect("failed to build TruffleRuntime");
 
@@ -262,15 +254,12 @@ async fn spawn_runtime_node(name: &str) -> RuntimeNode {
 // 3a. Single-node mesh tests (no Tailscale)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// A lone MeshNode with no peers becomes primary after the discovery timeout.
+/// A lone MeshNode with no peers starts and handles an empty peer list.
 ///
-/// Flow: start -> no peers discovered -> discovery timeout fires ->
-/// election starts with only self -> self-elects as primary.
-///
-/// We simulate the "no peers" condition by calling handle_tailnet_peers
-/// with an empty peer list, which triggers the no-primary-no-peers path.
+/// Election system has been removed (RFC 010). This test verifies the node
+/// starts correctly and handles empty peer discovery without crashing.
 #[tokio::test]
-async fn test_single_node_becomes_primary_when_alone() {
+async fn test_single_node_handles_empty_peers() {
     init_tracing();
 
     let config = fast_mesh_config("solo-node-1", "Solo Node");
@@ -295,27 +284,8 @@ async fn test_single_node_becomes_primary_when_alone() {
     // Simulate: sidecar reported no relevant peers
     node.handle_tailnet_peers(&[]).await;
 
-    // With no peers and no primary, the node should self-elect as primary.
-    // This happens synchronously in handle_tailnet_peers when online_devices is empty.
-    let role_event = wait_for_mesh_event(
-        &mut event_rx,
-        Duration::from_secs(5),
-        |e| matches!(e, MeshNodeEvent::RoleChanged { .. }),
-        "RoleChanged (primary as sole node)",
-    )
-    .await;
-
-    match role_event {
-        MeshNodeEvent::RoleChanged { role, is_primary } => {
-            assert!(is_primary, "Sole node must become primary");
-            assert_eq!(role, truffle_core::types::DeviceRole::Primary);
-        }
-        other => panic!("Expected RoleChanged, got: {other:?}"),
-    }
-
-    // Verify via API
-    assert!(node.is_primary().await);
-    assert_eq!(node.primary_id().await.as_deref(), Some("solo-node-1"));
+    // Node should be running without issues
+    assert!(node.is_running().await);
 
     node.stop().await;
 }
@@ -487,60 +457,7 @@ async fn test_two_nodes_discover_each_other() {
     node_b.runtime.stop().await;
 }
 
-/// Spawn 2 nodes. One should become Primary, the other Secondary.
-/// Both emit RoleChanged events.
-#[tokio::test]
-#[ignore] // Requires Tailscale auth (2 nodes)
-async fn test_two_nodes_elect_primary() {
-    init_tracing();
-
-    eprintln!("=== Spawning Node B ===");
-    let mut node_b = spawn_runtime_node("node-b").await;
-
-    eprintln!("=== Spawning Node A ===");
-    let mut node_a = spawn_runtime_node("node-a").await;
-
-    // Wait for both nodes to receive RoleChanged events
-    let role_a = wait_for_truffle_event(
-        &mut node_a.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
-    )
-    .await;
-
-    let role_b = wait_for_truffle_event(
-        &mut node_b.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
-    )
-    .await;
-
-    let a_is_primary = matches!(&role_a, TruffleEvent::RoleChanged { is_primary: true, .. });
-    let b_is_primary = matches!(&role_b, TruffleEvent::RoleChanged { is_primary: true, .. });
-
-    eprintln!("Node A primary: {a_is_primary}, Node B primary: {b_is_primary}");
-
-    // Exactly one node should be primary
-    assert!(
-        a_is_primary ^ b_is_primary,
-        "Exactly one node should be primary, got A={a_is_primary} B={b_is_primary}"
-    );
-
-    // Verify via API
-    let a_primary = node_a.runtime.is_primary().await;
-    let b_primary = node_b.runtime.is_primary().await;
-    assert!(
-        a_primary ^ b_primary,
-        "API check: exactly one node should be primary"
-    );
-
-    eprintln!("=== Two-node election test PASSED ===");
-
-    node_a.runtime.stop().await;
-    node_b.runtime.stop().await;
-}
+// test_two_nodes_elect_primary removed -- election system deleted (RFC 010)
 
 /// After connection, Node A should have Node B in its device list and vice versa.
 #[tokio::test]
@@ -601,68 +518,9 @@ async fn test_two_nodes_exchange_device_announce() {
     node_b.runtime.stop().await;
 }
 
-/// When secondary connects to primary, secondary receives device:list.
-/// Verify the secondary's device list contains the primary.
-#[tokio::test]
-#[ignore] // Requires Tailscale auth (2 nodes)
-async fn test_primary_sends_device_list_on_connect() {
-    init_tracing();
+// test_primary_sends_device_list_on_connect removed -- election system deleted (RFC 010)
 
-    eprintln!("=== Spawning Node B ===");
-    let mut node_b = spawn_runtime_node("node-b").await;
-
-    eprintln!("=== Spawning Node A ===");
-    let mut node_a = spawn_runtime_node("node-a").await;
-
-    // Wait for both to have roles assigned
-    wait_for_truffle_event(
-        &mut node_a.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
-    )
-    .await;
-
-    wait_for_truffle_event(
-        &mut node_b.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
-    )
-    .await;
-
-    // Give time for device:list exchange
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Determine which is primary
-    let a_is_primary = node_a.runtime.is_primary().await;
-    let (primary, secondary) = if a_is_primary {
-        (&node_a, &node_b)
-    } else {
-        (&node_b, &node_a)
-    };
-
-    let primary_id = primary.runtime.device_id().await;
-    let secondary_devices = secondary.runtime.devices().await;
-
-    eprintln!("Primary: {primary_id}");
-    eprintln!("Secondary sees devices: {:?}",
-        secondary_devices.iter().map(|d| (&d.id, &d.role)).collect::<Vec<_>>());
-
-    // The secondary should have the primary in its device list
-    let has_primary = secondary_devices.iter().any(|d| d.id == primary_id);
-    assert!(
-        has_primary,
-        "Secondary should have primary ({primary_id}) in its device list after device:list"
-    );
-
-    eprintln!("=== Primary device:list test PASSED ===");
-
-    node_a.runtime.stop().await;
-    node_b.runtime.stop().await;
-}
-
-/// Node A (primary) stops. Node B should receive DeviceOffline event for Node A.
+/// Node A stops. Node B should receive DeviceOffline event for Node A.
 #[tokio::test]
 #[ignore] // Requires Tailscale auth (2 nodes)
 async fn test_node_stop_triggers_goodbye() {
@@ -674,150 +532,49 @@ async fn test_node_stop_triggers_goodbye() {
     eprintln!("=== Spawning Node A ===");
     let mut node_a = spawn_runtime_node("node-a").await;
 
-    // Wait for both to have roles
+    // Wait for both to discover each other
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node A: DeviceDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node B: DeviceDiscovered",
     )
     .await;
 
-    // Determine which is primary and stop it
-    let a_is_primary = node_a.runtime.is_primary().await;
-    let _stopping_id = if a_is_primary {
-        let id = node_a.runtime.device_id().await;
-        eprintln!("Stopping Node A (primary, id={id})");
-        node_a.runtime.stop().await;
-        id
-    } else {
-        let id = node_b.runtime.device_id().await;
-        eprintln!("Stopping Node B (primary, id={id})");
-        node_b.runtime.stop().await;
-        id
-    };
+    // Stop Node A
+    let id = node_a.runtime.device_id().await;
+    eprintln!("Stopping Node A (id={id})");
+    node_a.runtime.stop().await;
 
-    // The surviving node should see DeviceOffline
-    let surviving_rx = if a_is_primary {
-        &mut node_b.truffle_rx
-    } else {
-        &mut node_a.truffle_rx
-    };
-
+    // Node B should see DeviceOffline
     let event = wait_for_truffle_event(
-        surviving_rx,
+        &mut node_b.truffle_rx,
         Duration::from_secs(15),
         |e| matches!(e, TruffleEvent::DeviceOffline(_)),
-        "Surviving node: DeviceOffline after goodbye",
+        "Node B: DeviceOffline after goodbye",
     )
     .await;
 
     if let TruffleEvent::DeviceOffline(offline_id) = &event {
         eprintln!("Device went offline: {offline_id}");
-        // The offline device should be the one that stopped
-        // Note: may match on the device_id parsed from hostname
     }
 
     eprintln!("=== Goodbye test PASSED ===");
 
-    // Stop the surviving node
-    if a_is_primary {
-        node_b.runtime.stop().await;
-    } else {
-        node_a.runtime.stop().await;
-    }
+    node_b.runtime.stop().await;
 }
 
-/// Node A is primary, Node B is secondary. Stop Node A.
-/// Node B should become primary (RoleChanged with is_primary=true)
-/// within ~15 seconds (grace period + election timeout).
-#[tokio::test]
-#[ignore] // Requires Tailscale auth (2 nodes)
-async fn test_primary_failover() {
-    init_tracing();
+// test_primary_failover removed -- election system deleted (RFC 010)
 
-    eprintln!("=== Spawning Node B ===");
-    let mut node_b = spawn_runtime_node("node-b").await;
-
-    eprintln!("=== Spawning Node A ===");
-    let mut node_a = spawn_runtime_node("node-a").await;
-
-    // Wait for election to complete
-    wait_for_truffle_event(
-        &mut node_a.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
-    )
-    .await;
-
-    wait_for_truffle_event(
-        &mut node_b.truffle_rx,
-        Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
-    )
-    .await;
-
-    let a_is_primary = node_a.runtime.is_primary().await;
-    let b_is_primary = node_b.runtime.is_primary().await;
-    eprintln!("Initial state: A primary={a_is_primary}, B primary={b_is_primary}");
-    assert!(
-        a_is_primary ^ b_is_primary,
-        "One node must be primary before failover test"
-    );
-
-    // Stop the primary node
-    let surviving_rx;
-    let surviving_runtime;
-    if a_is_primary {
-        eprintln!("Stopping Node A (primary)...");
-        node_a.runtime.stop().await;
-        surviving_rx = &mut node_b.truffle_rx;
-        surviving_runtime = &node_b.runtime;
-    } else {
-        eprintln!("Stopping Node B (primary)...");
-        node_b.runtime.stop().await;
-        surviving_rx = &mut node_a.truffle_rx;
-        surviving_runtime = &node_a.runtime;
-    }
-
-    // The surviving secondary should detect primary loss and self-elect.
-    // Grace period (5s) + election timeout (2s) + margin = ~15s timeout.
-    let failover_event = wait_for_truffle_event(
-        surviving_rx,
-        Duration::from_secs(20),
-        |e| matches!(e, TruffleEvent::RoleChanged { is_primary: true, .. }),
-        "Surviving node: RoleChanged to primary (failover)",
-    )
-    .await;
-
-    match &failover_event {
-        TruffleEvent::RoleChanged { role, is_primary } => {
-            assert!(is_primary, "Surviving node must become primary after failover");
-            assert_eq!(*role, truffle_core::types::DeviceRole::Primary);
-            eprintln!("Failover complete: surviving node is now primary");
-        }
-        other => panic!("Expected RoleChanged, got: {other:?}"),
-    }
-
-    // Verify via API
-    assert!(surviving_runtime.is_primary().await);
-
-    eprintln!("=== Primary failover test PASSED ===");
-
-    surviving_runtime.stop().await;
-}
-
-/// Node A (primary) broadcasts a message on a custom namespace.
+/// Node A broadcasts a message on a custom namespace.
 /// Node B should receive it as TruffleEvent::Message.
 #[tokio::test]
 #[ignore] // Requires Tailscale auth (2 nodes)
@@ -830,63 +587,50 @@ async fn test_broadcast_message_reaches_all_nodes() {
     eprintln!("=== Spawning Node A ===");
     let mut node_a = spawn_runtime_node("node-a").await;
 
-    // Wait for election so we know who is primary
+    // Wait for discovery
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node A: DeviceDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node B: DeviceDiscovered",
     )
     .await;
 
     // Give connections time to stabilize
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let a_is_primary = node_a.runtime.is_primary().await;
-    eprintln!("Node A primary: {a_is_primary}");
-
-    // The primary broadcasts a custom message
+    // Node A broadcasts a custom message
     let envelope = MeshEnvelope::new(
         "test-ns",
         "broadcast-test",
-        serde_json::json!({"msg": "hello from primary"}),
+        serde_json::json!({"msg": "hello from node-a"}),
     );
 
-    if a_is_primary {
-        node_a.runtime.broadcast_envelope(&envelope).await;
-    } else {
-        node_b.runtime.broadcast_envelope(&envelope).await;
-    }
+    node_a.runtime.broadcast_envelope(&envelope).await;
 
-    // The other node should receive it as a Message event
-    let receiver_rx = if a_is_primary {
-        &mut node_b.truffle_rx
-    } else {
-        &mut node_a.truffle_rx
-    };
-
+    // Node B should receive it as a Message event
     let event = wait_for_truffle_event(
-        receiver_rx,
+        &mut node_b.truffle_rx,
         Duration::from_secs(15),
         |e| {
             matches!(e, TruffleEvent::Message(msg) if msg.namespace == "test-ns")
         },
-        "Receiver: Message in test-ns namespace",
+        "Node B: Message in test-ns namespace",
     )
     .await;
 
     if let TruffleEvent::Message(msg) = &event {
         assert_eq!(msg.namespace, "test-ns");
         assert_eq!(msg.msg_type, "broadcast-test");
-        assert_eq!(msg.payload["msg"], "hello from primary");
+        assert_eq!(msg.payload["msg"], "hello from node-a");
         eprintln!("Broadcast message received: {:?}", msg.payload);
     }
 
@@ -909,20 +653,20 @@ async fn test_send_targeted_message() {
     eprintln!("=== Spawning Node A ===");
     let mut node_a = spawn_runtime_node("node-a").await;
 
-    // Wait for election
+    // Wait for discovery
     wait_for_truffle_event(
         &mut node_a.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node A: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node A: DeviceDiscovered",
     )
     .await;
 
     wait_for_truffle_event(
         &mut node_b.truffle_rx,
         Duration::from_secs(45),
-        |e| matches!(e, TruffleEvent::RoleChanged { .. }),
-        "Node B: RoleChanged",
+        |e| matches!(e, TruffleEvent::DeviceDiscovered(_)),
+        "Node B: DeviceDiscovered",
     )
     .await;
 

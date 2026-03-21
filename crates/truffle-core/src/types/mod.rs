@@ -2,16 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Device role in STAR topology.
-/// - Primary: Hub device that all others connect to
-/// - Secondary: Connects to primary, routes through primary
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DeviceRole {
-    Primary,
-    Secondary,
-}
-
 /// Device status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -59,9 +49,6 @@ pub struct BaseDevice {
         alias = "tailscaleIP"
     )]
     pub tailscale_ip: Option<String>,
-    /// Device role in STAR topology.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<DeviceRole>,
     /// Device status.
     pub status: DeviceStatus,
     /// Device capabilities - application-defined strings.
@@ -156,14 +143,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn device_role_serde_roundtrip() {
-        let json = serde_json::to_string(&DeviceRole::Primary).unwrap();
-        assert_eq!(json, "\"primary\"");
-        let parsed: DeviceRole = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, DeviceRole::Primary);
-    }
-
-    #[test]
     fn device_status_serde_roundtrip() {
         let json = serde_json::to_string(&DeviceStatus::Online).unwrap();
         assert_eq!(json, "\"online\"");
@@ -180,7 +159,6 @@ mod tests {
             tailscale_hostname: "app-desktop-abc123".to_string(),
             tailscale_dns_name: Some("app-desktop-abc123.tailnet.ts.net".to_string()),
             tailscale_ip: Some("100.64.0.1".to_string()),
-            role: Some(DeviceRole::Primary),
             status: DeviceStatus::Online,
             capabilities: vec!["file-transfer".to_string()],
             metadata: None,
@@ -229,7 +207,6 @@ mod tests {
             tailscale_hostname: "app-mobile-abc".to_string(),
             tailscale_dns_name: None,
             tailscale_ip: None,
-            role: None,
             status: DeviceStatus::Offline,
             capabilities: vec![],
             metadata: None,
@@ -242,7 +219,6 @@ mod tests {
         let json = serde_json::to_string(&device).unwrap();
         assert!(!json.contains("tailscaleDnsName"));
         assert!(!json.contains("tailscaleIp"));
-        assert!(!json.contains("role"));
     }
 
     // ── BUG-2 regression tests: serde case mismatches ──────────────────
@@ -331,7 +307,6 @@ mod tests {
             tailscale_hostname: "app-server-roundtrip-1".to_string(),
             tailscale_dns_name: Some("app-server-roundtrip-1.tailnet.ts.net".to_string()),
             tailscale_ip: Some("100.64.0.42".to_string()),
-            role: Some(DeviceRole::Secondary),
             status: DeviceStatus::Online,
             capabilities: vec!["file-transfer".to_string(), "clipboard".to_string()],
             metadata: Some({

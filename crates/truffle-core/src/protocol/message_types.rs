@@ -63,28 +63,6 @@ pub struct DeviceListPayload {
     pub primary_id: String,
 }
 
-/// Election candidate payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElectionCandidatePayload {
-    pub device_id: String,
-    /// How long this device has been online (ms).
-    pub uptime: u64,
-    /// Whether user explicitly designated this as primary.
-    #[serde(default)]
-    pub user_designated: bool,
-}
-
-/// Election result payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ElectionResultPayload {
-    pub new_primary_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_primary_id: Option<String>,
-    pub reason: String,
-}
-
 /// Device goodbye payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,20 +105,6 @@ mod tests {
         let parsed: MeshMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.msg_type, "device-announce");
         assert_eq!(parsed.from, "device-123");
-    }
-
-    #[test]
-    fn election_candidate_payload_serde() {
-        let payload = ElectionCandidatePayload {
-            device_id: "dev-1".to_string(),
-            uptime: 60000,
-            user_designated: false,
-        };
-        let json = serde_json::to_string(&payload).unwrap();
-        let parsed: ElectionCandidatePayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.device_id, "dev-1");
-        assert_eq!(parsed.uptime, 60000);
-        assert!(!parsed.user_designated);
     }
 
     #[test]

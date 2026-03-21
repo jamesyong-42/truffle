@@ -35,10 +35,7 @@ impl From<&truffle_core::types::BaseDevice> for DeviceInfo {
             tailscale_hostname: d.tailscale_hostname.clone(),
             tailscale_dns_name: d.tailscale_dns_name.clone(),
             tailscale_ip: d.tailscale_ip.clone(),
-            role: d.role.map(|r| match r {
-                truffle_core::types::DeviceRole::Primary => "primary".to_string(),
-                truffle_core::types::DeviceRole::Secondary => "secondary".to_string(),
-            }),
+            role: None,
             status: match d.status {
                 truffle_core::types::DeviceStatus::Online => "online".to_string(),
                 truffle_core::types::DeviceStatus::Offline => "offline".to_string(),
@@ -149,39 +146,6 @@ pub async fn device_by_id(
     match node.as_ref() {
         Some(n) => Ok(n.device_by_id(&id).await.as_ref().map(DeviceInfo::from)),
         None => Err("MeshNode not initialized".to_string()),
-    }
-}
-
-#[command]
-pub async fn is_primary(state: State<'_, TruffleState>) -> Result<bool, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => Ok(n.is_primary().await),
-        None => Ok(false),
-    }
-}
-
-#[command]
-pub async fn primary_id(state: State<'_, TruffleState>) -> Result<Option<String>, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => Ok(n.primary_id().await),
-        None => Ok(None),
-    }
-}
-
-#[command]
-pub async fn role(state: State<'_, TruffleState>) -> Result<String, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => {
-            let r = n.role().await;
-            Ok(match r {
-                truffle_core::types::DeviceRole::Primary => "primary".to_string(),
-                truffle_core::types::DeviceRole::Secondary => "secondary".to_string(),
-            })
-        }
-        None => Ok("secondary".to_string()),
     }
 }
 

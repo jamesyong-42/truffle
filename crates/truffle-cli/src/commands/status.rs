@@ -46,21 +46,12 @@ pub async fn run(
     }
 
     let device = runtime.local_device().await;
-    let is_primary = runtime.is_primary().await;
 
     println!("=== Truffle Node Status ===");
     println!("Device ID:    {}", device.id);
     println!("Name:         {}", device.name);
     println!("Type:         {}", device.device_type);
     println!("Hostname:     {}", device.tailscale_hostname);
-    println!(
-        "Role:         {}",
-        device
-            .role
-            .map(|r| format!("{r:?}"))
-            .unwrap_or_else(|| "Unknown".to_string())
-    );
-    println!("Is Primary:   {is_primary}");
     println!("Status:       {:?}", device.status);
 
     if let Some(ip) = &online_ip {

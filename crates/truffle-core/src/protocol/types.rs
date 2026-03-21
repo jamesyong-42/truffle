@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::protocol::message_types::{
-    DeviceAnnouncePayload, DeviceGoodbyePayload, DeviceListPayload, ElectionCandidatePayload,
-    ElectionResultPayload, RouteBroadcastPayload, RouteMessagePayload,
+    DeviceAnnouncePayload, DeviceGoodbyePayload, DeviceListPayload, RouteBroadcastPayload,
+    RouteMessagePayload,
 };
 
 // ---------------------------------------------------------------------------
@@ -19,9 +19,6 @@ pub enum MeshMessageType {
     DeviceAnnounce,
     DeviceList,
     DeviceGoodbye,
-    ElectionStart,
-    ElectionCandidate,
-    ElectionResult,
     RouteMessage,
     RouteBroadcast,
 }
@@ -33,9 +30,6 @@ impl MeshMessageType {
             "device-announce" => Some(Self::DeviceAnnounce),
             "device-list" => Some(Self::DeviceList),
             "device-goodbye" => Some(Self::DeviceGoodbye),
-            "election-start" => Some(Self::ElectionStart),
-            "election-candidate" => Some(Self::ElectionCandidate),
-            "election-result" => Some(Self::ElectionResult),
             "route-message" => Some(Self::RouteMessage),
             "route-broadcast" => Some(Self::RouteBroadcast),
             _ => None,
@@ -48,9 +42,6 @@ impl MeshMessageType {
             Self::DeviceAnnounce => "device-announce",
             Self::DeviceList => "device-list",
             Self::DeviceGoodbye => "device-goodbye",
-            Self::ElectionStart => "election-start",
-            Self::ElectionCandidate => "election-candidate",
-            Self::ElectionResult => "election-result",
             Self::RouteMessage => "route-message",
             Self::RouteBroadcast => "route-broadcast",
         }
@@ -183,10 +174,6 @@ pub enum MeshPayload {
     DeviceAnnounce(DeviceAnnouncePayload),
     DeviceList(DeviceListPayload),
     DeviceGoodbye(DeviceGoodbyePayload),
-    /// Election start carries no payload.
-    ElectionStart,
-    ElectionCandidate(ElectionCandidatePayload),
-    ElectionResult(ElectionResultPayload),
     RouteMessage(RouteMessagePayload),
     RouteBroadcast(RouteBroadcastPayload),
 }
@@ -217,15 +204,6 @@ impl MeshPayload {
                 let p = serde_json::from_value(payload)?;
                 Ok(Self::DeviceGoodbye(p))
             }
-            MeshMessageType::ElectionStart => Ok(Self::ElectionStart),
-            MeshMessageType::ElectionCandidate => {
-                let p = serde_json::from_value(payload)?;
-                Ok(Self::ElectionCandidate(p))
-            }
-            MeshMessageType::ElectionResult => {
-                let p = serde_json::from_value(payload)?;
-                Ok(Self::ElectionResult(p))
-            }
             MeshMessageType::RouteMessage => {
                 let p = serde_json::from_value(payload)?;
                 Ok(Self::RouteMessage(p))
@@ -243,9 +221,6 @@ impl MeshPayload {
             Self::DeviceAnnounce(_) => MeshMessageType::DeviceAnnounce,
             Self::DeviceList(_) => MeshMessageType::DeviceList,
             Self::DeviceGoodbye(_) => MeshMessageType::DeviceGoodbye,
-            Self::ElectionStart => MeshMessageType::ElectionStart,
-            Self::ElectionCandidate(_) => MeshMessageType::ElectionCandidate,
-            Self::ElectionResult(_) => MeshMessageType::ElectionResult,
             Self::RouteMessage(_) => MeshMessageType::RouteMessage,
             Self::RouteBroadcast(_) => MeshMessageType::RouteBroadcast,
         }
@@ -279,18 +254,6 @@ mod tests {
             Some(MeshMessageType::DeviceGoodbye)
         );
         assert_eq!(
-            MeshMessageType::from_str("election-start"),
-            Some(MeshMessageType::ElectionStart)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("election-candidate"),
-            Some(MeshMessageType::ElectionCandidate)
-        );
-        assert_eq!(
-            MeshMessageType::from_str("election-result"),
-            Some(MeshMessageType::ElectionResult)
-        );
-        assert_eq!(
             MeshMessageType::from_str("route-message"),
             Some(MeshMessageType::RouteMessage)
         );
@@ -305,7 +268,6 @@ mod tests {
         // Legacy colon-separated names are no longer accepted
         assert_eq!(MeshMessageType::from_str("device:announce"), None);
         assert_eq!(MeshMessageType::from_str("device:list"), None);
-        assert_eq!(MeshMessageType::from_str("election:start"), None);
         assert_eq!(MeshMessageType::from_str("route:message"), None);
     }
 
@@ -315,6 +277,10 @@ mod tests {
         assert_eq!(MeshMessageType::from_str("unknown"), None);
         assert_eq!(MeshMessageType::from_str("device_announce"), None);
         assert_eq!(MeshMessageType::from_str("DEVICE-ANNOUNCE"), None);
+        // Election types removed (RFC 010)
+        assert_eq!(MeshMessageType::from_str("election-start"), None);
+        assert_eq!(MeshMessageType::from_str("election-candidate"), None);
+        assert_eq!(MeshMessageType::from_str("election-result"), None);
     }
 
     #[test]
@@ -322,12 +288,6 @@ mod tests {
         assert_eq!(MeshMessageType::DeviceAnnounce.as_str(), "device-announce");
         assert_eq!(MeshMessageType::DeviceList.as_str(), "device-list");
         assert_eq!(MeshMessageType::DeviceGoodbye.as_str(), "device-goodbye");
-        assert_eq!(MeshMessageType::ElectionStart.as_str(), "election-start");
-        assert_eq!(
-            MeshMessageType::ElectionCandidate.as_str(),
-            "election-candidate"
-        );
-        assert_eq!(MeshMessageType::ElectionResult.as_str(), "election-result");
         assert_eq!(MeshMessageType::RouteMessage.as_str(), "route-message");
         assert_eq!(MeshMessageType::RouteBroadcast.as_str(), "route-broadcast");
     }
@@ -338,9 +298,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::ElectionStart,
-            MeshMessageType::ElectionCandidate,
-            MeshMessageType::ElectionResult,
             MeshMessageType::RouteMessage,
             MeshMessageType::RouteBroadcast,
         ];
@@ -356,10 +313,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&MeshMessageType::DeviceAnnounce).unwrap(),
             r#""device-announce""#
-        );
-        assert_eq!(
-            serde_json::to_string(&MeshMessageType::ElectionStart).unwrap(),
-            r#""election-start""#
         );
         assert_eq!(
             serde_json::to_string(&MeshMessageType::RouteBroadcast).unwrap(),
@@ -379,9 +332,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::ElectionStart,
-            MeshMessageType::ElectionCandidate,
-            MeshMessageType::ElectionResult,
             MeshMessageType::RouteMessage,
             MeshMessageType::RouteBroadcast,
         ];
@@ -711,42 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn mesh_payload_parse_election_start() {
-        let result = MeshPayload::parse("election-start", serde_json::json!(null)).unwrap();
-        assert!(matches!(result, MeshPayload::ElectionStart));
-        assert_eq!(result.message_type(), MeshMessageType::ElectionStart);
-    }
-
-    #[test]
-    fn mesh_payload_parse_election_start_legacy_rejected() {
-        let result = MeshPayload::parse("election:start", serde_json::json!({}));
-        assert!(result.is_err(), "legacy colon-separated names should be rejected");
-    }
-
-    #[test]
-    fn mesh_payload_parse_election_candidate() {
-        let payload = serde_json::json!({
-            "deviceId": "dev-1",
-            "uptime": 120000,
-            "userDesignated": false
-        });
-        let result = MeshPayload::parse("election-candidate", payload).unwrap();
-        assert!(matches!(result, MeshPayload::ElectionCandidate(_)));
-        assert_eq!(result.message_type(), MeshMessageType::ElectionCandidate);
-    }
-
-    #[test]
-    fn mesh_payload_parse_election_result() {
-        let payload = serde_json::json!({
-            "newPrimaryId": "dev-2",
-            "reason": "election"
-        });
-        let result = MeshPayload::parse("election-result", payload).unwrap();
-        assert!(matches!(result, MeshPayload::ElectionResult(_)));
-        assert_eq!(result.message_type(), MeshMessageType::ElectionResult);
-    }
-
-    #[test]
     fn mesh_payload_parse_route_message() {
         let payload = serde_json::json!({
             "targetDeviceId": "dev-3",
@@ -819,12 +733,6 @@ mod tests {
         .unwrap();
         assert_eq!(announce.message_type(), MeshMessageType::DeviceAnnounce);
 
-        let election_start =
-            MeshPayload::parse("election-start", serde_json::json!(null)).unwrap();
-        assert_eq!(
-            election_start.message_type(),
-            MeshMessageType::ElectionStart
-        );
     }
 
     // ======================================================================
@@ -837,9 +745,6 @@ mod tests {
             MeshMessageType::DeviceAnnounce,
             MeshMessageType::DeviceList,
             MeshMessageType::DeviceGoodbye,
-            MeshMessageType::ElectionStart,
-            MeshMessageType::ElectionCandidate,
-            MeshMessageType::ElectionResult,
             MeshMessageType::RouteMessage,
             MeshMessageType::RouteBroadcast,
         ];

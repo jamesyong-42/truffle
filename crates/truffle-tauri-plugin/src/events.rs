@@ -3,7 +3,6 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use truffle_core::mesh::node::MeshNodeEvent;
 use truffle_core::http::proxy::ProxyEvent;
-use truffle_core::types::DeviceRole;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Event payloads emitted to the Tauri frontend
@@ -71,22 +70,6 @@ pub fn emit_mesh_event<R: Runtime>(app: &AppHandle<R>, event: &MeshNodeEvent) {
             event_type: "devicesChanged".to_string(),
             device_id: None,
             payload: serde_json::to_value(devices).unwrap_or(serde_json::Value::Null),
-        },
-        MeshNodeEvent::RoleChanged { role, is_primary } => MeshEventPayload {
-            event_type: "roleChanged".to_string(),
-            device_id: None,
-            payload: serde_json::json!({
-                "role": match role {
-                    DeviceRole::Primary => "primary",
-                    DeviceRole::Secondary => "secondary",
-                },
-                "isPrimary": is_primary,
-            }),
-        },
-        MeshNodeEvent::PrimaryChanged(id) => MeshEventPayload {
-            event_type: "primaryChanged".to_string(),
-            device_id: id.clone(),
-            payload: serde_json::Value::Null,
         },
         MeshNodeEvent::Message(msg) => MeshEventPayload {
             event_type: "message".to_string(),

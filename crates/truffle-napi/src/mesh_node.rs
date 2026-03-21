@@ -6,7 +6,6 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use tokio::sync::broadcast;
 
-use truffle_core::mesh::election::ElectionTimingConfig;
 use truffle_core::mesh::message_bus::MeshMessageBus;
 use truffle_core::mesh::node::{MeshNodeConfig, MeshTimingConfig};
 use truffle_core::protocol::envelope::MeshEnvelope;
@@ -45,15 +44,6 @@ impl NapiMeshNode {
     pub fn new(config: NapiMeshNodeConfig) -> Result<Self> {
         let timing = config.timing.as_ref();
 
-        let election_timing = ElectionTimingConfig {
-            election_timeout: Duration::from_millis(
-                timing.and_then(|t| t.election_timeout_ms).unwrap_or(10_000) as u64,
-            ),
-            primary_loss_grace: Duration::from_millis(
-                timing.and_then(|t| t.primary_loss_grace_ms).unwrap_or(15_000) as u64,
-            ),
-        };
-
         let mesh_timing = MeshTimingConfig {
             announce_interval: Duration::from_millis(
                 timing.and_then(|t| t.announce_interval_ms).unwrap_or(30_000) as u64,
@@ -61,7 +51,6 @@ impl NapiMeshNode {
             discovery_timeout: Duration::from_millis(
                 timing.and_then(|t| t.discovery_timeout_ms).unwrap_or(5_000) as u64,
             ),
-            election: election_timing,
         };
 
         let core_config = MeshNodeConfig {
@@ -69,7 +58,6 @@ impl NapiMeshNode {
             device_name: config.device_name,
             device_type: config.device_type.clone(),
             hostname_prefix: config.hostname_prefix.clone(),
-            prefer_primary: config.prefer_primary.unwrap_or(false),
             capabilities: config.capabilities.unwrap_or_default(),
             metadata: None,
             timing: mesh_timing,
@@ -160,28 +148,6 @@ impl NapiMeshNode {
     pub async fn device_by_id(&self, id: String) -> Result<Option<NapiBaseDevice>> {
         let device = self.runtime.mesh_node().device_by_id(&id).await;
         Ok(device.map(NapiBaseDevice::from))
-    }
-
-    /// Check if this node is the primary.
-    #[napi]
-    pub async fn is_primary(&self) -> Result<bool> {
-        Ok(self.runtime.is_primary().await)
-    }
-
-    /// Get the current primary device ID.
-    #[napi]
-    pub async fn primary_id(&self) -> Result<Option<String>> {
-        Ok(self.runtime.mesh_node().primary_id().await)
-    }
-
-    /// Get the current role as a string ("primary" or "secondary").
-    #[napi]
-    pub async fn role(&self) -> Result<String> {
-        let role = self.runtime.mesh_node().role().await;
-        Ok(match role {
-            truffle_core::types::DeviceRole::Primary => "primary".to_string(),
-            truffle_core::types::DeviceRole::Secondary => "secondary".to_string(),
-        })
     }
 
     /// Send a mesh envelope to a specific device.

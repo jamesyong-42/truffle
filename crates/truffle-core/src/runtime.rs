@@ -25,12 +25,11 @@ use crate::http::pwa::{PwaConfig, PwaHandler};
 use crate::http::router::{HttpHandler, HttpRouter, HttpRouterBridgeHandler, RouterError};
 use crate::http::static_site::{StaticFile, StaticHandler};
 use crate::http::ws_handler::WsUpgradeHandler;
-use crate::mesh::election::ElectionTimingConfig;
 use crate::mesh::message_bus::MeshMessageBus;
 use crate::mesh::node::{IncomingMeshMessage, MeshNode, MeshNodeConfig, MeshNodeEvent, MeshTimingConfig};
 use crate::protocol::envelope::MeshEnvelope;
 use crate::transport::connection::{ConnectionManager, TransportConfig};
-use crate::types::{BaseDevice, DeviceRole, TailnetPeer};
+use crate::types::{BaseDevice, TailnetPeer};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TruffleEvent -- unified public event enum
@@ -85,12 +84,6 @@ pub enum TruffleEvent {
     /// The full device list changed.
     DevicesChanged(Vec<BaseDevice>),
 
-    // -- Mesh / Election --
-    /// This node's role changed.
-    RoleChanged { role: DeviceRole, is_primary: bool },
-    /// The mesh primary changed (None = no primary).
-    PrimaryChanged { primary_id: Option<String> },
-
     // -- Message --
     /// An application-level message was received from a peer.
     Message(IncomingMeshMessage),
@@ -138,15 +131,12 @@ pub struct TruffleRuntimeBuilder {
     auth_key: Option<String>,
     ephemeral: Option<bool>,
     tags: Option<Vec<String>>,
-    prefer_primary: bool,
     capabilities: Vec<String>,
     features: Vec<String>,
     metadata: Option<HashMap<String, serde_json::Value>>,
     // Timing
     announce_interval: Option<Duration>,
     discovery_timeout: Option<Duration>,
-    election_timeout: Option<Duration>,
-    primary_loss_grace: Option<Duration>,
 }
 
 impl TruffleRuntimeBuilder {
@@ -162,14 +152,11 @@ impl TruffleRuntimeBuilder {
             auth_key: None,
             ephemeral: None,
             tags: None,
-            prefer_primary: false,
             capabilities: vec![],
             features: vec![],
             metadata: None,
             announce_interval: None,
             discovery_timeout: None,
-            election_timeout: None,
-            primary_loss_grace: None,
         }
     }
 
@@ -207,12 +194,6 @@ impl TruffleRuntimeBuilder {
     /// Set ACL tags to advertise (e.g. `["tag:truffle"]`).
     pub fn tags(mut self, tags: Vec<String>) -> Self {
         self.tags = Some(tags);
-        self
-    }
-
-    /// Set whether this node should be a primary candidate.
-    pub fn primary_candidate(mut self, val: bool) -> Self {
-        self.prefer_primary = val;
         self
     }
 
@@ -264,18 +245,6 @@ impl TruffleRuntimeBuilder {
         self
     }
 
-    /// Set the election timeout.
-    pub fn election_timeout(mut self, d: Duration) -> Self {
-        self.election_timeout = Some(d);
-        self
-    }
-
-    /// Set the primary loss grace period.
-    pub fn primary_loss_grace(mut self, d: Duration) -> Self {
-        self.primary_loss_grace = Some(d);
-        self
-    }
-
     /// Build the `TruffleRuntime`.
     ///
     /// Returns `(TruffleRuntime, broadcast::Receiver<MeshNodeEvent>)` for
@@ -292,19 +261,11 @@ impl TruffleRuntimeBuilder {
         let device_type = self.device_type
             .unwrap_or_else(|| "desktop".to_string());
 
-        let election_timing = ElectionTimingConfig {
-            election_timeout: self.election_timeout
-                .unwrap_or_else(|| ElectionTimingConfig::default().election_timeout),
-            primary_loss_grace: self.primary_loss_grace
-                .unwrap_or_else(|| ElectionTimingConfig::default().primary_loss_grace),
-        };
-
         let mesh_timing = MeshTimingConfig {
             announce_interval: self.announce_interval
                 .unwrap_or_else(|| MeshTimingConfig::default().announce_interval),
             discovery_timeout: self.discovery_timeout
                 .unwrap_or_else(|| MeshTimingConfig::default().discovery_timeout),
-            election: election_timing,
         };
 
         let mesh_config = MeshNodeConfig {
@@ -312,7 +273,6 @@ impl TruffleRuntimeBuilder {
             device_name,
             device_type,
             hostname_prefix,
-            prefer_primary: self.prefer_primary,
             capabilities: self.capabilities,
             metadata: self.metadata,
             timing: mesh_timing,
@@ -506,11 +466,6 @@ impl TruffleRuntime {
     /// Get all known devices in the mesh.
     pub async fn devices(&self) -> Vec<BaseDevice> {
         self.mesh_node.devices().await
-    }
-
-    /// Check if this node is the primary.
-    pub async fn is_primary(&self) -> bool {
-        self.mesh_node.is_primary().await
     }
 
     /// Send a mesh envelope to a specific device.
@@ -848,8 +803,6 @@ pub fn mesh_event_to_truffle(event: MeshNodeEvent) -> TruffleEvent {
         MeshNodeEvent::DeviceUpdated(d) => TruffleEvent::DeviceUpdated(d),
         MeshNodeEvent::DeviceOffline(id) => TruffleEvent::DeviceOffline(id),
         MeshNodeEvent::DevicesChanged(devices) => TruffleEvent::DevicesChanged(devices),
-        MeshNodeEvent::RoleChanged { role, is_primary } => TruffleEvent::RoleChanged { role, is_primary },
-        MeshNodeEvent::PrimaryChanged(id) => TruffleEvent::PrimaryChanged { primary_id: id },
         MeshNodeEvent::Message(msg) => TruffleEvent::Message(msg),
         MeshNodeEvent::Error(err) => TruffleEvent::Error(err),
     }
@@ -1019,7 +972,7 @@ pub enum RuntimeError {
 mod tests {
     use super::*;
     use crate::mesh::node::IncomingMeshMessage;
-    use crate::types::{BaseDevice, DeviceRole, DeviceStatus};
+    use crate::types::{BaseDevice, DeviceStatus};
 
     fn test_runtime_config() -> RuntimeConfig {
         RuntimeConfig {
@@ -1028,7 +981,6 @@ mod tests {
                 device_name: "Test Device".to_string(),
                 device_type: "desktop".to_string(),
                 hostname_prefix: "app".to_string(),
-                prefer_primary: false,
                 capabilities: vec![],
                 metadata: None,
                 timing: crate::mesh::node::MeshTimingConfig::default(),
@@ -1048,7 +1000,6 @@ mod tests {
             tailscale_hostname: "app-desktop-dev-abc".to_string(),
             tailscale_dns_name: Some("app-desktop-dev-abc.tail1234.ts.net".to_string()),
             tailscale_ip: Some("100.64.0.2".to_string()),
-            role: Some(DeviceRole::Secondary),
             status: DeviceStatus::Online,
             capabilities: vec!["pty".to_string()],
             metadata: None,
@@ -1125,7 +1076,6 @@ mod tests {
             .sidecar_path("/usr/local/bin/truffle-sidecar")
             .auth_key("tskey-auth-xxx")
             .ephemeral(false)
-            .primary_candidate(true)
             .device_name("My Laptop")
             .device_type("server")
             .features(vec!["pty".to_string(), "file-transfer".to_string()])
@@ -1143,19 +1093,6 @@ mod tests {
 
         let config = runtime.config();
         assert_eq!(config.mesh.device_type, "desktop", "default device_type should be 'desktop'");
-        assert!(!config.mesh.prefer_primary, "default prefer_primary should be false");
-    }
-
-    #[test]
-    fn builder_primary_candidate_maps_to_prefer_primary() {
-        let (runtime, _rx) = TruffleRuntime::builder()
-            .hostname("primary-test")
-            .primary_candidate(true)
-            .build()
-            .expect("builder should succeed");
-
-        let config = runtime.config();
-        assert!(config.mesh.prefer_primary, "primary_candidate(true) should set prefer_primary");
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1173,8 +1110,6 @@ mod tests {
             TruffleEvent::DeviceDiscovered(test_base_device()),
             TruffleEvent::DeviceUpdated(test_base_device()),
             TruffleEvent::DeviceOffline("dev-abc".to_string()),
-            TruffleEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true },
-            TruffleEvent::PrimaryChanged { primary_id: Some("dev-abc".to_string()) },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("something went wrong".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: Some(1), stderr_tail: "panic".to_string() },
@@ -1197,8 +1132,6 @@ mod tests {
             TruffleEvent::DeviceDiscovered(test_base_device()),
             TruffleEvent::DeviceUpdated(test_base_device()),
             TruffleEvent::DeviceOffline("dev-abc".to_string()),
-            TruffleEvent::RoleChanged { role: DeviceRole::Secondary, is_primary: false },
-            TruffleEvent::PrimaryChanged { primary_id: None },
             TruffleEvent::Message(test_incoming_message()),
             TruffleEvent::Error("err".to_string()),
             TruffleEvent::SidecarCrashed { exit_code: None, stderr_tail: String::new() },
@@ -1221,9 +1154,6 @@ mod tests {
         let _discovered = TruffleEvent::DeviceDiscovered(test_base_device());
         let _updated = TruffleEvent::DeviceUpdated(test_base_device());
         let _offline = TruffleEvent::DeviceOffline("some-id".to_string());
-        let _role = TruffleEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true };
-        let _primary = TruffleEvent::PrimaryChanged { primary_id: Some("x".to_string()) };
-        let _primary_none = TruffleEvent::PrimaryChanged { primary_id: None };
         let _msg = TruffleEvent::Message(test_incoming_message());
         let _err = TruffleEvent::Error("test error".to_string());
         let _crash = TruffleEvent::SidecarCrashed { exit_code: Some(137), stderr_tail: "killed".to_string() };
@@ -1316,15 +1246,6 @@ mod tests {
         let devices_changed = mesh_event_to_truffle(MeshNodeEvent::DevicesChanged(vec![device]));
         assert!(matches!(devices_changed, TruffleEvent::DevicesChanged(devices) if devices.len() == 1));
 
-        let role = mesh_event_to_truffle(MeshNodeEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true });
-        assert!(matches!(role, TruffleEvent::RoleChanged { role: DeviceRole::Primary, is_primary: true }));
-
-        let primary = mesh_event_to_truffle(MeshNodeEvent::PrimaryChanged(Some("dev-abc".into())));
-        assert!(matches!(primary, TruffleEvent::PrimaryChanged { primary_id: Some(id) } if id == "dev-abc"));
-
-        let primary_none = mesh_event_to_truffle(MeshNodeEvent::PrimaryChanged(None));
-        assert!(matches!(primary_none, TruffleEvent::PrimaryChanged { primary_id: None }));
-
         let msg = mesh_event_to_truffle(MeshNodeEvent::Message(test_incoming_message()));
         assert!(matches!(msg, TruffleEvent::Message(_)));
     }
@@ -1375,7 +1296,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(runtime.device_id().await, "acc-dev");
-        assert!(!runtime.is_primary().await);
 
         let local = runtime.local_device().await;
         assert_eq!(local.id, "acc-dev");

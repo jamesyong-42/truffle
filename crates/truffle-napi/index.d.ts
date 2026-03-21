@@ -60,14 +60,15 @@ export declare class NapiFileTransferAdapter {
  * NapiMeshNode - Node.js wrapper for TruffleRuntime.
  *
  * Manages the full lifecycle: BridgeManager, GoShim sidecar, ConnectionManager,
- * and MeshNode via the unified TruffleRuntime. The sidecar provides Tailscale
+ * and MeshNode via the unified `TruffleRuntime`. The sidecar provides Tailscale
  * connectivity; the bridge routes TCP streams; the connection manager upgrades
  * them to WebSocket; and the mesh node handles device discovery, election,
  * and messaging.
  *
- * ## RFC 009 Phase 5
- * Message events normalize namespace and message type strings to kebab-case.
- * Protocol version info is exposed via `protocolVersion()`.
+ * ## RFC 008 Phase 3
+ * This wrapper now delegates to `TruffleRuntime` instead of manually wiring
+ * individual components. Events are delivered as `TruffleEvent` through the
+ * unified channel, converted to `NapiMeshEvent` for JS consumption.
  */
 export declare class NapiMeshNode {
   /**
@@ -82,6 +83,9 @@ export declare class NapiMeshNode {
    * If `sidecarPath` was provided, this spawns the Go sidecar process,
    * creates a BridgeManager to route connections, and wires everything
    * together for full Tailscale mesh networking.
+   *
+   * Events are delivered through the unified `TruffleEvent` channel,
+   * converted to `NapiMeshEvent` for JS consumption.
    */
   start(): Promise<void>
   /** Stop the mesh node and sidecar. */
