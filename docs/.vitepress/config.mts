@@ -4,6 +4,7 @@ export default defineConfig({
   title: 'Truffle',
   description: 'Cross-device mesh networking for TypeScript apps',
   base: '/truffle/',
+  srcExclude: ['rfcs/**', 'cross-platform-*.md', 'tailscale-*.md', 'cli-design.md'],
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
