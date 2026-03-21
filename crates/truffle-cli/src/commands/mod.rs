@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod down;
 pub mod expose;
 pub mod http;
+pub mod install_sidecar;
 pub mod ls;
 pub mod peers;
 pub mod ping;

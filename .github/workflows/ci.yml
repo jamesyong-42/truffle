@@ -32,3 +32,39 @@ jobs:
 
       - name: Test
         run: pnpm run test
+
+  cargo-test:
+    name: Rust tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: packages/sidecar-slim/go.sum
+
+      - name: Build Go sidecar (Unix)
+        if: runner.os != 'Windows'
+        working-directory: packages/sidecar-slim
+        env:
+          CGO_ENABLED: '0'
+        run: go build -ldflags "-s -w" -o sidecar-slim .
+
+      - name: Build Go sidecar (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packages/sidecar-slim
+        env:
+          CGO_ENABLED: '0'
+        run: go build -ldflags "-s -w" -o sidecar-slim.exe .
+
+      - name: Cargo test
+        run: cargo test --workspace --exclude truffle-tauri-plugin

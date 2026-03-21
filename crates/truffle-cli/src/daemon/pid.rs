@@ -158,4 +158,58 @@ mod tests {
         let pid = std::process::id();
         assert!(is_process_running(pid));
     }
+
+    #[test]
+    fn test_is_process_running_nonexistent() {
+        // PID 999999 is extremely unlikely to be running in test environments.
+        // On macOS/Linux, the max PID is typically 99999 or 4194304, so 999999
+        // should not exist. On Windows, PIDs can go higher but this PID is
+        // still very unlikely to be in use during tests.
+        assert!(
+            !is_process_running(999_999),
+            "PID 999999 should not be running"
+        );
+    }
+
+    #[test]
+    fn test_pid_file_roundtrip() {
+        // Write the current PID, read it back, verify they match.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("roundtrip.pid");
+
+        write_pid(&pid_path).unwrap();
+
+        let read_back = read_pid(&pid_path).unwrap();
+        assert_eq!(
+            read_back,
+            Some(std::process::id()),
+            "Read-back PID should match current process"
+        );
+
+        // Also verify that the process identified by the PID file is running
+        let pid = read_back.unwrap();
+        assert!(
+            is_process_running(pid),
+            "PID from file should be a running process"
+        );
+    }
+
+    #[test]
+    fn test_pid_stale_detection_with_dead_pid() {
+        // Write a PID that is definitely not running, then verify
+        // check_stale_pid detects it as stale.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("dead.pid");
+
+        // Write a PID that cannot be running (very high value)
+        fs::write(&pid_path, "999999").unwrap();
+
+        let stale = check_stale_pid(&pid_path).unwrap();
+        assert!(stale, "PID 999999 should be detected as stale");
+
+        // Conversely, write the current process PID -- should NOT be stale
+        write_pid(&pid_path).unwrap();
+        let stale = check_stale_pid(&pid_path).unwrap();
+        assert!(!stale, "Current process PID should not be detected as stale");
+    }
 }

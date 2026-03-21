@@ -445,4 +445,97 @@ mod tests {
 
         client_handle.await.unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_ipc_multiple_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("multi.sock");
+
+        let listener = IpcListener::bind(&sock_path).unwrap();
+
+        let sock_clone = sock_path.clone();
+        let clients_handle = tokio::spawn(async move {
+            // Connect 3 sequential clients, each sending a unique message
+            for i in 0..3u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let stream = IpcStream::connect(&sock_clone).await.unwrap();
+                let (_, mut writer) = stream.into_split();
+                writer
+                    .write_line(&format!("client-{i}"))
+                    .await
+                    .unwrap();
+                // Drop the stream to close the connection before opening the next
+                drop(writer);
+            }
+        });
+
+        // Accept and verify 3 sequential connections
+        for i in 0..3u32 {
+            let timeout = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                listener.accept(),
+            )
+            .await
+            .expect("accept timed out")
+            .expect("accept failed");
+
+            let (mut reader, _) = timeout.into_split();
+            let line = reader.next_line().await.unwrap();
+            assert_eq!(
+                line,
+                Some(format!("client-{i}")),
+                "Expected message from client-{i}"
+            );
+        }
+
+        clients_handle.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_ipc_large_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("large.sock");
+
+        let listener = IpcListener::bind(&sock_path).unwrap();
+
+        // Build a ~100KB JSON line (no embedded newlines)
+        let payload = "x".repeat(100_000);
+        let large_msg = format!(r#"{{"data":"{}"}}"#, payload);
+        let large_msg_clone = large_msg.clone();
+
+        let sock_clone = sock_path.clone();
+        let client_handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let stream = IpcStream::connect(&sock_clone).await.unwrap();
+            let (_, mut writer) = stream.into_split();
+            writer.write_line(&large_msg_clone).await.unwrap();
+        });
+
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            listener.accept(),
+        )
+        .await
+        .expect("accept timed out")
+        .unwrap();
+
+        let (mut reader, _) = stream.into_split();
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.next_line(),
+        )
+        .await
+        .expect("read timed out")
+        .unwrap();
+
+        assert_eq!(
+            received.as_deref(),
+            Some(large_msg.as_str()),
+            "100KB message should be received intact"
+        );
+
+        client_handle.await.unwrap();
+    }
 }

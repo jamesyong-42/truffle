@@ -216,6 +216,21 @@ enum Commands {
         includes a fix suggestion.")]
     Doctor,
 
+    /// Download the Go sidecar binary for your platform
+    #[command(
+        name = "install-sidecar",
+        long_about = "Download the Go sidecar binary for your platform.\n\n\
+            This is a fallback for users who install truffle via 'cargo install'\n\
+            (which only builds the Rust CLI, not the Go sidecar). Downloads\n\
+            the pre-built sidecar from GitHub releases and installs it to\n\
+            the truffle bin directory."
+    )]
+    InstallSidecar {
+        /// Custom install directory (default: ~/.config/truffle/bin/)
+        #[arg(long = "dir")]
+        dir: Option<String>,
+    },
+
     /// Generate shell completions
     #[command(long_about = "Generate shell completions.\n\n\
         Prints a completion script to stdout. Pipe it to the right location:\n\
@@ -370,6 +385,10 @@ async fn main() {
 
         // ── Diagnostics ───────────────────────────────────────────────────
         Commands::Doctor => commands::doctor::run(&config).await,
+
+        Commands::InstallSidecar { dir } => {
+            commands::install_sidecar::run(dir.as_deref()).await
+        }
 
         Commands::Completion { shell } => {
             commands::completion::run(shell);
