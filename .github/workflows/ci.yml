@@ -57,14 +57,16 @@ jobs:
         working-directory: packages/sidecar-slim
         env:
           CGO_ENABLED: '0'
-        run: go build -ldflags "-s -w" -o sidecar-slim .
+        run: mkdir -p bin && go build -ldflags "-s -w" -o bin/sidecar-slim .
 
       - name: Build Go sidecar (Windows)
         if: runner.os == 'Windows'
         working-directory: packages/sidecar-slim
         env:
           CGO_ENABLED: '0'
-        run: go build -ldflags "-s -w" -o sidecar-slim.exe .
+        run: |
+          if (!(Test-Path bin)) { New-Item -ItemType Directory -Path bin }
+          go build -ldflags "-s -w" -o bin/sidecar-slim.exe .
 
       - name: Cargo test
         run: cargo test --workspace --exclude truffle-tauri-plugin
