@@ -14,6 +14,7 @@ pub mod send;
 pub mod serve;
 pub mod status;
 pub mod tcp;
+pub mod uninstall;
 pub mod up;
 pub mod ws;
 

@@ -6,6 +6,7 @@
 #   --version <tag>    Install a specific version (e.g., v0.1.0)
 #   --dir <path>       Custom install directory
 #   --no-verify        Skip running 'truffle doctor' after install
+#   --uninstall        Remove truffle and clean up PATH
 #
 # Environment:
 #   TRUFFLE_INSTALL_DIR   Override default install directory
@@ -23,6 +24,84 @@ VERIFY=true
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Parse arguments
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Uninstall mode: curl ... | sh -s -- --uninstall
+# ═══════════════════════════════════════════════════════════════════════════
+
+if [ "${1:-}" = "--uninstall" ] || [ "${UNINSTALL:-}" = "1" ]; then
+    echo ""
+    echo "truffle uninstaller"
+    echo "═══════════════════════════════════════"
+    echo ""
+
+    UNINSTALL_DIR="${TRUFFLE_INSTALL_DIR:-$HOME/.config/truffle/bin}"
+    CONFIG_DIR="$HOME/.config/truffle"
+
+    # Remove binaries
+    if [ -d "$UNINSTALL_DIR" ]; then
+        echo "  Removing binaries from $UNINSTALL_DIR..."
+        rm -f "$UNINSTALL_DIR/truffle" "$UNINSTALL_DIR/sidecar-slim" "$UNINSTALL_DIR/truffle-sidecar"
+        rmdir "$UNINSTALL_DIR" 2>/dev/null || true
+        echo "  ✓ Binaries removed"
+    else
+        echo "  No binaries found at $UNINSTALL_DIR"
+    fi
+
+    # Remove state (optional)
+    if [ -d "$CONFIG_DIR/state" ]; then
+        printf "  Remove Tailscale state at %s? [y/N] " "$CONFIG_DIR/state"
+        read -r REPLY
+        if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
+            rm -rf "$CONFIG_DIR/state"
+            echo "  ✓ State removed"
+        else
+            echo "  State kept"
+        fi
+    fi
+
+    # Remove config
+    if [ -f "$CONFIG_DIR/config.toml" ]; then
+        printf "  Remove config file? [y/N] "
+        read -r REPLY
+        if [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]; then
+            rm -f "$CONFIG_DIR/config.toml"
+            echo "  ✓ Config removed"
+        fi
+    fi
+
+    rmdir "$CONFIG_DIR" 2>/dev/null || true
+
+    # Clean up shell profile
+    SHELL_NAME=$(basename "${SHELL:-/bin/sh}")
+    case "$SHELL_NAME" in
+        zsh)  PROFILE="$HOME/.zshrc" ;;
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then PROFILE="$HOME/.bashrc"
+            else PROFILE="$HOME/.bash_profile"; fi ;;
+        *)    PROFILE="$HOME/.profile" ;;
+    esac
+
+    if [ -n "$PROFILE" ] && [ -f "$PROFILE" ]; then
+        if grep -q "# Added by truffle installer" "$PROFILE" 2>/dev/null; then
+            sed -i.bak '/# Added by truffle installer/d' "$PROFILE"
+            sed -i.bak "\|\.config/truffle/bin|d" "$PROFILE"
+            rm -f "${PROFILE}.bak"
+            echo "  ✓ Removed PATH entry from $PROFILE"
+        fi
+    fi
+
+    echo ""
+    echo "  ✓ truffle uninstalled"
+    echo ""
+    echo "  Open a new terminal for PATH changes to take effect."
+    echo ""
+    exit 0
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Parse install arguments
 # ═══════════════════════════════════════════════════════════════════════════
 
 while [ $# -gt 0 ]; do
@@ -242,3 +321,4 @@ if [ "$VERIFY" = true ]; then
 fi
 
 echo "Run 'truffle up' to start your node and join the mesh."
+

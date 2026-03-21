@@ -216,6 +216,19 @@ enum Commands {
         includes a fix suggestion.")]
     Doctor,
 
+    /// Remove truffle from this machine
+    #[command(
+        long_about = "Remove truffle from this machine.\n\n\
+            Stops the daemon, removes binaries and sidecar, cleans up\n\
+            PATH from shell profile. Use --purge to also remove config\n\
+            and Tailscale state."
+    )]
+    Uninstall {
+        /// Also remove config and Tailscale state
+        #[arg(long)]
+        purge: bool,
+    },
+
     /// Download the Go sidecar binary for your platform
     #[command(
         name = "install-sidecar",
@@ -385,6 +398,8 @@ async fn main() {
 
         // ── Diagnostics ───────────────────────────────────────────────────
         Commands::Doctor => commands::doctor::run(&config).await,
+
+        Commands::Uninstall { purge } => commands::uninstall::run(!purge).await,
 
         Commands::InstallSidecar { dir } => {
             commands::install_sidecar::run(dir.as_deref()).await
