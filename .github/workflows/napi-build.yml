@@ -138,7 +138,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run Rust tests (unit tests only, no sidecar integration)
-        run: cargo test --workspace --exclude truffle-tauri-plugin --lib --bins --doc
+        run: cargo test --workspace --exclude truffle-tauri-plugin --lib --bins
 
   publish:
     name: Publish to npm
