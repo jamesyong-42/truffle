@@ -164,7 +164,7 @@ mod platform {
 mod platform {
     use std::io;
     use std::path::Path;
-    use tokio::io::{split, AsyncBufReadExt, AsyncReadHalf, AsyncWriteHalf, AsyncWriteExt, BufReader};
+    use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
     use tokio::net::windows::named_pipe::{
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
     };
@@ -203,6 +203,7 @@ mod platform {
     /// A cross-platform IPC stream (a single connection).
     ///
     /// On Windows, this is either a server-side or client-side named pipe.
+    #[derive(Debug)]
     pub enum IpcStream {
         Server(NamedPipeServer),
         Client(NamedPipeClient),

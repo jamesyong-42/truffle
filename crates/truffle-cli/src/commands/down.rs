@@ -115,7 +115,7 @@ fn force_kill_process(pid: u32) {
     use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if handle != 0 {
+        if !handle.is_null() {
             TerminateProcess(handle, 1);
             CloseHandle(handle);
         }
