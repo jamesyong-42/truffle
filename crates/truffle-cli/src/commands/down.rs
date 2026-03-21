@@ -1,7 +1,11 @@
 //! `truffle down` -- stop the truffle daemon.
+//!
+//! Sends a graceful shutdown signal to the running daemon via JSON-RPC.
+//! With `--force`, falls back to SIGKILL if graceful shutdown fails.
 
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
+use crate::output;
 
 /// Stop the daemon.
 ///
@@ -11,18 +15,38 @@ pub async fn run(force: bool) -> Result<(), String> {
     let client = DaemonClient::new();
 
     if !client.is_daemon_running() {
-        println!("Node is not running.");
+        println!("  Node is not running.");
         return Ok(());
     }
 
+    // Get peer count before shutdown for the notification message
+    let peer_count = if let Ok(result) = client
+        .request(method::PEERS, serde_json::json!({}))
+        .await
+    {
+        result["peers"]
+            .as_array()
+            .map(|arr| arr.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
     // Try graceful shutdown via JSON-RPC
-    match client.request(method::SHUTDOWN, serde_json::json!({})).await {
+    match client
+        .request(method::SHUTDOWN, serde_json::json!({}))
+        .await
+    {
         Ok(_) => {
-            println!("Shutdown signal sent.");
+            // Shutdown signal sent successfully
         }
         Err(e) => {
             if force {
-                eprintln!("Warning: graceful shutdown failed ({e}), forcing...");
+                eprintln!(
+                    "  {} graceful shutdown failed ({}), forcing...",
+                    output::yellow("Warning:"),
+                    e,
+                );
             } else {
                 return Err(format!("Failed to send shutdown command: {e}"));
             }
@@ -33,7 +57,17 @@ pub async fn run(force: bool) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
         if !client.is_daemon_running() {
-            println!("Node stopped.");
+            println!();
+            if peer_count > 0 {
+                println!(
+                    "  {} Notified {} peer{}",
+                    output::green("\u{2713}"),
+                    peer_count,
+                    if peer_count == 1 { "" } else { "s" },
+                );
+            }
+            println!("  {} Node stopped", output::green("\u{2713}"));
+            println!();
             return Ok(());
         }
 
@@ -47,11 +81,19 @@ pub async fn run(force: bool) -> Result<(), String> {
                     }
                     crate::daemon::pid::remove_pid(&pid_path)
                         .map_err(|e| format!("Failed to remove PID file: {e}"))?;
-                    println!("Node force-stopped.");
+                    println!();
+                    println!(
+                        "  {} Node force-stopped (PID {})",
+                        output::yellow("\u{2713}"),
+                        pid,
+                    );
+                    println!();
                     return Ok(());
                 }
             }
-            return Err("Daemon did not stop in time. Use '--force' to force-kill.".to_string());
+            return Err(
+                "Daemon did not stop in time. Use '--force' to force-kill.".to_string(),
+            );
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

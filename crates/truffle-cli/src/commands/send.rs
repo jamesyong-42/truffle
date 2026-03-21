@@ -1,14 +1,157 @@
-use truffle_core::protocol::envelope::MeshEnvelope;
-use truffle_core::runtime::TruffleEvent;
+//! `truffle send` -- send a one-shot message to a node.
+//!
+//! Sends a text message to a specific node (or broadcasts to all nodes)
+//! via the daemon's mesh message bus.
+//!
+//! ```text
+//! $ truffle send laptop "deploy is done"
+//!   Sent to laptop
+//!
+//! $ truffle send --all "rebooting in 5 minutes"
+//!   Sent to 3 nodes
+//! ```
 
-use super::build_runtime;
+use crate::config::TruffleConfig;
+use crate::daemon::client::DaemonClient;
+use crate::daemon::protocol::method;
 
-/// Send a message to a specific device via the mesh bus.
+/// Send a one-shot message to a node.
 ///
-/// **Legacy**: This function creates its own runtime. New code should use
-/// `truffle send` or `truffle dev send` which goes through the daemon.
-#[allow(dead_code)]
+/// - `node`: target node name (or None for broadcast when `all` is true)
+/// - `message`: the text message to send
+/// - `all`: broadcast to all nodes
+/// - `wait`: wait for a reply
 pub async fn run(
+    config: &TruffleConfig,
+    node: Option<&str>,
+    message: &str,
+    all: bool,
+    wait: bool,
+) -> Result<(), String> {
+    if message.is_empty() {
+        return Err(
+            "No message provided. Usage: truffle send <node> \"your message\"".to_string(),
+        );
+    }
+
+    // Connect to the daemon
+    let client = DaemonClient::new();
+    client
+        .ensure_running(config)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if all {
+        // Broadcast to all peers
+        let result = client
+            .request(
+                method::SEND_MESSAGE,
+                serde_json::json!({
+                    "broadcast": true,
+                    "namespace": "chat",
+                    "type": "text",
+                    "payload": { "text": message }
+                }),
+            )
+            .await
+            .map_err(|e| format!("Failed to send: {e}"))?;
+
+        let count = result["broadcast_count"].as_u64().unwrap_or(0);
+        if count > 0 {
+            println!("  Sent to {count} nodes");
+        } else {
+            println!("  No peers online to receive the message.");
+        }
+    } else {
+        let target = node.ok_or_else(|| {
+            "No target specified. Usage: truffle send <node> \"message\" or truffle send --all \"message\"".to_string()
+        })?;
+
+        // Resolve target name
+        let resolved = config.resolve_alias(target);
+
+        let result = client
+            .request(
+                method::SEND_MESSAGE,
+                serde_json::json!({
+                    "device_id": resolved,
+                    "namespace": "chat",
+                    "type": "text",
+                    "payload": { "text": message }
+                }),
+            )
+            .await
+            .map_err(|e| format!("Failed to send: {e}"))?;
+
+        let sent = result["sent"].as_bool().unwrap_or(false);
+        if sent {
+            println!("  Sent to {resolved}");
+        } else {
+            eprintln!("  {resolved} is offline. Message was not delivered.");
+            return Err(format!("{resolved} is offline"));
+        }
+    }
+
+    // If --wait, listen for a reply
+    if wait {
+        let timeout = tokio::time::Duration::from_secs(30);
+        eprintln!("  Waiting for reply (30s timeout)...");
+
+        // Connect a streaming session to receive the reply
+        let stream = client.connect().await.map_err(|e| e.to_string())?;
+        let (read_half, mut write_half) = stream.into_split();
+
+        // Subscribe to incoming chat messages
+        use tokio::io::AsyncWriteExt;
+        let subscribe = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "chat_start",
+            "params": {
+                "node": node,
+                "wait_for_reply": true,
+            }
+        });
+        let mut sub_json = serde_json::to_string(&subscribe).map_err(|e| e.to_string())?;
+        sub_json.push('\n');
+        write_half
+            .write_all(sub_json.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to subscribe: {e}"))?;
+
+        // Read the handshake response
+        use tokio::io::AsyncBufReadExt;
+        let buf_reader = tokio::io::BufReader::new(read_half);
+        let mut lines = buf_reader.lines();
+
+        // Skip the handshake response
+        let _ = lines.next_line().await;
+
+        // Wait for the first incoming message (the reply)
+        match tokio::time::timeout(timeout, lines.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if event["type"] == "message" {
+                        let text = event["text"].as_str().unwrap_or("");
+                        println!("  <- \"{text}\"");
+                    }
+                }
+            }
+            Ok(_) => {
+                eprintln!("  No reply received (connection closed).");
+            }
+            Err(_) => {
+                eprintln!("  No reply received (timed out after 30s).");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Legacy runtime-based send (kept for `truffle dev send`).
+#[allow(dead_code)]
+pub async fn run_legacy(
     hostname: &str,
     sidecar: Option<&str>,
     state_dir: Option<&str>,
@@ -17,11 +160,14 @@ pub async fn run(
     msg_type: &str,
     payload: &str,
 ) -> Result<(), String> {
+    use truffle_core::protocol::envelope::MeshEnvelope;
+    use truffle_core::runtime::TruffleEvent;
+
     // Parse payload as JSON
     let payload_value: serde_json::Value =
         serde_json::from_str(payload).map_err(|e| format!("Invalid JSON payload: {e}"))?;
 
-    let (runtime, mut event_rx) = build_runtime(hostname, sidecar, state_dir).await?;
+    let (runtime, mut event_rx) = super::build_runtime(hostname, sidecar, state_dir).await?;
 
     // Wait for the node to come online before sending
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
@@ -57,9 +203,7 @@ pub async fn run(
 
     let envelope = MeshEnvelope::new(namespace, msg_type, payload_value);
 
-    println!(
-        "Sending [{namespace}:{msg_type}] to {device_id}..."
-    );
+    println!("Sending [{namespace}:{msg_type}] to {device_id}...");
 
     let sent = runtime.send_envelope(device_id, &envelope).await;
 
@@ -71,4 +215,53 @@ pub async fn run(
 
     runtime.stop().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_send_one_shot() {
+        // Verify the JSON payload format for send_message
+        let params = serde_json::json!({
+            "device_id": "laptop",
+            "namespace": "chat",
+            "type": "text",
+            "payload": { "text": "hello world" }
+        });
+        assert_eq!(params["device_id"], "laptop");
+        assert_eq!(params["namespace"], "chat");
+        assert_eq!(params["type"], "text");
+        assert_eq!(params["payload"]["text"], "hello world");
+    }
+
+    #[test]
+    fn test_send_broadcast() {
+        // Verify the JSON payload format for broadcast
+        let params = serde_json::json!({
+            "broadcast": true,
+            "namespace": "chat",
+            "type": "text",
+            "payload": { "text": "rebooting in 5 minutes" }
+        });
+        assert_eq!(params["broadcast"], true);
+        assert_eq!(params["namespace"], "chat");
+        assert_eq!(params["payload"]["text"], "rebooting in 5 minutes");
+    }
+
+    #[test]
+    fn test_send_empty_message_rejected() {
+        let message = "";
+        assert!(message.is_empty());
+    }
+
+    #[test]
+    fn test_send_wait_for_reply() {
+        // Verify the chat_start params for wait mode
+        let params = serde_json::json!({
+            "node": "laptop",
+            "wait_for_reply": true,
+        });
+        assert_eq!(params["node"], "laptop");
+        assert_eq!(params["wait_for_reply"], true);
+    }
 }

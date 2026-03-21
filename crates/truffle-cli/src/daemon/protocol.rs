@@ -117,6 +117,10 @@ pub mod method {
     pub const PING: &str = "ping";
     /// Send a mesh message to a specific device.
     pub const SEND_MESSAGE: &str = "send_message";
+    /// Push a file to a remote node via Taildrop.
+    pub const PUSH_FILE: &str = "push_file";
+    /// Get (download) a file from a remote node.
+    pub const GET_FILE: &str = "get_file";
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

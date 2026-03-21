@@ -1,13 +1,19 @@
 //! `truffle up` -- start the truffle daemon.
+//!
+//! If `foreground` is true, runs the daemon inline with a live status dashboard.
+//! Otherwise, forks a background daemon process and shows a brief status summary.
 
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
+use crate::daemon::protocol::method;
 use crate::daemon::server::DaemonServer;
+use crate::output;
 
 /// Start the daemon.
 ///
-/// If `foreground` is true, run the daemon in the current process (blocking).
-/// Otherwise, fork a background process and return immediately.
+/// If `foreground` is true, run the daemon in the current process (blocking)
+/// with a live status dashboard. Otherwise, fork a background process and
+/// return immediately after showing a brief status.
 pub async fn run(
     config: &TruffleConfig,
     name: Option<&str>,
@@ -22,21 +28,77 @@ pub async fn run(
     // Check if daemon is already running
     let client = DaemonClient::new();
     if client.is_daemon_running() {
-        println!("Daemon is already running. Use 'truffle down' first, or 'truffle status' to check.");
+        // Try to get current status for a helpful message
+        if let Ok(result) = client
+            .request(method::STATUS, serde_json::json!({}))
+            .await
+        {
+            let name = result["name"].as_str().unwrap_or("-");
+            let uptime = result["uptime_secs"]
+                .as_u64()
+                .map(output::format_uptime)
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "Already running as {} (uptime: {}). Use 'truffle down' first, or 'truffle status' to check.",
+                output::bold(name),
+                uptime,
+            );
+        } else {
+            println!("Daemon is already running. Use 'truffle down' first, or 'truffle status' to check.");
+        }
         return Ok(());
     }
 
     if foreground {
-        // Run in foreground (blocking)
-        println!("Starting daemon in foreground...");
+        // Run in foreground (blocking) with dashboard output
+        println!();
+        println!("  {}", output::bold("truffle"));
+        println!(
+            "  {}",
+            output::dim(&"\u{2500}".repeat(39))
+        );
+        println!();
+        println!(
+            "  {:<12}{}",
+            "Node",
+            output::bold(&config.node.name)
+        );
+        println!(
+            "  {:<12}{} {}",
+            "Status",
+            output::status_indicator("connecting"),
+            output::status_label("connecting"),
+        );
+        println!();
+        println!(
+            "  Starting daemon in foreground (PID {})...",
+            std::process::id()
+        );
+
         let server = DaemonServer::start(&config).await?;
 
-        println!("node is up");
-        println!("  name:       {}", config.node.name);
-        println!("  socket:     {}", TruffleConfig::socket_path().display());
-        println!("  pid:        {}", std::process::id());
+        // Clear and reprint with actual status
         println!();
-        println!("Press Ctrl+C to stop.");
+        println!(
+            "  {:<12}{}",
+            "Socket",
+            output::dim(&TruffleConfig::socket_path().display().to_string()),
+        );
+        println!(
+            "  {:<12}{} {}",
+            "Status",
+            output::status_indicator("online"),
+            output::status_label("online"),
+        );
+        println!();
+        println!(
+            "  Listening for connections...",
+        );
+        println!(
+            "  {}",
+            output::dim("Press Ctrl+C to stop, or run 'truffle down' from another terminal."),
+        );
+        println!();
 
         server.run().await?;
     } else {
@@ -87,9 +149,55 @@ pub async fn run(
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
 
-        println!("node is up");
-        println!("  name:       {}", config.node.name);
-        println!("  socket:     {}", TruffleConfig::socket_path().display());
+        // Get status from the newly started daemon
+        println!();
+        println!("  {}", output::bold("truffle"));
+        println!(
+            "  {}",
+            output::dim(&"\u{2500}".repeat(39))
+        );
+        println!();
+
+        if let Ok(result) = client
+            .request(method::STATUS, serde_json::json!({}))
+            .await
+        {
+            let name = result["name"].as_str().unwrap_or(&config.node.name);
+            let status = result["status"].as_str().unwrap_or("Online");
+
+            println!(
+                "  {:<12}{}",
+                "Node",
+                output::bold(name)
+            );
+            println!(
+                "  {:<12}{} {}",
+                "Status",
+                output::status_indicator(status),
+                output::status_label(status),
+            );
+
+            if let Some(ip) = result["tailscale_ip"].as_str() {
+                println!("  {:<12}{}", "IP", ip);
+            }
+            if let Some(dns) = result["tailscale_dns_name"].as_str() {
+                println!("  {:<12}{}", "DNS", output::dim(dns));
+            }
+        } else {
+            println!(
+                "  {:<12}{}",
+                "Node",
+                output::bold(&config.node.name)
+            );
+            println!(
+                "  {:<12}{} {}",
+                "Status",
+                output::status_indicator("online"),
+                output::status_label("online"),
+            );
+        }
+
+        println!();
     }
 
     Ok(())
