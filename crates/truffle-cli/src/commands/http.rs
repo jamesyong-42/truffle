@@ -54,7 +54,11 @@ pub async fn serve(config: &TruffleConfig, dir: &str, prefix: &str) -> Result<()
             "The directory you want to serve does not exist.",
             "",
         );
-        return Err(format!("Directory not found: {dir}"));
+        return Err(output::format_error(
+            &format!("Directory not found: {}", dir),
+            "",
+            "",
+        ));
     }
     if !path.is_dir() {
         output::print_error(
@@ -62,7 +66,11 @@ pub async fn serve(config: &TruffleConfig, dir: &str, prefix: &str) -> Result<()
             "You can only serve directories, not individual files.",
             &format!("truffle http serve {}    serve the parent directory", path.parent().map(|p| p.display().to_string()).unwrap_or_else(|| ".".to_string())),
         );
-        return Err(format!("{dir} is not a directory"));
+        return Err(output::format_error(
+            &format!("{} is not a directory", dir),
+            "",
+            "",
+        ));
     }
 
     let client = DaemonClient::new();

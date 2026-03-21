@@ -6,6 +6,7 @@ pub mod config;
 pub mod daemon;
 pub mod output;
 pub mod resolve;
+pub mod sidecar;
 pub mod stream;
 pub mod target;
 

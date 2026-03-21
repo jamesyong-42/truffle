@@ -17,6 +17,7 @@ use super::handler;
 use super::pid;
 use super::protocol::DaemonRequest;
 use crate::config::TruffleConfig;
+use crate::sidecar;
 
 /// The daemon server process.
 pub struct DaemonServer {
@@ -59,23 +60,42 @@ impl DaemonServer {
             }
         }
 
+        // Auto-discover sidecar binary
+        let sidecar_path = sidecar::find_sidecar(
+            if config.node.sidecar_path.is_empty() {
+                None
+            } else {
+                Some(config.node.sidecar_path.as_str())
+            },
+        )?;
+        info!(sidecar = %sidecar_path.display(), "Using sidecar binary");
+
+        // Auto-create state directory
+        let state_dir = if config.node.state_dir.is_empty() {
+            let dir = dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("truffle")
+                .join("state");
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Failed to create state directory {}: {e}", dir.display()))?;
+            dir.to_string_lossy().to_string()
+        } else {
+            let dir = PathBuf::from(&config.node.state_dir);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Failed to create state directory {}: {e}", dir.display()))?;
+            config.node.state_dir.clone()
+        };
+
         // Build the runtime
         let hostname = config
             .node
             .name
             .as_str();
-        let mut builder = TruffleRuntime::builder()
+        let (runtime, _mesh_rx) = TruffleRuntime::builder()
             .hostname(hostname)
-            .device_type("cli");
-
-        if !config.node.sidecar_path.is_empty() {
-            builder = builder.sidecar_path(PathBuf::from(&config.node.sidecar_path));
-        }
-        if !config.node.state_dir.is_empty() {
-            builder = builder.state_dir(&config.node.state_dir);
-        }
-
-        let (runtime, _mesh_rx) = builder
+            .device_type("cli")
+            .sidecar_path(sidecar_path)
+            .state_dir(&state_dir)
             .build()
             .map_err(|e| format!("Failed to build runtime: {e}"))?;
 
@@ -227,6 +247,13 @@ impl DaemonServer {
                 break;
             }
         }
+    }
+
+    /// Subscribe to unified `TruffleEvent`s from the runtime.
+    ///
+    /// Used by `truffle up --foreground` to display auth URLs, online status, etc.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<truffle_core::runtime::TruffleEvent> {
+        self.runtime.subscribe()
     }
 
     /// Shut down the daemon: stop the runtime, remove socket and PID files.

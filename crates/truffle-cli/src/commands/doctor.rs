@@ -251,64 +251,27 @@ fn check_tailscale_connected() -> CheckResult {
 }
 
 /// Check if the sidecar binary is available.
+///
+/// Delegates to `sidecar::find_sidecar()` which searches all standard locations.
 fn check_sidecar_binary(config: &TruffleConfig) -> CheckResult {
-    // Check configured path first
-    if !config.node.sidecar_path.is_empty() {
-        let path = std::path::Path::new(&config.node.sidecar_path);
-        if path.exists() {
-            return CheckResult::pass(
-                "Sidecar binary found",
-                &config.node.sidecar_path,
-            );
-        } else {
-            return CheckResult::fail(
-                &format!("Sidecar binary not found at {}", config.node.sidecar_path),
-                "Check the 'sidecar_path' in your config file",
-            );
-        }
+    let config_path = if config.node.sidecar_path.is_empty() {
+        None
+    } else {
+        Some(config.node.sidecar_path.as_str())
+    };
+
+    match crate::sidecar::find_sidecar(config_path) {
+        Ok(path) => CheckResult::pass(
+            "Sidecar binary found",
+            &path.display().to_string(),
+        ),
+        Err(_) => CheckResult::warn(
+            "Sidecar binary not found",
+            "",
+            "Build the sidecar with 'cd packages/sidecar-slim && go build -o bin/sidecar-slim'\n\
+             \x20          or set sidecar_path in ~/.config/truffle/config.toml",
+        ),
     }
-
-    // Check common locations
-    let search_paths = [
-        "/usr/local/bin/truffle-sidecar",
-        "/usr/bin/truffle-sidecar",
-    ];
-
-    for path in &search_paths {
-        if std::path::Path::new(path).exists() {
-            return CheckResult::pass("Sidecar binary found", (*path).to_string());
-        }
-    }
-
-    // Check if it's in PATH via `which`
-    if let Ok(output) = std::process::Command::new("which")
-        .arg("truffle-sidecar")
-        .output()
-    {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return CheckResult::pass("Sidecar binary found", &path);
-        }
-    }
-
-    // Also check adjacent to our own binary
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sidecar = dir.join("truffle-sidecar");
-            if sidecar.exists() {
-                return CheckResult::pass(
-                    "Sidecar binary found",
-                    &sidecar.display().to_string(),
-                );
-            }
-        }
-    }
-
-    CheckResult::warn(
-        "Sidecar binary not found",
-        "",
-        "Build the sidecar with 'cd sidecar && go build' or set 'sidecar_path' in config",
-    )
 }
 
 /// Check if the config file is valid.
