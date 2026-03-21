@@ -183,36 +183,48 @@ echo ""
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*)
-        # Already in PATH
+        # Already in PATH — nothing to do
         ;;
     *)
-        echo "Add truffle to your PATH by adding this line to your shell config:"
-        echo ""
-
-        # Detect which shell config to suggest
+        # Auto-add to shell profile (like Claude Code, rustup, etc.)
         SHELL_NAME=$(basename "${SHELL:-/bin/sh}")
+        PATH_LINE="export PATH=\"${INSTALL_DIR}:\$PATH\""
+
         case "$SHELL_NAME" in
             zsh)
-                echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
-                echo ""
-                echo "Then reload:"
-                echo "  source ~/.zshrc"
+                PROFILE="$HOME/.zshrc"
                 ;;
             bash)
-                echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc"
-                echo ""
-                echo "Then reload:"
-                echo "  source ~/.bashrc"
+                # Prefer .bashrc, fall back to .bash_profile (macOS)
+                if [ -f "$HOME/.bashrc" ]; then
+                    PROFILE="$HOME/.bashrc"
+                else
+                    PROFILE="$HOME/.bash_profile"
+                fi
                 ;;
             fish)
-                echo "  fish_add_path ${INSTALL_DIR}"
+                # Fish uses a different syntax
+                PROFILE=""
+                fish -c "fish_add_path ${INSTALL_DIR}" 2>/dev/null || true
+                echo "  Added to fish PATH"
                 ;;
             *)
-                echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-                echo ""
-                echo "Add this to your shell's configuration file."
+                PROFILE="$HOME/.profile"
                 ;;
         esac
+
+        if [ -n "$PROFILE" ]; then
+            # Check if already in the profile
+            if ! grep -q "$INSTALL_DIR" "$PROFILE" 2>/dev/null; then
+                echo "" >> "$PROFILE"
+                echo "# Added by truffle installer" >> "$PROFILE"
+                echo "$PATH_LINE" >> "$PROFILE"
+                echo "  Added to $PROFILE"
+            fi
+        fi
+
+        # Make available in current session immediately
+        export PATH="${INSTALL_DIR}:$PATH"
         echo ""
         ;;
 esac
