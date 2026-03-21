@@ -802,8 +802,12 @@ mod tests {
 
     #[test]
     fn validate_save_path_missing_parent() {
-        let err = validate_save_path("/nonexistent_abc_xyz/file.txt").unwrap_err();
-        assert!(err.contains("parent directory"));
+        // Use a platform-appropriate nonexistent path
+        let bad_path = std::env::temp_dir()
+            .join("nonexistent_abc_xyz_truffle_test")
+            .join("file.txt");
+        let err = validate_save_path(&bad_path.to_string_lossy()).unwrap_err();
+        assert!(err.contains("parent directory"), "error was: {err}");
     }
 
     #[tokio::test]
@@ -819,7 +823,7 @@ mod tests {
                 sha256: "abc".to_string(),
             },
             "a".repeat(64),
-            "/tmp/ft_test_output.txt".to_string(),
+            std::env::temp_dir().join("ft_test_output.txt").to_string_lossy().to_string(),
         )
         .await
         .unwrap();
@@ -843,7 +847,7 @@ mod tests {
                 sha256: "abc".to_string(),
             },
             "b".repeat(64),
-            "/tmp/ft_test_cancel.txt".to_string(),
+            std::env::temp_dir().join("ft_test_cancel.txt").to_string_lossy().to_string(),
         )
         .await
         .unwrap();
