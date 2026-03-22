@@ -607,14 +607,18 @@ impl TruffleRuntime {
             *guard = Some(http_router.clone());
         }
 
-        // Register the HTTP router as the bridge handler for port 443 incoming
-        let router_handler = Arc::new(HttpRouterBridgeHandler::new(http_router));
+        // Register the HTTP router as the bridge handler for port 443 incoming (TLS)
+        let router_handler = Arc::new(HttpRouterBridgeHandler::new(http_router.clone()));
         bridge_manager.add_handler(443, Direction::Incoming, router_handler);
 
-        // Register outgoing WS handler (outgoing dials still go through
-        // the connection manager directly, not the HTTP router)
+        // Register port 9417 incoming (plain TCP) with the same HTTP router
+        let router_handler_9417 = Arc::new(HttpRouterBridgeHandler::new(http_router));
+        bridge_manager.add_handler(9417, Direction::Incoming, router_handler_9417);
+
+        // Register outgoing WS handler for both ports
         let (ws_out_tx, mut ws_out_rx) = mpsc::channel(64);
-        bridge_manager.add_handler(443, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx)));
+        bridge_manager.add_handler(443, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx.clone())));
+        bridge_manager.add_handler(9417, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx)));
 
         // Use the bridge manager's pending_dials Arc directly
         let bridge_pending = bridge_manager.pending_dials().clone();
@@ -701,7 +705,7 @@ impl TruffleRuntime {
                                 ip: status.tailscale_ip.clone(),
                                 dns_name,
                             });
-                            // Request peers immediately
+                            // Request peers (sidecar auto-listens on 443 TLS + 9417 TCP)
                             let sg = shim.lock().await;
                             if let Some(ref s) = *sg {
                                 let _ = s.get_peers().await;
@@ -748,7 +752,8 @@ impl TruffleRuntime {
                             .collect();
                         node.handle_tailnet_peers(&core_peers).await;
 
-                        // Dial online truffle peers
+                        // Dial online truffle peers via port 9417 (plain TCP).
+                        // Port 443 uses ListenTLS which causes double-TLS on dial.
                         let local_dns = node.local_device().await
                             .tailscale_dns_name.unwrap_or_default();
                         for peer in &peers_data.peers {
@@ -766,13 +771,17 @@ impl TruffleRuntime {
                                     let rid = uuid::Uuid::new_v4().to_string();
                                     let (tx, rx) = oneshot::channel();
                                     bp.lock().await.insert(rid.clone(), tx);
-                                    if s.dial_raw(dns.clone(), 443, rid.clone()).await.is_ok() {
+                                    if s.dial_raw(dns.clone(), 9417, rid.clone()).await.is_ok() {
                                         drop(sg);
                                         match tokio::time::timeout(Duration::from_secs(10), rx).await {
-                                            Ok(Ok(bc)) => { cm.handle_outgoing(bc).await; }
+                                            Ok(Ok(bc)) => {
+                                                tracing::info!("Mesh connection established to {dns}");
+                                                cm.handle_outgoing(bc).await;
+                                            }
                                             _ => { bp.lock().await.remove(&rid); }
                                         }
                                     } else {
+                                        eprintln!("[truffle-debug] dial_raw command failed for {dns}");
                                         bp.lock().await.remove(&rid);
                                     }
                                 }
