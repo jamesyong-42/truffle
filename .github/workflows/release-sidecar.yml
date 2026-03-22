@@ -115,6 +115,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ''
         run: |
+          # Remove setup-node's .npmrc so npm uses OIDC
+          rm -f "$NPM_CONFIG_USERCONFIG"
           for pkg in artifacts/truffle-sidecar-*; do
             PKG_NAME=$(basename "$pkg")
             # Merge built binary into package source

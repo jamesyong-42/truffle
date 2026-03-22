@@ -176,5 +176,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ''
         run: |
+          # Remove setup-node's .npmrc so npm uses OIDC
+          rm -f "$NPM_CONFIG_USERCONFIG"
           cd crates/truffle-napi
           npm publish --provenance --access public
