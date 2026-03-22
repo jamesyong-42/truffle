@@ -229,6 +229,14 @@ enum Commands {
         purge: bool,
     },
 
+    /// Update truffle to the latest version
+    #[command(
+        long_about = "Update truffle to the latest version.\n\n\
+            Checks GitHub releases for a newer version, downloads it,\n\
+            and replaces the current binary. Like 'claude update'."
+    )]
+    Update,
+
     /// Download the Go sidecar binary for your platform
     #[command(
         name = "install-sidecar",
@@ -400,6 +408,8 @@ async fn main() {
         Commands::Doctor => commands::doctor::run(&config).await,
 
         Commands::Uninstall { purge } => commands::uninstall::run(!purge).await,
+
+        Commands::Update => commands::update::run().await,
 
         Commands::InstallSidecar { dir } => {
             commands::install_sidecar::run(dir.as_deref()).await

@@ -16,6 +16,7 @@ pub mod status;
 pub mod tcp;
 pub mod uninstall;
 pub mod up;
+pub mod update;
 pub mod ws;
 
 use std::path::PathBuf;
