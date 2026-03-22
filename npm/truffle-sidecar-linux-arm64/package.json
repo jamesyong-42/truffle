@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/truffle-sidecar-linux-arm64",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "description": "Truffle sidecar binary for Linux ARM64",
   "license": "MIT",
   "author": "James Yong",
@@ -13,10 +13,16 @@
   "publishConfig": {
     "access": "public"
   },
-  "os": ["linux"],
-  "cpu": ["arm64"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "preferUnplugged": true,
-  "files": ["bin"],
+  "files": [
+    "bin"
+  ],
   "engines": {
     "node": ">=18"
   }

@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/truffle-sidecar-win32-x64",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "description": "Truffle sidecar binary for Windows x64",
   "license": "MIT",
   "author": "James Yong",
@@ -13,10 +13,16 @@
   "publishConfig": {
     "access": "public"
   },
-  "os": ["win32"],
-  "cpu": ["x64"],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "preferUnplugged": true,
-  "files": ["bin"],
+  "files": [
+    "bin"
+  ],
   "engines": {
     "node": ">=18"
   }
