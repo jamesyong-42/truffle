@@ -3,6 +3,7 @@ name: Release Sidecar Binaries
 on:
   release:
     types: [created]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -87,7 +88,7 @@ jobs:
 
   publish-npm:
     name: Publish sidecar packages to npm
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -112,7 +113,9 @@ jobs:
 
       - name: Set version from tag
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          # Handle both "v0.2.3" and "truffle-v0.2.3" tag formats
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG##*v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Publish platform packages
