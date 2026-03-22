@@ -159,7 +159,9 @@ jobs:
           cache: pnpm
 
       - name: Update npm for OIDC trusted publishing
-        run: npm install -g npm@latest
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
 
       - name: Install dependencies
         run: |
@@ -177,4 +179,4 @@ jobs:
       - name: Publish
         run: |
           cd crates/truffle-napi
-          npm publish --provenance --access public
+          npm publish --provenance --access public --registry https://registry.npmjs.org
