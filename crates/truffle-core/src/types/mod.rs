@@ -68,6 +68,12 @@ pub struct BaseDevice {
     /// Latency to this device in ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
+    /// Direct address (e.g. "192.168.1.5:41641"), None if relayed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cur_addr: Option<String>,
+    /// DERP relay region (e.g. "sea"), None if direct.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// Tailnet peer from Tailscale API.
@@ -166,6 +172,8 @@ mod tests {
             started_at: Some(1000),
             os: Some("darwin".to_string()),
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let json = serde_json::to_string(&device).unwrap();
@@ -214,6 +222,8 @@ mod tests {
             started_at: None,
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let json = serde_json::to_string(&device).unwrap();
@@ -318,6 +328,8 @@ mod tests {
             started_at: Some(1709999000000),
             os: Some("linux".to_string()),
             latency_ms: Some(12.5),
+            cur_addr: None,
+            relay: None,
         };
 
         let json = serde_json::to_string(&device).unwrap();

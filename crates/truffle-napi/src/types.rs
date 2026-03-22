@@ -448,6 +448,8 @@ mod tests {
             started_at: Some(1710760000),
             os: Some("darwin".to_string()),
             latency_ms: Some(12.5),
+            cur_addr: None,
+            relay: None,
         }
     }
 

@@ -452,6 +452,16 @@ impl TruffleRuntime {
         &self.connection_manager
     }
 
+    /// Access the sidecar shim (for bridge dialing).
+    pub fn shim(&self) -> &Arc<Mutex<Option<GoShim>>> {
+        &self.shim
+    }
+
+    /// Access the pending bridge dials map (for bridge dialing).
+    pub fn pending_dials(&self) -> &Arc<Mutex<HashMap<String, oneshot::Sender<BridgeConnection>>>> {
+        &self.bridge_pending_dials
+    }
+
     /// Access the message bus for namespace-based pub/sub.
     pub fn bus(&self) -> Arc<MeshMessageBus> {
         self.mesh_node.message_bus()
@@ -760,6 +770,11 @@ impl TruffleRuntime {
                             if !peer.online || peer.dns_name.is_empty() { continue; }
                             if peer.dns_name == local_dns { continue; }
                             if !peer.hostname.contains(&hostname_prefix) { continue; }
+
+                            // Skip if we already have a connection to this peer
+                            if conn_mgr.has_connection_for_dns(&peer.dns_name).await {
+                                continue;
+                            }
 
                             let dns = peer.dns_name.clone();
                             let bp = bridge_pending.clone();
@@ -1081,6 +1096,8 @@ mod tests {
             started_at: Some(1710760000),
             os: Some("darwin".to_string()),
             latency_ms: Some(12.5),
+            cur_addr: None,
+            relay: None,
         }
     }
 

@@ -14,6 +14,7 @@
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
+use crate::resolve::NameResolver;
 
 /// Send a one-shot message to a node.
 ///
@@ -67,14 +68,33 @@ pub async fn run(
             "No target specified. Usage: truffle send <node> \"message\" or truffle send --all \"message\"".to_string()
         })?;
 
-        // Resolve target name
-        let resolved = config.resolve_alias(target);
+        // Resolve target name using the full NameResolver (aliases + peer list)
+        let peers_result = client
+            .request(method::PEERS, serde_json::json!({}))
+            .await
+            .map_err(|e| format!("Failed to get peers: {e}"))?;
+
+        let peers = peers_result["peers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let resolver = NameResolver::from_daemon_data(&config.aliases, &peers);
+        let resolved = match resolver.resolve(target) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(e.to_string());
+            }
+        };
+
+        let display_name = &resolved.display_name;
+        let device_id = &resolved.device_id;
 
         let result = client
             .request(
                 method::SEND_MESSAGE,
                 serde_json::json!({
-                    "device_id": resolved,
+                    "device_id": device_id,
                     "namespace": "chat",
                     "type": "text",
                     "payload": { "text": message }
@@ -85,10 +105,10 @@ pub async fn run(
 
         let sent = result["sent"].as_bool().unwrap_or(false);
         if sent {
-            println!("  Sent to {resolved}");
+            println!("  Sent to {display_name}");
         } else {
-            eprintln!("  {resolved} is offline. Message was not delivered.");
-            return Err(format!("{resolved} is offline"));
+            eprintln!("  {display_name} is offline. Message was not delivered.");
+            return Err(format!("{display_name} is offline"));
         }
     }
 

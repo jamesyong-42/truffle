@@ -603,6 +603,12 @@ impl ConnectionManager {
         conns.get(conn_id).map(|ac| ac.info.clone())
     }
 
+    /// Check if there is already an active connection for a given DNS name.
+    pub async fn has_connection_for_dns(&self, dns_name: &str) -> bool {
+        let conns = self.connections.read().await;
+        conns.values().any(|ac| ac.info.remote_dns_name == dns_name)
+    }
+
     /// Close a specific connection.
     pub async fn close_connection(&self, connection_id: &str) {
         let mut conns = self.connections.write().await;

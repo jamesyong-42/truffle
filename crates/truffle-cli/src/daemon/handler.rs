@@ -109,6 +109,8 @@ async fn handle_peers(id: u64, runtime: &Arc<TruffleRuntime>) -> DaemonResponse 
                 "os": d.os,
                 "last_seen": d.last_seen,
                 "capabilities": d.capabilities,
+                "cur_addr": d.cur_addr,
+                "relay": d.relay,
             })
         })
         .collect();
@@ -422,43 +424,76 @@ async fn handle_tcp_connect(
     let resolved_addr = resolve_node_addr(runtime, node).await;
 
     if check {
-        // Just test connectivity
-        let connect_addr = if let Some(ref ip) = resolved_addr {
-            format!("{ip}:{port}")
-        } else {
-            target.to_string()
-        };
+        // Resolve the node to a DNS name for sidecar dial
+        let dial_target = resolve_node_dns(runtime, node).await;
 
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            tokio::net::TcpStream::connect(&connect_addr),
-        )
-        .await
-        {
-            Ok(Ok(_stream)) => DaemonResponse::success(
-                id,
-                serde_json::json!({
-                    "connected": true,
-                    "target": target,
-                    "resolved": connect_addr,
-                }),
-            ),
-            Ok(Err(e)) => DaemonResponse::success(
-                id,
-                serde_json::json!({
-                    "connected": false,
-                    "target": target,
-                    "reason": format!("Connection refused: {e}"),
-                }),
-            ),
-            Err(_) => DaemonResponse::success(
-                id,
-                serde_json::json!({
-                    "connected": false,
-                    "target": target,
-                    "reason": "Connection timed out (5s)",
-                }),
-            ),
+        if let Some(dns_name) = dial_target {
+            // Use the sidecar's dial mechanism to check connectivity via tsnet.
+            // dial_peer does a raw TCP dial through the Go sidecar, which can
+            // reach tsnet IPs that the host TCP stack cannot.
+            let port_u16 = port as u16;
+            let start = Instant::now();
+            match runtime.dial_peer(&dns_name, port_u16).await {
+                Ok(()) => {
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    DaemonResponse::success(
+                        id,
+                        serde_json::json!({
+                            "connected": true,
+                            "target": target,
+                            "resolved": format!("{dns_name}:{port}"),
+                            "latency_ms": elapsed_ms,
+                        }),
+                    )
+                }
+                Err(e) => DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "connected": false,
+                        "target": target,
+                        "reason": format!("Connection failed via sidecar: {e}"),
+                    }),
+                ),
+            }
+        } else {
+            // No DNS name found -- fall back to direct connect for non-mesh targets
+            let connect_addr = if let Some(ref ip) = resolved_addr {
+                format!("{ip}:{port}")
+            } else {
+                target.to_string()
+            };
+
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                tokio::net::TcpStream::connect(&connect_addr),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "connected": true,
+                        "target": target,
+                        "resolved": connect_addr,
+                    }),
+                ),
+                Ok(Err(e)) => DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "connected": false,
+                        "target": target,
+                        "reason": format!("Connection refused: {e}"),
+                    }),
+                ),
+                Err(_) => DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "connected": false,
+                        "target": target,
+                        "reason": "Connection timed out (5s)",
+                    }),
+                ),
+            }
         }
     } else if stream_mode {
         // Streaming mode: return upgrade response
@@ -798,4 +833,20 @@ async fn resolve_node_addr(runtime: &Arc<TruffleRuntime>, node: &str) -> Option<
         .iter()
         .find(|d| d.name == node || d.id == node || d.tailscale_hostname == node)
         .and_then(|d| d.tailscale_ip.clone())
+}
+
+/// Resolve a node name to a Tailscale DNS name (for sidecar dial).
+///
+/// Looks up the node in the peer list by name, device ID, or hostname.
+/// Returns `None` if the node is not found or has no DNS name.
+async fn resolve_node_dns(runtime: &Arc<TruffleRuntime>, node: &str) -> Option<String> {
+    if node.is_empty() {
+        return None;
+    }
+
+    let devices = runtime.devices().await;
+    devices
+        .iter()
+        .find(|d| d.name == node || d.id == node || d.tailscale_hostname == node)
+        .and_then(|d| d.tailscale_dns_name.clone())
 }

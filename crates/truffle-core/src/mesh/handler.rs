@@ -292,7 +292,7 @@ mod tests {
             tailscale_hostname: format!("app-desktop-{id}"), tailscale_dns_name: None,
             tailscale_ip: Some("100.64.0.2".to_string()), status: DeviceStatus::Online,
             capabilities: vec![], metadata: None, last_seen: None, started_at: Some(1000),
-            os: None, latency_ms: None,
+            os: None, latency_ms: None, cur_addr: None, relay: None,
         }
     }
 

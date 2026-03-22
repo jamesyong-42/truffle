@@ -59,6 +59,8 @@ impl DeviceManager {
             started_at: None,
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         Self {
@@ -169,6 +171,8 @@ impl DeviceManager {
             existing.status = status;
             existing.tailscale_ip = peer.tailscale_ips.first().cloned();
             existing.tailscale_dns_name = Some(peer.dns_name.clone());
+            existing.cur_addr = peer.cur_addr.clone();
+            existing.relay = peer.relay.clone();
             if let Some(ref os) = peer.os {
                 existing.os = Some(os.clone());
             }
@@ -192,6 +196,8 @@ impl DeviceManager {
             started_at: None,
             os: peer.os.clone(),
             latency_ms: None,
+            cur_addr: peer.cur_addr.clone(),
+            relay: peer.relay.clone(),
         };
 
         self.devices.insert(parsed.id, device.clone());
@@ -404,6 +410,8 @@ mod tests {
             started_at: Some(500),
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let payload = DeviceAnnouncePayload {
@@ -434,6 +442,8 @@ mod tests {
             started_at: None,
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let payload = DeviceListPayload {
@@ -709,6 +719,8 @@ mod tests {
             started_at: Some(500),
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         // First announce
@@ -752,6 +764,8 @@ mod tests {
             started_at: Some(1000),
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let payload_v1 = DeviceAnnouncePayload {
@@ -809,6 +823,8 @@ mod tests {
             started_at: Some(1000),
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let remote_device = BaseDevice {
@@ -826,6 +842,8 @@ mod tests {
             started_at: None,
             os: None,
             latency_ms: None,
+            cur_addr: None,
+            relay: None,
         };
 
         let payload = DeviceListPayload {
