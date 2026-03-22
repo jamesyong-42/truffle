@@ -90,13 +90,15 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
 
       - name: Update npm for OIDC trusted publishing
         run: npm install -g npm@latest
@@ -112,11 +114,7 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ''
         run: |
-          # Remove setup-node's .npmrc so npm uses OIDC
-          rm -f "$NPM_CONFIG_USERCONFIG"
           for pkg in artifacts/truffle-sidecar-*; do
             PKG_NAME=$(basename "$pkg")
             # Merge built binary into package source
