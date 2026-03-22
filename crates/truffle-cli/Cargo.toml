@@ -25,6 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 hostname = "0.4"
 ureq = "3"
+uuid = { version = "1", features = ["v4"] }
+axum = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

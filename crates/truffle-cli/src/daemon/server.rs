@@ -8,11 +8,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Notify;
-use tracing::{error, info};
+use tokio::sync::{mpsc, Notify};
+use tracing::{error, info, warn};
 use truffle_core::runtime::TruffleRuntime;
+use truffle_core::services::file_transfer::adapter::{
+    FileTransferAdapter, FileTransferAdapterConfig,
+};
+use truffle_core::services::file_transfer::manager::FileTransferManager;
+use truffle_core::services::file_transfer::receiver::file_transfer_router;
+use truffle_core::services::file_transfer::sender::DialFn;
+use truffle_core::services::file_transfer::types::{FileTransferConfig, FileTransferEvent};
 
-use super::handler;
+use super::handler::{self, DaemonContext};
 use super::ipc;
 use super::pid;
 use super::protocol::DaemonRequest;
@@ -23,6 +30,10 @@ use crate::sidecar;
 pub struct DaemonServer {
     /// The runtime instance (owned by the daemon for the lifetime of the process).
     runtime: Arc<TruffleRuntime>,
+    /// File transfer adapter for mesh signaling.
+    file_transfer_adapter: Arc<FileTransferAdapter>,
+    /// File transfer manager for transfer state and data plane.
+    file_transfer_manager: Arc<FileTransferManager>,
     /// Path to the Unix socket file.
     socket_path: PathBuf,
     /// Path to the PID file.
@@ -37,8 +48,9 @@ impl DaemonServer {
     /// Start the daemon server.
     ///
     /// 1. Build and start a `TruffleRuntime` from config.
-    /// 2. Write the PID file.
-    /// 3. Bind the Unix socket.
+    /// 2. Create the file transfer subsystem (manager + adapter + axum listener + mesh wiring).
+    /// 3. Write the PID file.
+    /// 4. Bind the Unix socket.
     ///
     /// Returns the server instance; call `run()` to enter the accept loop.
     pub async fn start(config: &TruffleConfig) -> Result<Self, String> {
@@ -106,6 +118,75 @@ impl DaemonServer {
             .await
             .map_err(|e| format!("Failed to start runtime: {e}"))?;
 
+        // ── File transfer subsystem bootstrap ──────────────────────────
+
+        // 1. Create the manager event channel
+        let (manager_event_tx, manager_event_rx) =
+            mpsc::unbounded_channel::<FileTransferEvent>();
+
+        // 2. Create the FileTransferManager
+        let ft_config = FileTransferConfig::default();
+        let ft_manager = FileTransferManager::new(ft_config, manager_event_tx);
+
+        // 3. Start the axum file transfer HTTP server on an ephemeral local port
+        let ft_listener_port = start_file_transfer_listener(Arc::clone(&ft_manager))
+            .await
+            .map_err(|e| format!("Failed to start file transfer listener: {e}"))?;
+        info!(port = ft_listener_port, "File transfer HTTP listener started");
+
+        // 4. Create a DialFn for the adapter (dials through the Go sidecar bridge)
+        let dial_fn = create_dial_fn(&runtime);
+
+        // 5. Create the FileTransferAdapter
+        let (bus_tx, bus_rx) = mpsc::unbounded_channel();
+        let (adapter_event_tx, _adapter_event_rx) = mpsc::unbounded_channel();
+
+        let device_id = runtime.device_id().await;
+        let local_addr = format!("127.0.0.1:{ft_listener_port}");
+
+        let ft_adapter = FileTransferAdapter::new(
+            FileTransferAdapterConfig {
+                local_device_id: device_id,
+                local_addr,
+                output_dir: dirs::download_dir()
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join("truffle")
+                    .to_string_lossy()
+                    .to_string(),
+                dial_fn,
+            },
+            Arc::clone(&ft_manager),
+            bus_tx,
+            adapter_event_tx,
+        );
+
+        // 6. Wire the adapter to the mesh node (incoming/outgoing message pumps)
+        let mesh_node = runtime.mesh_node();
+        let (ft_incoming_handle, ft_outgoing_handle) =
+            truffle_core::integration::wire_file_transfer(mesh_node, &ft_adapter, bus_rx);
+
+        // 7. Spawn the manager event -> adapter event forwarding loop
+        let adapter_for_events = Arc::clone(&ft_adapter);
+        let event_loop_handle = tokio::spawn(async move {
+            forward_manager_events(manager_event_rx, &adapter_for_events).await;
+        });
+
+        // 8. Spawn the manager cleanup loop
+        let manager_for_cleanup = Arc::clone(&ft_manager);
+        tokio::spawn(async move {
+            manager_for_cleanup.cleanup_loop().await;
+        });
+
+        // Log spawned task handles (they run until shutdown)
+        info!(
+            ft_incoming = ?ft_incoming_handle.id(),
+            ft_outgoing = ?ft_outgoing_handle.id(),
+            ft_events = ?event_loop_handle.id(),
+            "File transfer subsystem wired to mesh"
+        );
+
+        // ── End file transfer bootstrap ────────────────────────────────
+
         // Write PID file
         pid::write_pid(&pid_path).map_err(|e| format!("Failed to write PID file: {e}"))?;
 
@@ -125,6 +206,8 @@ impl DaemonServer {
 
         Ok(Self {
             runtime,
+            file_transfer_adapter: ft_adapter,
+            file_transfer_manager: ft_manager,
             socket_path,
             pid_path,
             shutdown: Arc::new(Notify::new()),
@@ -171,6 +254,15 @@ impl DaemonServer {
             });
         }
 
+        // Build the shared DaemonContext for all connections
+        let ctx = Arc::new(DaemonContext {
+            runtime: self.runtime.clone(),
+            file_transfer_adapter: self.file_transfer_adapter.clone(),
+            file_transfer_manager: self.file_transfer_manager.clone(),
+            shutdown_signal: self.shutdown.clone(),
+            started_at: self.started_at,
+        });
+
         loop {
             tokio::select! {
                 _ = shutdown.notified() => {
@@ -180,11 +272,9 @@ impl DaemonServer {
                 accept_result = listener.accept() => {
                     match accept_result {
                         Ok(stream) => {
-                            let runtime = self.runtime.clone();
-                            let started_at = self.started_at;
-                            let shutdown_clone = self.shutdown.clone();
+                            let ctx = Arc::clone(&ctx);
                             tokio::spawn(async move {
-                                Self::handle_connection(stream, &runtime, started_at, &shutdown_clone).await;
+                                Self::handle_connection(stream, &ctx).await;
                             });
                         }
                         Err(e) => {
@@ -202,12 +292,7 @@ impl DaemonServer {
     /// Handle a single client connection.
     ///
     /// Reads newline-delimited JSON-RPC requests and sends back responses.
-    async fn handle_connection(
-        stream: ipc::IpcStream,
-        runtime: &Arc<TruffleRuntime>,
-        started_at: Instant,
-        shutdown_signal: &Arc<Notify>,
-    ) {
+    async fn handle_connection(stream: ipc::IpcStream, ctx: &Arc<DaemonContext>) {
         let (mut reader, mut writer) = stream.into_split();
 
         while let Ok(Some(line)) = reader.next_line().await {
@@ -229,8 +314,7 @@ impl DaemonServer {
                 }
             };
 
-            let response =
-                handler::dispatch(&request, runtime, started_at, shutdown_signal).await;
+            let response = handler::dispatch(&request, ctx).await;
 
             let resp_json = match serde_json::to_string(&response) {
                 Ok(j) => j,
@@ -250,7 +334,9 @@ impl DaemonServer {
     /// Subscribe to unified `TruffleEvent`s from the runtime.
     ///
     /// Used by `truffle up --foreground` to display auth URLs, online status, etc.
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<truffle_core::runtime::TruffleEvent> {
+    pub fn subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<truffle_core::runtime::TruffleEvent> {
         self.runtime.subscribe()
     }
 
@@ -261,6 +347,9 @@ impl DaemonServer {
 
     /// Clean up resources on shutdown.
     async fn cleanup(&self) {
+        info!("Stopping file transfer manager...");
+        self.file_transfer_manager.stop().await;
+
         info!("Stopping runtime...");
         self.runtime.stop().await;
 
@@ -274,5 +363,131 @@ impl DaemonServer {
         let _ = pid::remove_pid(&self.pid_path);
 
         info!("Daemon stopped");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// File transfer helpers
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Start the axum file transfer HTTP server on an ephemeral local port.
+///
+/// Returns the port number the server is listening on.
+async fn start_file_transfer_listener(
+    manager: Arc<FileTransferManager>,
+) -> Result<u16, String> {
+    let app = file_transfer_router(manager);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind file transfer listener: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local addr: {e}"))?
+        .port();
+
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            warn!("File transfer HTTP server exited: {e}");
+        }
+    });
+
+    Ok(port)
+}
+
+/// Create a `DialFn` that dials through the Go sidecar's bridge.
+///
+/// The DialFn is used by the file transfer sender to establish a TCP connection
+/// to the receiver's axum HTTP server via the Tailscale network.
+fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
+    let shim = runtime.shim().clone();
+    let pending = runtime.pending_dials().clone();
+
+    Arc::new(move |addr: &str| {
+        let shim = shim.clone();
+        let pending = pending.clone();
+        let addr = addr.to_string();
+
+        Box::pin(async move {
+            // Parse host:port from addr
+            let (host, port_str) = addr.rsplit_once(':').ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid addr: {addr}"),
+                )
+            })?;
+            let port: u16 = port_str.parse().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid port: {port_str}"),
+                )
+            })?;
+
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+
+            // Insert pending dial BEFORE sending dial command (prevents race)
+            {
+                let mut dials = pending.lock().await;
+                dials.insert(request_id.clone(), tx);
+            }
+
+            // Tell Go sidecar to dial the target
+            {
+                let shim_guard = shim.lock().await;
+                let shim_ref = shim_guard.as_ref().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "no sidecar running",
+                    )
+                })?;
+
+                if let Err(e) = shim_ref
+                    .dial_raw(host.to_string(), port, request_id.clone())
+                    .await
+                {
+                    let mut dials = pending.lock().await;
+                    dials.remove(&request_id);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("dial command failed: {e}"),
+                    ));
+                }
+            } // Release shim lock during network wait
+
+            // Await bridge connection with timeout
+            let timeout = std::time::Duration::from_secs(10);
+            let bridge_conn = match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(_)) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "dial cancelled (sender dropped)",
+                    ));
+                }
+                Err(_) => {
+                    let mut dials = pending.lock().await;
+                    dials.remove(&request_id);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("dial timed out after {timeout:?}"),
+                    ));
+                }
+            };
+
+            // The bridge connection gives us a raw TCP stream
+            Ok(bridge_conn.stream)
+        })
+    })
+}
+
+/// Forward events from the FileTransferManager's event channel to the adapter.
+///
+/// Runs until the event channel is closed (typically at shutdown).
+async fn forward_manager_events(
+    mut event_rx: mpsc::UnboundedReceiver<FileTransferEvent>,
+    adapter: &Arc<FileTransferAdapter>,
+) {
+    while let Some(event) = event_rx.recv().await {
+        adapter.handle_manager_event(event).await;
     }
 }

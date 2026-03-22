@@ -4492,6 +4492,7 @@ dependencies = [
 name = "truffle-cli"
 version = "0.2.2"
 dependencies = [
+ "axum",
  "clap",
  "clap_complete",
  "dirs 5.0.1",
@@ -4507,6 +4508,7 @@ dependencies = [
  "truffle-core",
  "ureq",
  "url",
+ "uuid",
  "windows-sys 0.59.0",
 ]
 

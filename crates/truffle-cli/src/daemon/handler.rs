@@ -8,18 +8,30 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use truffle_core::runtime::TruffleRuntime;
+use truffle_core::services::file_transfer::adapter::FileTransferAdapter;
+use truffle_core::services::file_transfer::manager::FileTransferManager;
 
 use super::protocol::{error_code, method, DaemonRequest, DaemonResponse};
+
+/// Context bundling all daemon-owned resources needed by request handlers.
+///
+/// Avoids a growing parameter list on `dispatch()` as new subsystems are added.
+pub struct DaemonContext {
+    pub runtime: Arc<TruffleRuntime>,
+    pub file_transfer_adapter: Arc<FileTransferAdapter>,
+    pub file_transfer_manager: Arc<FileTransferManager>,
+    pub shutdown_signal: Arc<Notify>,
+    pub started_at: Instant,
+}
 
 /// Dispatch a JSON-RPC request to the appropriate handler.
 ///
 /// Returns a `DaemonResponse` with either a result or an error.
-pub async fn dispatch(
-    request: &DaemonRequest,
-    runtime: &Arc<TruffleRuntime>,
-    started_at: Instant,
-    shutdown_signal: &Arc<Notify>,
-) -> DaemonResponse {
+pub async fn dispatch(request: &DaemonRequest, ctx: &DaemonContext) -> DaemonResponse {
+    let runtime = &ctx.runtime;
+    let started_at = ctx.started_at;
+    let shutdown_signal = &ctx.shutdown_signal;
+
     match request.method.as_str() {
         method::STATUS => handle_status(request.id, runtime, started_at).await,
         method::PEERS => handle_peers(request.id, runtime).await,
@@ -39,8 +51,12 @@ pub async fn dispatch(
         "chat_start" => handle_chat_start(request.id, &request.params, runtime).await,
 
         // Phase 11: File transfer
-        method::PUSH_FILE => handle_push_file(request.id, &request.params).await,
-        method::GET_FILE => handle_get_file(request.id, &request.params).await,
+        method::PUSH_FILE => {
+            handle_push_file(request.id, &request.params, &ctx.file_transfer_adapter).await
+        }
+        method::GET_FILE => {
+            handle_get_file(request.id, &request.params, &ctx.file_transfer_adapter).await
+        }
 
         _ => DaemonResponse::error(
             request.id,
@@ -51,7 +67,11 @@ pub async fn dispatch(
 }
 
 /// Handle `status` -- return node status information.
-async fn handle_status(id: u64, runtime: &Arc<TruffleRuntime>, started_at: Instant) -> DaemonResponse {
+async fn handle_status(
+    id: u64,
+    runtime: &Arc<TruffleRuntime>,
+    started_at: Instant,
+) -> DaemonResponse {
     let device = runtime.local_device().await;
     let uptime_secs = started_at.elapsed().as_secs();
     let auth_status = runtime.mesh_node().auth_status().await;
@@ -285,13 +305,14 @@ fn handle_shutdown(id: u64, shutdown_signal: &Arc<Notify>) -> DaemonResponse {
 // Phase 11: File transfer handlers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Handle `push_file` -- push a file to a remote node via Taildrop.
+/// Handle `push_file` -- push a file to a remote node via the file transfer subsystem.
 ///
 /// Currently a stub that accepts the file data and acknowledges receipt.
-/// Full Taildrop integration will come from the Go sidecar.
+/// Full transfer implementation will come in Phase 2.
 async fn handle_push_file(
     id: u64,
     params: &serde_json::Value,
+    _adapter: &Arc<FileTransferAdapter>,
 ) -> DaemonResponse {
     let _node = match params.get("node").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -321,9 +342,9 @@ async fn handle_push_file(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // TODO: In the full implementation, this will:
+    // TODO: In the full implementation (Phase 2), this will:
     // 1. Resolve the node name to a Tailscale peer
-    // 2. Use the sidecar's Taildrop API to push the file
+    // 2. Use the adapter to initiate the file transfer
     // 3. Stream progress updates back to the CLI
 
     DaemonResponse::success(
@@ -337,10 +358,11 @@ async fn handle_push_file(
 
 /// Handle `get_file` -- download a file from a remote node.
 ///
-/// Currently a stub. Full implementation will use Taildrop waiting files.
+/// Currently a stub. Full implementation will come in Phase 3.
 async fn handle_get_file(
     id: u64,
     params: &serde_json::Value,
+    _adapter: &Arc<FileTransferAdapter>,
 ) -> DaemonResponse {
     let _node = match params.get("node").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -364,15 +386,15 @@ async fn handle_get_file(
         }
     };
 
-    // TODO: In the full implementation, this will:
+    // TODO: In the full implementation (Phase 3), this will:
     // 1. Resolve the node name to a Tailscale peer
-    // 2. Request the file via the sidecar
-    // 3. Return the file data (or stream it)
+    // 2. Send a PULL_REQUEST via the adapter
+    // 3. Return the file data
 
     DaemonResponse::error(
         id,
         error_code::INTERNAL_ERROR,
-        "File download not yet implemented (requires sidecar Taildrop integration)",
+        "File download not yet implemented (requires Phase 3 implementation)",
     )
 }
 
@@ -646,7 +668,11 @@ async fn handle_proxy_start(
 ///
 /// Accepts connections on the local listener and for each incoming
 /// connection, dials the remote target and copies data bidirectionally.
-async fn run_proxy_loop(listener: tokio::net::TcpListener, remote_addr: &str, _proxy_id: &str) {
+async fn run_proxy_loop(
+    listener: tokio::net::TcpListener,
+    remote_addr: &str,
+    _proxy_id: &str,
+) {
     let remote = remote_addr.to_string();
     loop {
         match listener.accept().await {
