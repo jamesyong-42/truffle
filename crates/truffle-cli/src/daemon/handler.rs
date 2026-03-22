@@ -54,6 +54,21 @@ pub async fn dispatch(
 async fn handle_status(id: u64, runtime: &Arc<TruffleRuntime>, started_at: Instant) -> DaemonResponse {
     let device = runtime.local_device().await;
     let uptime_secs = started_at.elapsed().as_secs();
+    let auth_status = runtime.mesh_node().auth_status().await;
+    let auth_url = runtime.mesh_node().auth_url().await;
+    let peer_count = runtime.devices().await.len();
+
+    let status_str = if device.tailscale_ip.is_some() {
+        "online"
+    } else if auth_url.is_some() {
+        "authRequired"
+    } else {
+        match auth_status {
+            truffle_core::types::AuthStatus::Authenticated => "online",
+            truffle_core::types::AuthStatus::Required => "authRequired",
+            _ => "connecting",
+        }
+    };
 
     DaemonResponse::success(
         id,
@@ -62,9 +77,12 @@ async fn handle_status(id: u64, runtime: &Arc<TruffleRuntime>, started_at: Insta
             "name": device.name,
             "device_type": device.device_type,
             "hostname": device.tailscale_hostname,
-            "status": format!("{:?}", device.status),
+            "status": status_str,
             "tailscale_ip": device.tailscale_ip,
             "tailscale_dns_name": device.tailscale_dns_name,
+            "auth_url": auth_url,
+            "auth_status": format!("{:?}", auth_status),
+            "peer_count": peer_count,
             "uptime_secs": uptime_secs,
         }),
     )

@@ -277,7 +277,7 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
-    // Get status from the newly started daemon
+    // Wait for Tailscale to connect (poll status until non-offline)
     println!();
     println!("  {}", output::bold("truffle"));
     println!(
@@ -285,19 +285,42 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         output::dim(&"\u{2500}".repeat(39))
     );
     println!();
+    println!(
+        "  {:<12}{}",
+        "Node",
+        output::bold(&config.node.name)
+    );
+    println!(
+        "  {:<12}{} {}",
+        "Status",
+        output::status_indicator("connecting"),
+        output::status_label("connecting"),
+    );
 
-    if let Ok(result) = client
-        .request(method::STATUS, serde_json::json!({}))
-        .await
-    {
-        let name = result["name"].as_str().unwrap_or(&config.node.name);
-        let status = result["status"].as_str().unwrap_or("Online");
+    // Poll until we get a real status (online, authRequired) or timeout
+    let status_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let mut final_status = None;
+    while tokio::time::Instant::now() < status_deadline {
+        if let Ok(result) = client
+            .request(method::STATUS, serde_json::json!({}))
+            .await
+        {
+            let status = result["status"].as_str().unwrap_or("offline");
+            let ip = result["tailscale_ip"].as_str().unwrap_or("");
+            let auth_url = result["auth_url"].as_str().unwrap_or("");
 
-        println!(
-            "  {:<12}{}",
-            "Node",
-            output::bold(name)
-        );
+            if !ip.is_empty() || !auth_url.is_empty() || status == "online" {
+                final_status = Some(result);
+                break;
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    // Clear "connecting" and show actual status
+    println!();
+    if let Some(result) = final_status {
+        let status = result["status"].as_str().unwrap_or("online");
         println!(
             "  {:<12}{} {}",
             "Status",
@@ -306,23 +329,30 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         );
 
         if let Some(ip) = result["tailscale_ip"].as_str() {
-            println!("  {:<12}{}", "IP", ip);
+            if !ip.is_empty() {
+                println!("  {:<12}{}", "IP", ip);
+            }
         }
         if let Some(dns) = result["tailscale_dns_name"].as_str() {
-            println!("  {:<12}{}", "DNS", output::dim(dns));
+            if !dns.is_empty() {
+                println!("  {:<12}{}", "DNS", output::dim(dns));
+            }
+        }
+        if let Some(auth_url) = result["auth_url"].as_str() {
+            if !auth_url.is_empty() {
+                println!();
+                println!("  {}", output::bold("Authentication required"));
+                println!("  Visit: {}", auth_url);
+            }
         }
     } else {
         println!(
-            "  {:<12}{}",
-            "Node",
-            output::bold(&config.node.name)
-        );
-        println!(
             "  {:<12}{} {}",
             "Status",
-            output::status_indicator("online"),
-            output::status_label("online"),
+            output::status_indicator("connecting"),
+            output::dim("Tailscale is starting up..."),
         );
+        println!("  Run '{}' to check progress", output::bold("truffle status"));
     }
 
     println!();
