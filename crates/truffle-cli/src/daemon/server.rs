@@ -120,9 +120,9 @@ impl DaemonServer {
 
         // ── File transfer subsystem bootstrap ──────────────────────────
 
-        // 1. Create the manager event channel
+        // 1. Create the manager event channel (broadcast for multiple consumers)
         let (manager_event_tx, manager_event_rx) =
-            mpsc::unbounded_channel::<FileTransferEvent>();
+            tokio::sync::broadcast::channel::<FileTransferEvent>(256);
 
         // 2. Create the FileTransferManager
         let ft_config = FileTransferConfig::default();
@@ -484,10 +484,16 @@ fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
 ///
 /// Runs until the event channel is closed (typically at shutdown).
 async fn forward_manager_events(
-    mut event_rx: mpsc::UnboundedReceiver<FileTransferEvent>,
+    mut event_rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
     adapter: &Arc<FileTransferAdapter>,
 ) {
-    while let Some(event) = event_rx.recv().await {
-        adapter.handle_manager_event(event).await;
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => adapter.handle_manager_event(event).await,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("Manager event receiver lagged, skipped {n} events");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
     }
 }

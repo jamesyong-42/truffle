@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -24,7 +24,7 @@ use super::types::*;
 /// Ports Go's TransferManager. Key differences:
 /// - Uses tokio RwLock instead of sync.RWMutex
 /// - Atomic counter for recv semaphore instead of channel
-/// - mpsc channel for events instead of IPC protocol
+/// - broadcast channel for events instead of IPC protocol
 /// - CancellationToken for shutdown instead of context.CancelFunc
 pub struct FileTransferManager {
     config: FileTransferConfig,
@@ -34,8 +34,11 @@ pub struct FileTransferManager {
     /// Atomic counter for concurrent recv semaphore (replaces Go's channel semaphore).
     recv_active: AtomicI32,
 
-    /// Event channel for emitting file transfer events to the adapter layer.
-    pub(crate) event_tx: mpsc::UnboundedSender<FileTransferEvent>,
+    /// Broadcast channel for emitting file transfer events.
+    ///
+    /// Uses `broadcast` so multiple consumers (adapter event loop, daemon handler)
+    /// can independently subscribe and receive events for their transfer_id.
+    pub(crate) event_tx: broadcast::Sender<FileTransferEvent>,
 
     /// Shutdown token.
     shutdown_token: CancellationToken,
@@ -44,7 +47,7 @@ pub struct FileTransferManager {
 impl FileTransferManager {
     pub fn new(
         config: FileTransferConfig,
-        event_tx: mpsc::UnboundedSender<FileTransferEvent>,
+        event_tx: broadcast::Sender<FileTransferEvent>,
     ) -> Arc<Self> {
         Arc::new(Self {
             config,
@@ -53,6 +56,14 @@ impl FileTransferManager {
             event_tx,
             shutdown_token: CancellationToken::new(),
         })
+    }
+
+    /// Subscribe to file transfer events.
+    ///
+    /// Returns a broadcast receiver that will receive all events emitted by this
+    /// manager. Multiple consumers can subscribe independently.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<FileTransferEvent> {
+        self.event_tx.subscribe()
     }
 
     pub fn config(&self) -> &FileTransferConfig {
@@ -812,7 +823,7 @@ mod tests {
 
     #[tokio::test]
     async fn manager_register_and_list() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = broadcast::channel(64);
         let mgr = FileTransferManager::new(FileTransferConfig::default(), tx);
 
         mgr.register_receive(
@@ -836,7 +847,8 @@ mod tests {
 
     #[tokio::test]
     async fn manager_cancel_transfer() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = broadcast::channel(64);
+        let mut rx = tx.subscribe();
         let mgr = FileTransferManager::new(FileTransferConfig::default(), tx);
 
         mgr.register_receive(
@@ -866,7 +878,7 @@ mod tests {
 
     #[test]
     fn semaphore_acquire_release() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = broadcast::channel(64);
         let mut config = FileTransferConfig::default();
         config.max_concurrent_recv = 2;
         let mgr = FileTransferManager::new(config, tx);
@@ -881,7 +893,7 @@ mod tests {
 
     #[test]
     fn semaphore_unlimited() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = broadcast::channel(64);
         let mut config = FileTransferConfig::default();
         config.max_concurrent_recv = 0; // unlimited
         let mgr = FileTransferManager::new(config, tx);
@@ -893,7 +905,7 @@ mod tests {
 
     #[test]
     fn get_transfer_validates_token_format() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = broadcast::channel(64);
         let mgr = FileTransferManager::new(FileTransferConfig::default(), tx);
 
         // Short token

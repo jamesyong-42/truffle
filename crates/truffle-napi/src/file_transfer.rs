@@ -144,6 +144,8 @@ fn napi_offer_to_core(offer: &NapiFileTransferOffer) -> FileTransferOffer {
             sha256: offer.file_sha256.clone(),
         },
         token: offer.token.clone(),
+        cli_mode: false,
+        save_path: None,
     }
 }
 
@@ -161,7 +163,7 @@ pub struct NapiFileTransferAdapter {
     event_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<AdapterEvent>>>,
     bus_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, String, String)>>>,
     manager_event_rx:
-        tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<FileTransferEvent>>>,
+        tokio::sync::Mutex<Option<tokio::sync::broadcast::Receiver<FileTransferEvent>>>,
     pending_event_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiFileTransferEvent>>>,
     pending_bus_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiBusMessage>>>,
 }
@@ -188,8 +190,8 @@ impl NapiFileTransferAdapter {
             ft_config.progress_bytes = progress_bytes as i64;
         }
 
-        // Create manager event channel
-        let (manager_event_tx, manager_event_rx) = mpsc::unbounded_channel();
+        // Create manager event channel (broadcast for multiple consumers)
+        let (manager_event_tx, manager_event_rx) = tokio::sync::broadcast::channel(256);
 
         // Create the FileTransferManager
         let manager = FileTransferManager::new(ft_config, manager_event_tx);
@@ -493,11 +495,17 @@ impl NapiFileTransferAdapter {
     }
 
     async fn manager_event_loop(
-        mut rx: mpsc::UnboundedReceiver<FileTransferEvent>,
+        mut rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
         adapter: Arc<CoreAdapter>,
     ) {
-        while let Some(event) = rx.recv().await {
-            adapter.handle_manager_event(event).await;
+        loop {
+            match rx.recv().await {
+                Ok(event) => adapter.handle_manager_event(event).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Manager event receiver lagged, skipped {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
         tracing::info!("Manager event loop ended (channel closed)");
     }

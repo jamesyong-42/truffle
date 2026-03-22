@@ -29,6 +29,12 @@ pub struct FileTransferOffer {
     pub sender_addr: String,
     pub file: FileInfo,
     pub token: String,
+    /// When true, the receiver should auto-accept without user interaction (CLI-mode transfers).
+    #[serde(default)]
+    pub cli_mode: bool,
+    /// Destination path on the receiver where the file should be saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_path: Option<String>,
 }
 
 /// Accept payload: receiver -> sender via MessageBus.
@@ -285,6 +291,21 @@ impl FileTransferAdapter {
         match msg_type {
             message_types::OFFER => {
                 if let Ok(offer) = serde_json::from_value::<FileTransferOffer>(payload.clone()) {
+                    if offer.cli_mode {
+                        if let Some(ref save_path) = offer.save_path {
+                            if !save_path.is_empty() {
+                                // CLI-mode: auto-accept without user interaction
+                                tracing::info!(
+                                    "[FileTransferAdapter] Auto-accepting CLI transfer {} -> {}",
+                                    offer.transfer_id,
+                                    save_path
+                                );
+                                self.accept_transfer(&offer, Some(save_path)).await;
+                                return;
+                            }
+                        }
+                    }
+                    // Interactive mode: emit Offer event for UI confirmation
                     let _ = self.adapter_event_tx.send(AdapterEvent::Offer(offer));
                 }
             }
@@ -488,12 +509,16 @@ mod tests {
                 sha256: "abc".to_string(),
             },
             token: "a".repeat(64),
+            cli_mode: false,
+            save_path: None,
         };
 
         let json = serde_json::to_string(&offer).unwrap();
         let parsed: FileTransferOffer = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.transfer_id, offer.transfer_id);
         assert_eq!(parsed.file.name, "test.bin");
+        assert!(!parsed.cli_mode);
+        assert!(parsed.save_path.is_none());
     }
 
     #[test]
@@ -519,9 +544,9 @@ mod tests {
         Arc<FileTransferAdapter>,
         mpsc::UnboundedReceiver<(String, String, String)>,
         mpsc::UnboundedReceiver<AdapterEvent>,
-        mpsc::UnboundedReceiver<FileTransferEvent>,
+        tokio::sync::broadcast::Receiver<FileTransferEvent>,
     ) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::broadcast::channel(64);
         let manager = FileTransferManager::new(FileTransferConfig::default(), event_tx);
         let (bus_tx, bus_rx) = mpsc::unbounded_channel();
         let (adapter_event_tx, adapter_event_rx) = mpsc::unbounded_channel();
@@ -933,5 +958,210 @@ mod tests {
 
         // List events should not produce adapter events
         assert!(adapter_event_rx.try_recv().is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Phase 5: Auto-accept CLI-mode transfers
+    // ══════════════════════════════════════════════════════════════════════
+
+    // ── CLI-mode offer with save_path auto-accepts ────────────────────────
+    #[tokio::test]
+    async fn cli_mode_offer_auto_accepts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let save_path = dir.path().join("received.bin");
+
+        let (adapter, mut bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-cli-auto",
+            "senderDeviceId": "dev-remote",
+            "senderAddr": "10.0.0.1:9417",
+            "file": {"name": "data.bin", "size": 1024, "sha256": "abc"},
+            "token": "a".repeat(64),
+            "cliMode": true,
+            "savePath": save_path.to_str().unwrap(),
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Should NOT emit an AdapterEvent::Offer (auto-accepted, not interactive)
+        assert!(
+            adapter_event_rx.try_recv().is_err(),
+            "CLI-mode offer should not emit Offer event to UI"
+        );
+
+        // Should send an ACCEPT message via bus_tx
+        let (target_device, msg_type, _payload) = bus_rx.try_recv()
+            .expect("Auto-accept should send ACCEPT via bus");
+        assert_eq!(target_device, "dev-remote");
+        assert_eq!(msg_type, message_types::ACCEPT);
+    }
+
+    // ── Non-CLI-mode offer emits Offer event for interactive UI ──────────
+    #[tokio::test]
+    async fn non_cli_mode_offer_emits_event() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-interactive",
+            "senderDeviceId": "dev-remote",
+            "senderAddr": "10.0.0.1:9417",
+            "file": {"name": "photo.jpg", "size": 2048, "sha256": "def"},
+            "token": "b".repeat(64),
+            "cliMode": false,
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Should emit AdapterEvent::Offer for UI confirmation
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Offer(offer) => {
+                assert_eq!(offer.transfer_id, "ft-interactive");
+                assert!(!offer.cli_mode);
+            }
+            _ => panic!("Expected Offer event, got {:?}", event),
+        }
+    }
+
+    // ── CLI-mode offer without save_path falls through to interactive ─────
+    #[tokio::test]
+    async fn cli_mode_without_save_path_emits_offer_event() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-cli-no-path",
+            "senderDeviceId": "dev-remote",
+            "senderAddr": "10.0.0.1:9417",
+            "file": {"name": "file.bin", "size": 512, "sha256": "ghi"},
+            "token": "c".repeat(64),
+            "cliMode": true,
+            // No savePath
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Without save_path, should fall through to interactive mode
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Offer(offer) => {
+                assert_eq!(offer.transfer_id, "ft-cli-no-path");
+                assert!(offer.cli_mode);
+                assert!(offer.save_path.is_none());
+            }
+            _ => panic!("Expected Offer event, got {:?}", event),
+        }
+    }
+
+    // ── CLI-mode offer with empty save_path falls through to interactive ──
+    #[tokio::test]
+    async fn cli_mode_with_empty_save_path_emits_offer_event() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-cli-empty-path",
+            "senderDeviceId": "dev-remote",
+            "senderAddr": "10.0.0.1:9417",
+            "file": {"name": "file.bin", "size": 512, "sha256": "jkl"},
+            "token": "d".repeat(64),
+            "cliMode": true,
+            "savePath": "",
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Empty save_path should fall through to interactive mode
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Offer(offer) => {
+                assert_eq!(offer.transfer_id, "ft-cli-empty-path");
+            }
+            _ => panic!("Expected Offer event, got {:?}", event),
+        }
+    }
+
+    // ── Offer without cli_mode field defaults to false (backward compat) ──
+    #[tokio::test]
+    async fn offer_without_cli_mode_defaults_to_interactive() {
+        let (adapter, _bus_rx, mut adapter_event_rx, _event_rx) = create_test_adapter();
+
+        // Legacy offer payload without cliMode or savePath fields
+        let offer_payload = serde_json::json!({
+            "transferId": "ft-legacy",
+            "senderDeviceId": "dev-old",
+            "senderAddr": "10.0.0.1:9417",
+            "file": {"name": "legacy.bin", "size": 256, "sha256": "mno"},
+            "token": "e".repeat(64),
+        });
+
+        adapter
+            .handle_bus_message(message_types::OFFER, &offer_payload)
+            .await;
+
+        // Should default to interactive (cli_mode defaults to false)
+        let event = adapter_event_rx.try_recv().unwrap();
+        match event {
+            AdapterEvent::Offer(offer) => {
+                assert_eq!(offer.transfer_id, "ft-legacy");
+                assert!(!offer.cli_mode, "cli_mode should default to false");
+                assert!(offer.save_path.is_none(), "save_path should default to None");
+            }
+            _ => panic!("Expected Offer event, got {:?}", event),
+        }
+    }
+
+    // ── Offer serde: cli_mode fields roundtrip correctly ──────────────────
+    #[test]
+    fn offer_serde_cli_mode_fields() {
+        let offer = FileTransferOffer {
+            transfer_id: "ft-serde-cli".to_string(),
+            sender_device_id: "device-1".to_string(),
+            sender_addr: "host.ts.net:9417".to_string(),
+            file: FileInfo {
+                name: "test.bin".to_string(),
+                size: 1024,
+                sha256: "abc".to_string(),
+            },
+            token: "a".repeat(64),
+            cli_mode: true,
+            save_path: Some("/tmp/output.bin".to_string()),
+        };
+
+        let json = serde_json::to_string(&offer).unwrap();
+        assert!(json.contains("cliMode"), "cliMode should be serialized");
+        assert!(json.contains("savePath"), "savePath should be serialized");
+
+        let parsed: FileTransferOffer = serde_json::from_str(&json).unwrap();
+        assert!(parsed.cli_mode);
+        assert_eq!(parsed.save_path.as_deref(), Some("/tmp/output.bin"));
+    }
+
+    // ── Offer serde: save_path=None is not serialized (skip_serializing_if) ──
+    #[test]
+    fn offer_serde_save_path_none_omitted() {
+        let offer = FileTransferOffer {
+            transfer_id: "ft-serde-no-path".to_string(),
+            sender_device_id: "device-1".to_string(),
+            sender_addr: "host.ts.net:9417".to_string(),
+            file: FileInfo {
+                name: "test.bin".to_string(),
+                size: 1024,
+                sha256: "abc".to_string(),
+            },
+            token: "a".repeat(64),
+            cli_mode: false,
+            save_path: None,
+        };
+
+        let json = serde_json::to_string(&offer).unwrap();
+        assert!(!json.contains("savePath"), "savePath=None should be omitted from JSON");
     }
 }
