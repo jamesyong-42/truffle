@@ -284,6 +284,72 @@ impl FileTransferAdapter {
         self.transfers.read().await.values().cloned().collect()
     }
 
+    /// Send an OFFER message to a target device via the message bus.
+    ///
+    /// Used by the daemon handler to initiate a CLI-mode file transfer.
+    /// The caller is responsible for preparing the file and constructing the offer.
+    pub fn send_offer(&self, target_device_id: &str, offer: &FileTransferOffer) {
+        let payload = match serde_json::to_string(offer) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to serialize file transfer offer: {e}");
+                return;
+            }
+        };
+        let _ = self.bus_tx.send((
+            target_device_id.to_string(),
+            message_types::OFFER.to_string(),
+            payload,
+        ));
+    }
+
+    /// Register a pending send transfer in the adapter's tracking maps.
+    ///
+    /// This must be called before sending the OFFER so that when ACCEPT arrives,
+    /// the adapter's ACCEPT handler can find the file path and transfer info.
+    pub async fn register_pending_send(
+        &self,
+        transfer_id: &str,
+        file_path: &str,
+        file: &FileInfo,
+        peer_device_id: &str,
+    ) {
+        self.file_paths
+            .write()
+            .await
+            .insert(transfer_id.to_string(), file_path.to_string());
+
+        self.transfers.write().await.insert(
+            transfer_id.to_string(),
+            AdapterTransferInfo {
+                transfer_id: transfer_id.to_string(),
+                direction: "send".to_string(),
+                state: "offered".to_string(),
+                peer_device_id: peer_device_id.to_string(),
+                file: file.clone(),
+                bytes_transferred: 0,
+                percent: 0.0,
+                bytes_per_second: 0.0,
+                eta: 0.0,
+            },
+        );
+    }
+
+    /// Get a reference to the underlying manager.
+    pub fn manager(&self) -> &Arc<FileTransferManager> {
+        &self.manager
+    }
+
+    /// Get the local device ID.
+    pub fn local_device_id(&self) -> &str {
+        &self.config.local_device_id
+    }
+
+    /// Get the local address (for sender_addr in offers).
+    pub fn local_addr(&self) -> &str {
+        &self.config.local_addr
+    }
+
     // --- MessageBus message handler ---
 
     /// Handle an incoming MessageBus message.
@@ -464,7 +530,7 @@ impl FileTransferAdapter {
 }
 
 /// Generate a transfer ID: "ft-<16 hex chars>" (64 bits of randomness).
-fn generate_transfer_id() -> String {
+pub fn generate_transfer_id() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 8];
     rand::rng().fill_bytes(&mut bytes);
@@ -472,7 +538,7 @@ fn generate_transfer_id() -> String {
 }
 
 /// Generate a transfer token: 64 hex chars (256 bits of randomness).
-fn generate_token() -> String {
+pub fn generate_token() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);

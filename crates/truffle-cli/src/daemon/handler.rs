@@ -7,9 +7,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Notify;
+use tracing::info;
 use truffle_core::runtime::TruffleRuntime;
-use truffle_core::services::file_transfer::adapter::FileTransferAdapter;
+use truffle_core::services::file_transfer::adapter::{
+    FileTransferAdapter, FileTransferOffer, generate_transfer_id, generate_token,
+};
 use truffle_core::services::file_transfer::manager::FileTransferManager;
+use truffle_core::services::file_transfer::types::{FileInfo, FileTransferEvent};
 
 use super::protocol::{error_code, method, DaemonRequest, DaemonResponse};
 
@@ -52,7 +56,7 @@ pub async fn dispatch(request: &DaemonRequest, ctx: &DaemonContext) -> DaemonRes
 
         // Phase 11: File transfer
         method::PUSH_FILE => {
-            handle_push_file(request.id, &request.params, &ctx.file_transfer_adapter).await
+            handle_push_file(request.id, &request.params, ctx).await
         }
         method::GET_FILE => {
             handle_get_file(request.id, &request.params, &ctx.file_transfer_adapter).await
@@ -307,14 +311,27 @@ fn handle_shutdown(id: u64, shutdown_signal: &Arc<Notify>) -> DaemonResponse {
 
 /// Handle `push_file` -- push a file to a remote node via the file transfer subsystem.
 ///
-/// Currently a stub that accepts the file data and acknowledges receipt.
-/// Full transfer implementation will come in Phase 2.
+/// Orchestrates the full transfer flow:
+/// 1. Validate params and local file
+/// 2. Resolve target node to device_id
+/// 3. Prepare the file (stat + SHA-256 hash)
+/// 4. Send OFFER with cli_mode=true to the target
+/// 5. Wait for ACCEPT from the target
+/// 6. The adapter's ACCEPT handler registers the send and starts streaming
+/// 7. Wait for Complete or Error event
+/// 8. Return the result
 async fn handle_push_file(
     id: u64,
     params: &serde_json::Value,
-    _adapter: &Arc<FileTransferAdapter>,
+    ctx: &DaemonContext,
 ) -> DaemonResponse {
-    let _node = match params.get("node").and_then(|v| v.as_str()) {
+    let runtime = &ctx.runtime;
+    let adapter = &ctx.file_transfer_adapter;
+    let manager = &ctx.file_transfer_manager;
+
+    // --- Parse params ---
+
+    let node = match params.get("node").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
             return DaemonResponse::error(
@@ -325,35 +342,257 @@ async fn handle_push_file(
         }
     };
 
-    let _path = match params.get("path").and_then(|v| v.as_str()) {
+    let local_path = match params.get("local_path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => {
             return DaemonResponse::error(
                 id,
                 error_code::INVALID_PARAMS,
-                "Missing required parameter: 'path'",
+                "Missing required parameter: 'local_path'",
             );
         }
     };
 
-    let size = params.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let sha256 = params
-        .get("sha256")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let remote_path = match params.get("remote_path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => {
+            return DaemonResponse::error(
+                id,
+                error_code::INVALID_PARAMS,
+                "Missing required parameter: 'remote_path'",
+            );
+        }
+    };
 
-    // TODO: In the full implementation (Phase 2), this will:
-    // 1. Resolve the node name to a Tailscale peer
-    // 2. Use the adapter to initiate the file transfer
-    // 3. Stream progress updates back to the CLI
+    // --- Validate local file ---
 
-    DaemonResponse::success(
-        id,
-        serde_json::json!({
-            "bytes_transferred": size,
-            "sha256": sha256,
-        }),
-    )
+    let path = std::path::Path::new(local_path);
+    if !path.exists() {
+        return DaemonResponse::error(
+            id,
+            error_code::INVALID_PARAMS,
+            format!("File not found: {local_path}"),
+        );
+    }
+    if !path.is_file() {
+        return DaemonResponse::error(
+            id,
+            error_code::INVALID_PARAMS,
+            format!("Not a file: {local_path}"),
+        );
+    }
+
+    // --- Resolve node to device_id ---
+
+    let device_id = match resolve_node_device_id(runtime, node).await {
+        Some(did) => did,
+        None => {
+            return DaemonResponse::error(
+                id,
+                error_code::NODE_NOT_FOUND,
+                format!("Node not found: {node}"),
+            );
+        }
+    };
+
+    // --- Generate transfer credentials ---
+
+    let transfer_id = generate_transfer_id();
+    let token = generate_token();
+
+    info!(
+        transfer_id = %transfer_id,
+        local_path = %local_path,
+        remote_path = %remote_path,
+        target = %device_id,
+        "Starting file transfer"
+    );
+
+    // --- Subscribe to manager events BEFORE preparing ---
+    // This ensures we don't miss the Prepared event.
+
+    let mut event_rx = manager.subscribe_events();
+
+    // --- Prepare the file (stat + SHA-256 hash) ---
+
+    manager.prepare_file(&transfer_id, local_path).await;
+
+    // --- Wait for Prepared event (with timeout) ---
+
+    let overall_timeout = tokio::time::Duration::from_secs(60);
+    let started = Instant::now();
+
+    let (file_name, file_size, file_sha256) = loop {
+        let remaining = overall_timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return DaemonResponse::error(
+                id,
+                error_code::TIMEOUT,
+                "Timed out waiting for file preparation",
+            );
+        }
+
+        match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Ok(FileTransferEvent::Prepared {
+                transfer_id: ref tid,
+                ref name,
+                size,
+                ref sha256,
+            })) if tid == &transfer_id => {
+                break (name.clone(), size, sha256.clone());
+            }
+            Ok(Ok(FileTransferEvent::Error {
+                transfer_id: ref tid,
+                ref message,
+                ..
+            })) if tid == &transfer_id => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    format!("File preparation failed: {message}"),
+                );
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                // Missed some events, continue listening
+                continue;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    "Event channel closed during file preparation",
+                );
+            }
+            Ok(Ok(_)) => {
+                // Event for a different transfer or different type, skip
+                continue;
+            }
+            Err(_) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::TIMEOUT,
+                    "Timed out waiting for file preparation",
+                );
+            }
+        }
+    };
+
+    let file_info = FileInfo {
+        name: file_name,
+        size: file_size,
+        sha256: file_sha256.clone(),
+    };
+
+    // --- Register the pending send in the adapter ---
+    // This is needed so the adapter's ACCEPT handler can find the file path
+    // and transfer info when the remote node accepts.
+
+    adapter
+        .register_pending_send(&transfer_id, local_path, &file_info, &device_id)
+        .await;
+
+    // --- Construct and send OFFER with cli_mode=true ---
+
+    let offer = FileTransferOffer {
+        transfer_id: transfer_id.clone(),
+        sender_device_id: adapter.local_device_id().to_string(),
+        sender_addr: adapter.local_addr().to_string(),
+        file: file_info,
+        token: token.clone(),
+        cli_mode: true,
+        save_path: Some(remote_path.to_string()),
+    };
+
+    adapter.send_offer(&device_id, &offer);
+
+    info!(
+        transfer_id = %transfer_id,
+        target = %device_id,
+        "OFFER sent, waiting for ACCEPT"
+    );
+
+    // --- Wait for Complete or Error event (with timeout) ---
+    // The adapter's ACCEPT handler will register_send + send_file when ACCEPT arrives.
+    // We watch for the final Complete or Error event from the manager.
+
+    loop {
+        let remaining = overall_timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return DaemonResponse::error(
+                id,
+                error_code::TIMEOUT,
+                "File transfer timed out",
+            );
+        }
+
+        match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Ok(FileTransferEvent::Complete {
+                transfer_id: ref tid,
+                ref sha256,
+                size,
+                duration_ms,
+                ..
+            })) if tid == &transfer_id => {
+                info!(
+                    transfer_id = %transfer_id,
+                    size = size,
+                    duration_ms = duration_ms,
+                    "File transfer complete"
+                );
+                return DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "transfer_id": transfer_id,
+                        "bytes_transferred": size,
+                        "sha256": sha256,
+                        "duration_ms": duration_ms,
+                    }),
+                );
+            }
+            Ok(Ok(FileTransferEvent::Error {
+                transfer_id: ref tid,
+                ref code,
+                ref message,
+                ..
+            })) if tid == &transfer_id => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    format!("Transfer failed ({code}): {message}"),
+                );
+            }
+            Ok(Ok(FileTransferEvent::Cancelled {
+                transfer_id: ref tid,
+            })) if tid == &transfer_id => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    "Transfer was cancelled",
+                );
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                continue;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    "Event channel closed during transfer",
+                );
+            }
+            Ok(Ok(_)) => {
+                // Progress or other event for different transfer, skip
+                continue;
+            }
+            Err(_) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::TIMEOUT,
+                    "File transfer timed out",
+                );
+            }
+        }
+    }
 }
 
 /// Handle `get_file` -- download a file from a remote node.
@@ -844,6 +1083,22 @@ async fn handle_chat_start(
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Resolve a node name to a device ID.
+///
+/// Looks up the node in the peer list by name, device ID, or hostname.
+/// Returns `None` if the node is not found.
+async fn resolve_node_device_id(runtime: &Arc<TruffleRuntime>, node: &str) -> Option<String> {
+    if node.is_empty() {
+        return None;
+    }
+
+    let devices = runtime.devices().await;
+    devices
+        .iter()
+        .find(|d| d.name == node || d.id == node || d.tailscale_hostname == node)
+        .map(|d| d.id.clone())
+}
 
 /// Resolve a node name to a Tailscale IP address.
 ///

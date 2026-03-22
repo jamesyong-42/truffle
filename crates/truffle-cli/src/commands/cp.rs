@@ -161,12 +161,16 @@ pub async fn run(
 }
 
 /// Upload a local file to a remote node via the daemon.
+///
+/// The CLI sends only metadata (node, paths) to the daemon via JSON-RPC.
+/// The daemon reads the file directly from disk (same machine) and handles
+/// the transfer over the mesh network.
 async fn do_upload(
     client: &DaemonClient,
     local_path: &Path,
     node: &str,
     remote_path: &str,
-    verify: bool,
+    _verify: bool,
 ) -> Result<(), String> {
     // Verify local file exists
     if !local_path.exists() {
@@ -198,7 +202,6 @@ async fn do_upload(
         ));
     }
 
-    let file_size = metadata.len();
     let file_name = local_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -213,6 +216,15 @@ async fn do_upload(
         remote_path.to_string()
     };
 
+    // Resolve local_path to absolute (daemon reads from disk directly)
+    let abs_local_path = if local_path.is_absolute() {
+        local_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Can't determine working directory: {e}"))?
+            .join(local_path)
+    };
+
     // Show transfer info
     println!();
     println!(
@@ -223,29 +235,17 @@ async fn do_upload(
         dest_path,
     );
 
-    // Compute SHA-256 if verify is enabled
-    let sha256 = if verify {
-        Some(compute_sha256(local_path)?)
-    } else {
-        None
-    };
-
     let started = Instant::now();
 
-    // Read file content
-    let file_data = std::fs::read(local_path)
-        .map_err(|e| format!("Can't read file: {e}"))?;
-
-    // Send via daemon's push_file command
+    // Send via daemon's push_file command -- no file data, just metadata.
+    // The daemon reads the file directly from disk (it runs on the same machine).
     let result = client
         .request(
             method::PUSH_FILE,
             serde_json::json!({
                 "node": node,
-                "path": dest_path,
-                "size": file_size,
-                "sha256": sha256,
-                "data_base64": base64_encode(&file_data),
+                "local_path": abs_local_path.to_string_lossy(),
+                "remote_path": dest_path,
             }),
         )
         .await;
@@ -254,25 +254,14 @@ async fn do_upload(
 
     match result {
         Ok(resp) => {
-            let transferred = resp["bytes_transferred"].as_u64().unwrap_or(file_size);
+            let transferred = resp["bytes_transferred"].as_u64().unwrap_or(0);
             output::print_progress_complete(transferred, elapsed);
 
-            if verify {
-                if let Some(hash) = &sha256 {
-                    let remote_hash = resp["sha256"].as_str().unwrap_or("");
-                    if remote_hash == hash {
-                        output::print_success("SHA-256 verified");
-                    } else if remote_hash.is_empty() {
-                        output::print_warning("SHA-256 verification not confirmed by remote");
-                    } else {
-                        output::print_error(
-                            "SHA-256 mismatch",
-                            &format!("Local:  {}\nRemote: {}", hash, remote_hash),
-                            "The file may have been corrupted during transfer. Try again.",
-                        );
-                        return Err("SHA-256 mismatch".to_string());
-                    }
-                }
+            // The daemon performs SHA-256 verification on both sides during transfer.
+            // Report the result if available.
+            let sha256 = resp["sha256"].as_str().unwrap_or("");
+            if !sha256.is_empty() {
+                output::print_success(&format!("SHA-256: {}", &sha256[..16.min(sha256.len())]));
             }
 
             Ok(())
@@ -424,6 +413,9 @@ fn compute_sha256(path: &Path) -> Result<String, String> {
 }
 
 /// Base64 encode bytes.
+///
+/// Used by `do_download` (Phase 3 will remove) and tests.
+#[allow(dead_code)]
 fn base64_encode(data: &[u8]) -> String {
     // Simple base64 encoding without external dependency.
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
