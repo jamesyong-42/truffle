@@ -1,6 +1,6 @@
 [package]
 name = "truffle-tauri-plugin"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 description = "Tauri v2 plugin for truffle-core mesh networking"
 license = "MIT"

@@ -1,6 +1,6 @@
 [package]
 name = "truffle-napi"
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 description = "NAPI-RS bindings for truffle-core (published to npm, not crates.io)"
 license = "MIT"
