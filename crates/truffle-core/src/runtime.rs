@@ -701,11 +701,25 @@ impl TruffleRuntime {
                                 ip: status.tailscale_ip.clone(),
                                 dns_name,
                             });
-                            // Request peers
+                            // Request peers immediately
                             let sg = shim.lock().await;
                             if let Some(ref s) = *sg {
                                 let _ = s.get_peers().await;
                             }
+                            drop(sg);
+                            // Start periodic peer polling (every 30s)
+                            let poll_shim = shim.clone();
+                            tokio::spawn(async move {
+                                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                                interval.tick().await; // skip first immediate tick
+                                loop {
+                                    interval.tick().await;
+                                    let sg = poll_shim.lock().await;
+                                    if let Some(ref s) = *sg {
+                                        let _ = s.get_peers().await;
+                                    }
+                                }
+                            });
                         }
                     }
                     Ok(ShimLifecycleEvent::AuthRequired { auth_url }) => {

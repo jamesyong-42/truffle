@@ -87,12 +87,11 @@ impl DaemonServer {
         };
 
         // Build the runtime
-        let hostname = config
-            .node
-            .name
-            .as_str();
+        // Use "truffle" as the shared mesh prefix so all nodes can discover
+        // each other. The machine hostname is used as the display name only.
         let (runtime, _mesh_rx) = TruffleRuntime::builder()
-            .hostname(hostname)
+            .hostname("truffle")
+            .device_name(&config.node.name)
             .device_type("cli")
             .sidecar_path(sidecar_path)
             .state_dir(&state_dir)
