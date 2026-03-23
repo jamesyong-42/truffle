@@ -18,6 +18,7 @@ pub mod message_types {
     pub const ACCEPT: &str = "ACCEPT";
     pub const REJECT: &str = "REJECT";
     pub const CANCEL: &str = "CANCEL";
+    pub const PULL_REQUEST: &str = "PULL_REQUEST";
 }
 
 /// Offer payload: sender -> receiver via MessageBus.
@@ -62,6 +63,20 @@ pub struct FileTransferCancel {
     pub transfer_id: String,
     pub cancelled_by: String,
     pub reason: String,
+}
+
+/// Pull request payload: requester -> file owner via MessageBus.
+///
+/// The requester sends this to ask a remote node to send a file back.
+/// On receipt, the remote node validates the path, prepares the file,
+/// and sends an OFFER back with `cli_mode: true`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferPullRequest {
+    pub request_id: String,
+    pub remote_path: String,
+    pub requester_device_id: String,
+    pub save_path: String,
 }
 
 /// Adapter event emitted to the UI/API layer.
@@ -303,6 +318,26 @@ impl FileTransferAdapter {
         ));
     }
 
+    /// Send a PULL_REQUEST message to a target device via the message bus.
+    ///
+    /// Used by the daemon handler to request a file download from a remote node.
+    /// The remote node will validate the path, prepare the file, and send an
+    /// OFFER back with `cli_mode: true` and `save_path` set.
+    pub fn send_pull_request(&self, target_device_id: &str, pull_request: &FileTransferPullRequest) {
+        let payload = match serde_json::to_string(pull_request) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to serialize file transfer pull request: {e}");
+                return;
+            }
+        };
+        let _ = self.bus_tx.send((
+            target_device_id.to_string(),
+            message_types::PULL_REQUEST.to_string(),
+            payload,
+        ));
+    }
+
     /// Register a pending send transfer in the adapter's tracking maps.
     ///
     /// This must be called before sending the OFFER so that when ACCEPT arrives,
@@ -430,6 +465,138 @@ impl FileTransferAdapter {
                                 resumable: false,
                             },
                         ));
+                }
+            }
+
+            message_types::PULL_REQUEST => {
+                if let Ok(pull) = serde_json::from_value::<FileTransferPullRequest>(payload.clone()) {
+                    let remote_path = &pull.remote_path;
+                    let path = std::path::Path::new(remote_path);
+
+                    // Validate the requested path exists and is a file
+                    if !path.exists() {
+                        tracing::warn!(
+                            "[FileTransferAdapter] PULL_REQUEST for non-existent path: {}",
+                            remote_path
+                        );
+                        return;
+                    }
+                    if !path.is_file() {
+                        tracing::warn!(
+                            "[FileTransferAdapter] PULL_REQUEST for non-file path: {}",
+                            remote_path
+                        );
+                        return;
+                    }
+
+                    // Generate transfer credentials
+                    let transfer_id = generate_transfer_id();
+                    let token = generate_token();
+
+                    tracing::info!(
+                        "[FileTransferAdapter] Handling PULL_REQUEST {} for {} from {}",
+                        pull.request_id,
+                        remote_path,
+                        pull.requester_device_id
+                    );
+
+                    // Prepare the file (stat + SHA-256 hash)
+                    self.manager.prepare_file(&transfer_id, remote_path).await;
+
+                    // Wait for Prepared event from the manager
+                    // Subscribe to events and wait with a timeout
+                    let mut event_rx = self.manager.subscribe_events();
+                    let timeout = tokio::time::Duration::from_secs(60);
+                    let started = std::time::Instant::now();
+
+                    let file_info = loop {
+                        let remaining = timeout.saturating_sub(started.elapsed());
+                        if remaining.is_zero() {
+                            tracing::warn!(
+                                "[FileTransferAdapter] Timed out preparing file for PULL_REQUEST {}",
+                                pull.request_id
+                            );
+                            return;
+                        }
+
+                        match tokio::time::timeout(remaining, event_rx.recv()).await {
+                            Ok(Ok(FileTransferEvent::Prepared {
+                                transfer_id: ref tid,
+                                ref name,
+                                size,
+                                ref sha256,
+                            })) if tid == &transfer_id => {
+                                break FileInfo {
+                                    name: name.clone(),
+                                    size,
+                                    sha256: sha256.clone(),
+                                };
+                            }
+                            Ok(Ok(FileTransferEvent::Error {
+                                transfer_id: ref tid,
+                                ref message,
+                                ..
+                            })) if tid == &transfer_id => {
+                                tracing::warn!(
+                                    "[FileTransferAdapter] File preparation failed for PULL_REQUEST {}: {}",
+                                    pull.request_id,
+                                    message
+                                );
+                                return;
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                tracing::warn!(
+                                    "[FileTransferAdapter] Event channel closed during PULL_REQUEST {}",
+                                    pull.request_id
+                                );
+                                return;
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                                continue;
+                            }
+                            Ok(Ok(_)) => {
+                                // Event for a different transfer or type, skip
+                                continue;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "[FileTransferAdapter] Timed out preparing file for PULL_REQUEST {}",
+                                    pull.request_id
+                                );
+                                return;
+                            }
+                        }
+                    };
+
+                    // Register the pending send
+                    self.register_pending_send(
+                        &transfer_id,
+                        remote_path,
+                        &file_info,
+                        &pull.requester_device_id,
+                    )
+                    .await;
+
+                    // Send OFFER back to the requester with cli_mode=true and save_path
+                    let offer = FileTransferOffer {
+                        transfer_id: transfer_id.clone(),
+                        sender_device_id: self.config.local_device_id.clone(),
+                        sender_addr: self.config.local_addr.clone(),
+                        file: file_info,
+                        token,
+                        cli_mode: true,
+                        save_path: Some(pull.save_path.clone()),
+                    };
+
+                    self.send_offer(&pull.requester_device_id, &offer);
+
+                    tracing::info!(
+                        "[FileTransferAdapter] Sent OFFER {} in response to PULL_REQUEST {}",
+                        transfer_id,
+                        pull.request_id
+                    );
+                } else {
+                    tracing::warn!("[FileTransferAdapter] Malformed PULL_REQUEST payload");
                 }
             }
 
