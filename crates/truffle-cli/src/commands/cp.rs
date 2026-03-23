@@ -13,6 +13,9 @@ use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::{method, DaemonNotification};
 use crate::output;
 
+/// Default remote directory when no path is specified (e.g. `truffle cp file.txt server:`).
+const DEFAULT_REMOTE_DIR: &str = "~/Downloads/truffle/";
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Remote path parsing
 // ═══════════════════════════════════════════════════════════════════════════
@@ -209,7 +212,9 @@ async fn do_upload(
 
     // Determine the final remote path
     let dest_path = if remote_path.is_empty() {
-        file_name.to_string()
+        // `truffle cp file.txt server:` -- no remote path specified.
+        // Use a default downloads directory on the remote side.
+        format!("{}{}", DEFAULT_REMOTE_DIR, file_name)
     } else if remote_path.ends_with('/') {
         format!("{}{}", remote_path, file_name)
     } else {
@@ -294,6 +299,29 @@ async fn do_download(
     local_path: &Path,
     _verify: bool,
 ) -> Result<(), String> {
+    // Validate remote path: must specify a file, not just a directory
+    if remote_path.is_empty() {
+        output::print_error(
+            "No remote file specified",
+            "You must specify a file path on the remote node.",
+            &format!("truffle cp {}:/path/to/file.txt ./", node),
+        );
+        return Err(output::format_error("No remote file specified", "", ""));
+    }
+
+    if remote_path.ends_with('/') {
+        output::print_error(
+            &format!("Remote path is a directory: {}", remote_path),
+            "You must specify a file, not a directory.",
+            &format!("truffle cp {}:{}file.txt ./", node, remote_path),
+        );
+        return Err(output::format_error(
+            &format!("Remote path is a directory: {}", remote_path),
+            "",
+            "",
+        ));
+    }
+
     let file_name = Path::new(remote_path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -388,129 +416,6 @@ fn render_progress(notification: &DaemonNotification) {
     output::print_progress(current, total, speed);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Compute SHA-256 hash of a file.
-#[allow(dead_code)]
-fn compute_sha256(path: &Path) -> Result<String, String> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| format!("Can't open file for hashing: {e}"))?;
-
-    // Simple SHA-256 using a basic implementation.
-    // For a production CLI we would use the `sha2` crate, but to avoid
-    // adding a dependency we use a manual approach via the system's
-    // shasum command, or we include a minimal implementation.
-    //
-    // For now, shell out to shasum (available on macOS/Linux).
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)
-        .map_err(|e| format!("Can't read file: {e}"))?;
-
-    // Use std::process::Command to call shasum
-    let output = std::process::Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(path.as_os_str())
-        .output()
-        .map_err(|e| format!("Can't compute SHA-256 (shasum not found?): {e}"))?;
-
-    if !output.status.success() {
-        return Err("shasum failed".to_string());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let hash = stdout.split_whitespace().next().unwrap_or("").to_string();
-    if hash.len() == 64 {
-        Ok(hash)
-    } else {
-        Err("Unexpected shasum output".to_string())
-    }
-}
-
-/// Base64 encode bytes.
-///
-/// Used by `do_download` (Phase 3 will remove) and tests.
-#[allow(dead_code)]
-fn base64_encode(data: &[u8]) -> String {
-    // Simple base64 encoding without external dependency.
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-
-        let n = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
-
-        if chunk.len() > 1 {
-            result.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(CHARS[(n & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-
-    result
-}
-
-/// Base64 decode a string to bytes.
-#[allow(dead_code)]
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    fn char_to_val(c: u8) -> Result<u8, String> {
-        match c {
-            b'A'..=b'Z' => Ok(c - b'A'),
-            b'a'..=b'z' => Ok(c - b'a' + 26),
-            b'0'..=b'9' => Ok(c - b'0' + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            b'=' => Ok(0),
-            _ => Err(format!("Invalid base64 character: {}", c as char)),
-        }
-    }
-
-    let input = input.trim();
-    if input.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
-        return Err("Invalid base64 length".to_string());
-    }
-
-    let mut result = Vec::with_capacity(bytes.len() / 4 * 3);
-
-    for chunk in bytes.chunks(4) {
-        let a = char_to_val(chunk[0])?;
-        let b = char_to_val(chunk[1])?;
-        let c = char_to_val(chunk[2])?;
-        let d = char_to_val(chunk[3])?;
-
-        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
-
-        result.push((n >> 16) as u8);
-        if chunk[2] != b'=' {
-            result.push((n >> 8) as u8);
-        }
-        if chunk[3] != b'=' {
-            result.push(n as u8);
-        }
-    }
-
-    Ok(result)
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
@@ -575,38 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_roundtrip() {
-        let data = b"Hello, truffle!";
-        let encoded = base64_encode(data);
-        let decoded = base64_decode(&encoded).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn test_base64_empty() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_decode("").unwrap(), Vec::<u8>::new());
-    }
-
-    #[test]
-    fn test_base64_padding() {
-        // 1 byte -> 4 chars with 2 padding
-        let encoded = base64_encode(b"A");
-        assert_eq!(encoded, "QQ==");
-        assert_eq!(base64_decode(&encoded).unwrap(), b"A");
-
-        // 2 bytes -> 4 chars with 1 padding
-        let encoded = base64_encode(b"AB");
-        assert_eq!(encoded, "QUI=");
-        assert_eq!(base64_decode(&encoded).unwrap(), b"AB");
-
-        // 3 bytes -> 4 chars no padding
-        let encoded = base64_encode(b"ABC");
-        assert_eq!(encoded, "QUJD");
-        assert_eq!(base64_decode(&encoded).unwrap(), b"ABC");
-    }
-
-    #[test]
     fn test_transfer_direction() {
         let src = parse_location("file.txt");
         let dst = parse_location("server:/tmp/");
@@ -617,5 +490,39 @@ mod tests {
         let dst = parse_location("./");
         assert!(src.is_remote());
         assert!(!dst.is_remote());
+    }
+
+    #[test]
+    fn test_parse_location_empty_remote_path() {
+        // `server:` produces an empty path -- used for upload default directory
+        let loc = parse_location("server:");
+        assert_eq!(
+            loc,
+            FileLocation::Remote {
+                node: "server".to_string(),
+                path: "".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_location_remote_trailing_slash() {
+        // `server:/tmp/` -- path ends with slash, indicating a directory
+        let loc = parse_location("server:/tmp/");
+        match loc {
+            FileLocation::Remote { path, .. } => {
+                assert!(path.ends_with('/'), "Path should preserve trailing slash");
+            }
+            _ => panic!("Expected Remote location"),
+        }
+    }
+
+    #[test]
+    fn test_parse_location_windows_drive_is_local() {
+        // Single-char node names are rejected (likely Windows drive letters)
+        assert_eq!(
+            parse_location("C:\\Users\\file.txt"),
+            FileLocation::Local(PathBuf::from("C:\\Users\\file.txt"))
+        );
     }
 }

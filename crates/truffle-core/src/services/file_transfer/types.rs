@@ -232,7 +232,7 @@ pub struct FileTransferConfig {
 impl Default for FileTransferConfig {
     fn default() -> Self {
         Self {
-            max_file_size: 4 * 1024 * 1024 * 1024, // 4GB
+            max_file_size: 100 * 1024 * 1024 * 1024, // 100GB
             max_concurrent_recv: 5,
             progress_interval: Duration::from_millis(500),
             progress_bytes: 256 * 1024, // 256KB
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn default_config() {
         let cfg = FileTransferConfig::default();
-        assert_eq!(cfg.max_file_size, 4 * 1024 * 1024 * 1024);
+        assert_eq!(cfg.max_file_size, 100 * 1024 * 1024 * 1024);
         assert_eq!(cfg.max_concurrent_recv, 5);
         assert_eq!(cfg.progress_interval, Duration::from_millis(500));
         assert_eq!(cfg.progress_bytes, 256 * 1024);

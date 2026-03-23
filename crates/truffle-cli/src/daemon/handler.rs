@@ -67,7 +67,7 @@ pub async fn dispatch(
             handle_push_file(request.id, &request.params, ctx, notification_tx).await
         }
         method::GET_FILE => {
-            handle_get_file(request.id, &request.params, ctx).await
+            handle_get_file(request.id, &request.params, ctx, notification_tx).await
         }
 
         _ => DaemonResponse::error(
@@ -642,6 +642,7 @@ async fn handle_get_file(
     id: u64,
     params: &serde_json::Value,
     ctx: &DaemonContext,
+    notification_tx: tokio::sync::mpsc::UnboundedSender<DaemonNotification>,
 ) -> DaemonResponse {
     let runtime = &ctx.runtime;
     let adapter = &ctx.file_transfer_adapter;
@@ -826,8 +827,32 @@ async fn handle_get_file(
                     "Event channel closed during download",
                 );
             }
+            Ok(Ok(FileTransferEvent::Progress {
+                bytes_transferred,
+                total_bytes,
+                percent,
+                bytes_per_second,
+                eta,
+                ref direction,
+                ref transfer_id,
+                ..
+            })) if direction == "receive" => {
+                // Forward download progress as a JSON-RPC notification
+                let _ = notification_tx.send(DaemonNotification::new(
+                    notification::CP_PROGRESS,
+                    serde_json::json!({
+                        "transfer_id": transfer_id,
+                        "bytes_transferred": bytes_transferred,
+                        "total_bytes": total_bytes,
+                        "percent": percent,
+                        "bytes_per_second": bytes_per_second,
+                        "eta": eta,
+                    }),
+                ));
+                continue;
+            }
             Ok(Ok(_)) => {
-                // Progress or other event, skip
+                // Other event, skip
                 continue;
             }
             Err(_) => {

@@ -198,15 +198,15 @@ enum Commands {
     #[command(long_about = "Copy files between nodes (like scp).\n\n\
         Uses scp-style syntax: truffle cp file.txt server:/tmp/\n\
         Transfers use Tailscale's Taildrop for efficient P2P data transfer.\n\
-        SHA-256 verification is on by default.")]
+        SHA-256 verification is on by default. Use --no-verify to skip.")]
     Cp {
         /// Source (local path or node:path)
         source: String,
         /// Destination (local path or node:path)
         dest: String,
-        /// Verify integrity after transfer (SHA-256)
-        #[arg(long, default_value = "true")]
-        verify: bool,
+        /// Skip SHA-256 integrity verification after transfer
+        #[arg(long = "no-verify", default_value_t = false)]
+        no_verify: bool,
     },
 
     /// Diagnose connectivity issues
@@ -402,7 +402,7 @@ async fn main() {
         }
 
         // ── Files ─────────────────────────────────────────────────────────
-        Commands::Cp { source, dest, verify } => commands::cp::run(&config, &source, &dest, verify).await,
+        Commands::Cp { source, dest, no_verify } => commands::cp::run(&config, &source, &dest, !no_verify).await,
 
         // ── Diagnostics ───────────────────────────────────────────────────
         Commands::Doctor => commands::doctor::run(&config).await,
