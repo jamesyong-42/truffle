@@ -481,6 +481,8 @@ async fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
         let addr = addr.to_string();
 
         Box::pin(async move {
+            eprintln!("[DialFn] called for addr={addr}");
+
             // Parse host:port from addr
             let (host, port_str) = addr.rsplit_once(':').ok_or_else(|| {
                 std::io::Error::new(
@@ -499,45 +501,73 @@ async fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
             let (tx, rx) = tokio::sync::oneshot::channel();
 
             // Insert pending dial BEFORE sending dial command (prevents race)
+            eprintln!("[DialFn] rid={request_id} acquiring pending_dials lock...");
             {
                 let mut dials = pending.lock().await;
                 dials.insert(request_id.clone(), tx);
+                eprintln!("[DialFn] rid={request_id} inserted into pending_dials (count={})", dials.len());
             }
 
-            // Tell Go sidecar to dial the target
-            {
+            // Tell Go sidecar to dial the target.
+            // The shim lock is held ONLY for the send_command call (mpsc send),
+            // then released immediately — no lock held during network waits.
+            eprintln!("[DialFn] rid={request_id} acquiring shim lock...");
+            let dial_result = {
                 let shim_guard = shim.lock().await;
-                let shim_ref = shim_guard.as_ref().ok_or_else(|| {
-                    std::io::Error::new(
+                eprintln!("[DialFn] rid={request_id} shim lock acquired");
+                match shim_guard.as_ref() {
+                    Some(shim_ref) => {
+                        eprintln!("[DialFn] rid={request_id} calling dial_raw({host}:{port})...");
+                        let result = shim_ref
+                            .dial_raw(host.to_string(), port, request_id.clone())
+                            .await;
+                        eprintln!("[DialFn] rid={request_id} dial_raw returned: {result:?}");
+                        Ok(result)
+                    }
+                    None => Err(()),
+                }
+            }; // shim lock released HERE (before any await)
+            eprintln!("[DialFn] rid={request_id} shim lock released");
+
+            match dial_result {
+                Err(()) => {
+                    // No sidecar — clean up pending dial
+                    pending.lock().await.remove(&request_id);
+                    return Err(std::io::Error::new(
                         std::io::ErrorKind::NotConnected,
                         "no sidecar running",
-                    )
-                })?;
-
-                if let Err(e) = shim_ref
-                    .dial_raw(host.to_string(), port, request_id.clone())
-                    .await
-                {
-                    let mut dials = pending.lock().await;
-                    dials.remove(&request_id);
+                    ));
+                }
+                Ok(Err(e)) => {
+                    // dial_raw failed — clean up pending dial
+                    pending.lock().await.remove(&request_id);
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
                         format!("dial command failed: {e}"),
                     ));
                 }
-            } // Release shim lock during network wait
+                Ok(Ok(())) => {
+                    // dial_raw succeeded, proceed to wait for bridge connection
+                }
+            }
 
             // Await bridge connection with timeout
+            eprintln!("[DialFn] rid={request_id} waiting for bridge connection (10s timeout)...");
             let timeout = std::time::Duration::from_secs(10);
             let bridge_conn = match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(conn)) => conn,
+                Ok(Ok(conn)) => {
+                    eprintln!("[DialFn] rid={request_id} bridge connection received!");
+                    conn
+                }
                 Ok(Err(_)) => {
+                    eprintln!("[DialFn] rid={request_id} oneshot sender dropped!");
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         "dial cancelled (sender dropped)",
                     ));
                 }
                 Err(_) => {
+                    eprintln!("[DialFn] rid={request_id} TIMEOUT after 10s!");
                     let mut dials = pending.lock().await;
                     dials.remove(&request_id);
                     return Err(std::io::Error::new(

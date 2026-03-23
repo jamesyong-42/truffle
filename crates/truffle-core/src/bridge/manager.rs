@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use subtle::ConstantTimeEq;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 
@@ -74,20 +75,37 @@ impl BridgeHandler for TcpProxyHandler {
     fn handle(&self, conn: BridgeConnection) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let target = self.target_addr.clone();
         Box::pin(async move {
+            eprintln!("[TcpProxyHandler] Connecting to {target}...");
             let local = match TcpStream::connect(&target).await {
-                Ok(s) => s,
+                Ok(s) => {
+                    eprintln!("[TcpProxyHandler] Connected to {target}!");
+                    s
+                }
                 Err(e) => {
-                    tracing::warn!("TcpProxyHandler: failed to connect to {target}: {e}");
+                    eprintln!("[TcpProxyHandler] FAILED to connect to {target}: {e}");
                     return;
                 }
             };
-            let (mut bridge_read, mut bridge_write) = tokio::io::split(conn.stream);
-            let (mut local_read, mut local_write) = tokio::io::split(local);
-            // Use join! so both directions run until completion (not select! which cancels one)
-            let _ = tokio::join!(
-                tokio::io::copy(&mut bridge_read, &mut local_write),
-                tokio::io::copy(&mut local_read, &mut bridge_write),
-            );
+            eprintln!("[TcpProxyHandler] Starting bidirectional proxy...");
+            let (mut bridge_read, mut bridge_write) = conn.stream.into_split();
+            let (mut local_read, mut local_write) = local.into_split();
+
+            // Run both copy directions. When the client side closes (bridge_read EOF),
+            // shut down the local write half so the server gets EOF too.
+            // When the server responds and the client drops the connection,
+            // local_read will get EOF.
+            let c1 = tokio::spawn(async move {
+                let r = tokio::io::copy(&mut bridge_read, &mut local_write).await;
+                let _ = local_write.shutdown().await;
+                r
+            });
+            let c2 = tokio::spawn(async move {
+                let r = tokio::io::copy(&mut local_read, &mut bridge_write).await;
+                let _ = bridge_write.shutdown().await;
+                r
+            });
+            let (r1, r2) = tokio::join!(c1, c2);
+            eprintln!("[TcpProxyHandler] Proxy finished: bridge→local={r1:?}, local→bridge={r2:?}");
         })
     }
 }
@@ -200,6 +218,7 @@ impl BridgeManager {
 
             tokio::spawn(async move {
                 let _permit = permit; // held for task lifetime
+                eprintln!("[BridgeManager] accepted TCP connection from {addr}");
 
                 // Read header with timeout
                 let mut stream = stream;
@@ -232,23 +251,32 @@ impl BridgeManager {
                 }
 
                 let conn = BridgeConnection { stream, header };
+                eprintln!("[BridgeManager] header parsed: dir={} port={} rid={} from {addr}", conn.header.direction, conn.header.service_port, conn.header.request_id);
 
                 // Outgoing connections with a request_id: deliver via pending_dials
                 if conn.header.direction == Direction::Outgoing
                     && !conn.header.request_id.is_empty()
                 {
+                    let rid = conn.header.request_id.clone();
+                    eprintln!("[BridgeManager] outgoing connection for rid={rid} port={} from {addr}", conn.header.service_port);
                     let mut dials = pending_dials.lock().await;
-                    if let Some(tx) = dials.remove(&conn.header.request_id) {
+                    eprintln!("[BridgeManager] pending_dials locked, count={}, looking for rid={rid}", dials.len());
+                    if let Some(tx) = dials.remove(&rid) {
+                        eprintln!("[BridgeManager] found pending dial for rid={rid}, delivering...");
                         if tx.send(conn).is_err() {
+                            eprintln!("[BridgeManager] pending dial receiver DROPPED for rid={rid}");
                             tracing::warn!(
                                 "pending dial receiver dropped for request_id={}",
                                 "unknown" // conn was moved
                             );
+                        } else {
+                            eprintln!("[BridgeManager] delivered bridge connection for rid={rid}");
                         }
                     } else {
+                        eprintln!("[BridgeManager] NO pending dial for rid={rid}! Keys: {:?}", dials.keys().collect::<Vec<_>>());
                         tracing::warn!(
                             "unknown outgoing request_id={} from {addr}, closing",
-                            conn.header.request_id
+                            rid
                         );
                     }
                     return;

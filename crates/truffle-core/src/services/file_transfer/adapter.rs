@@ -413,6 +413,7 @@ impl FileTransferAdapter {
 
             message_types::ACCEPT => {
                 if let Ok(accept) = serde_json::from_value::<FileTransferAccept>(payload.clone()) {
+                    eprintln!("[FT-Adapter] ACCEPT received: tid={} receiver_addr={}", accept.transfer_id, accept.receiver_addr);
                     let file_paths = self.file_paths.read().await;
                     let transfers = self.transfers.read().await;
 
@@ -422,6 +423,7 @@ impl FileTransferAdapter {
                     drop(transfers);
 
                     if let (Some(path), Some(info)) = (original_path, transfer_info) {
+                        eprintln!("[FT-Adapter] ACCEPT: found pending send, file={} path={}", info.file.name, path);
                         // Update state
                         self.transfers
                             .write()
@@ -443,9 +445,14 @@ impl FileTransferAdapter {
                         let mgr = Arc::clone(&self.manager);
                         let dial_fn = self.config.dial_fn.clone();
                         let addr = accept.receiver_addr.clone();
+                        eprintln!("[FT-Adapter] ACCEPT: spawning send_file to addr={addr}");
                         tokio::spawn(async move {
+                            eprintln!("[FT-Adapter] send_file task started for addr={addr}");
                             mgr.send_file(transfer, addr, dial_fn).await;
+                            eprintln!("[FT-Adapter] send_file task completed");
                         });
+                    } else {
+                        eprintln!("[FT-Adapter] ACCEPT: no pending send found for tid={}", accept.transfer_id);
                     }
                 }
             }

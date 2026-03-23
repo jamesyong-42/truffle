@@ -415,6 +415,7 @@ impl GoShim {
                 } => {
                     match cmd {
                         Some(json_line) => {
+                            eprintln!("[shim-loop] forwarding to child stdin: {}...{}", &json_line[..json_line.len().min(80)], if json_line.len() > 80 { "..." } else { "" });
                             if let Err(e) = child_stdin.write_all(json_line.as_bytes()).await {
                                 tracing::error!("failed to write command to shim: {e}");
                                 break;
@@ -424,6 +425,7 @@ impl GoShim {
                                 break;
                             }
                             let _ = child_stdin.flush().await;
+                            eprintln!("[shim-loop] command written and flushed");
                         }
                         None => {
                             // All senders dropped — shutting down
@@ -533,6 +535,7 @@ impl GoShim {
             }
             event_type::DIAL_RESULT => {
                 if let Ok(data) = serde_json::from_value::<DialResultEventData>(event.data) {
+                    eprintln!("[GoShim] DIAL_RESULT: rid={} success={} error={}", data.request_id, data.success, data.error);
                     if !data.success {
                         // Report dial failure via lifecycle event.
                         // The caller (runtime/NAPI) handles BridgeManager cleanup.
@@ -598,10 +601,13 @@ impl GoShim {
     /// Send a command to the Go shim.
     pub async fn send_command(&self, cmd: ShimCommand) -> Result<(), ShimError> {
         let json = serde_json::to_string(&cmd)?;
-        self.stdin_tx
+        eprintln!("[GoShim::send_command] sending: {}...{}", &json[..json.len().min(80)], if json.len() > 80 { "..." } else { "" });
+        let result = self.stdin_tx
             .send(json)
             .await
-            .map_err(|_| ShimError::NotRunning)
+            .map_err(|_| ShimError::NotRunning);
+        eprintln!("[GoShim::send_command] send result: {result:?}");
+        result
     }
 
     /// Request the Go shim to dial a remote peer.

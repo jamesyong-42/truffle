@@ -42,12 +42,17 @@ impl FileTransferManager {
         };
 
         // Query resume offset via HEAD
+        eprintln!("[send_file] tid={} calling query_resume_offset to {target_addr}", transfer.id);
         let offset = match self
             .query_resume_offset(&transfer, &target_addr, &dial_fn)
             .await
         {
-            Ok(o) => o,
+            Ok(o) => {
+                eprintln!("[send_file] tid={} resume offset={o}", transfer.id);
+                o
+            }
             Err(e) => {
+                eprintln!("[send_file] tid={} resume offset FAILED: {e}", transfer.id);
                 self.fail_transfer(
                     &transfer,
                     error_codes::RESUME_QUERY_ERROR,
@@ -108,7 +113,8 @@ impl FileTransferManager {
             .header("x-transfer-token", &transfer.token)
             .header("x-file-name", &transfer.file.name)
             .header("x-file-sha256", &transfer.file.sha256)
-            .header("content-length", content_length.to_string());
+            .header("content-length", content_length.to_string())
+            .header("connection", "close");
 
         if offset > 0 {
             builder = builder.header(
@@ -264,9 +270,14 @@ impl FileTransferManager {
         target_addr: &str,
         dial_fn: &DialFn,
     ) -> Result<i64, String> {
+        eprintln!("[query_resume_offset] calling dial_fn for {target_addr}");
         let stream = (dial_fn)(target_addr)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                eprintln!("[query_resume_offset] dial_fn FAILED: {e}");
+                e.to_string()
+            })?;
+        eprintln!("[query_resume_offset] dial_fn succeeded, got stream");
 
         let io = hyper_util::rt::TokioIo::new(stream);
 
@@ -283,6 +294,7 @@ impl FileTransferManager {
             .method(hyper::Method::HEAD)
             .uri(&uri)
             .header("x-transfer-token", &transfer.token)
+            .header("connection", "close")
             .body(http_body_util::Empty::<Bytes>::new())
             .map_err(|e| e.to_string())?;
 

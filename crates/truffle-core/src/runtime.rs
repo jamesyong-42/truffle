@@ -586,16 +586,25 @@ impl TruffleRuntime {
             dials.insert(request_id.clone(), tx);
         }
 
-        // Step 2: Tell Go to dial
-        {
+        // Step 2: Tell Go to dial (release shim lock before any further awaits)
+        let dial_result = {
             let shim_guard = self.shim.lock().await;
-            let shim = shim_guard.as_ref().ok_or("no sidecar running")?;
-            if let Err(e) = shim.dial_raw(target_dns.to_string(), port, request_id.clone()).await {
-                let mut dials = pending.lock().await;
-                dials.remove(&request_id);
+            match shim_guard.as_ref() {
+                Some(shim) => Ok(shim.dial_raw(target_dns.to_string(), port, request_id.clone()).await),
+                None => Err("no sidecar running"),
+            }
+        }; // shim lock released HERE
+        match dial_result {
+            Err(msg) => {
+                pending.lock().await.remove(&request_id);
+                return Err(msg.to_string());
+            }
+            Ok(Err(e)) => {
+                pending.lock().await.remove(&request_id);
                 return Err(format!("dial command failed: {e}"));
             }
-        } // Release shim lock during network wait
+            Ok(Ok(())) => {}
+        }
 
         // Step 3: Await bridge connection with timeout
         let timeout = Duration::from_secs(10);
@@ -853,24 +862,32 @@ impl TruffleRuntime {
                             let sh = shim.clone();
                             let cm = conn_mgr.clone();
                             tokio::spawn(async move {
-                                let sg = sh.lock().await;
-                                if let Some(ref s) = *sg {
-                                    let rid = uuid::Uuid::new_v4().to_string();
-                                    let (tx, rx) = oneshot::channel();
-                                    bp.lock().await.insert(rid.clone(), tx);
-                                    if s.dial_raw(dns.clone(), 9417, rid.clone()).await.is_ok() {
-                                        drop(sg);
-                                        match tokio::time::timeout(Duration::from_secs(10), rx).await {
-                                            Ok(Ok(bc)) => {
-                                                tracing::info!("Mesh connection established to {dns}");
-                                                cm.handle_outgoing(bc).await;
-                                            }
-                                            _ => { bp.lock().await.remove(&rid); }
-                                        }
+                                // Prepare the dial under the shim lock, then release
+                                // BEFORE any network wait to avoid blocking other dialers.
+                                let rid = uuid::Uuid::new_v4().to_string();
+                                let (tx, rx) = oneshot::channel();
+                                bp.lock().await.insert(rid.clone(), tx);
+
+                                let dial_ok = {
+                                    let sg = sh.lock().await;
+                                    if let Some(ref s) = *sg {
+                                        s.dial_raw(dns.clone(), 9417, rid.clone()).await.is_ok()
                                     } else {
-                                        eprintln!("[truffle-debug] dial_raw command failed for {dns}");
-                                        bp.lock().await.remove(&rid);
+                                        false
                                     }
+                                }; // shim lock released HERE
+
+                                if dial_ok {
+                                    match tokio::time::timeout(Duration::from_secs(10), rx).await {
+                                        Ok(Ok(bc)) => {
+                                            tracing::info!("Mesh connection established to {dns}");
+                                            cm.handle_outgoing(bc).await;
+                                        }
+                                        _ => { bp.lock().await.remove(&rid); }
+                                    }
+                                } else {
+                                    tracing::warn!("dial_raw command failed for {dns}");
+                                    bp.lock().await.remove(&rid);
                                 }
                             });
                         }
