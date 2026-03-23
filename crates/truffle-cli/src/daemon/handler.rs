@@ -500,6 +500,16 @@ async fn handle_push_file(
         .register_pending_send(&transfer_id, local_path, &file_info, &device_id)
         .await;
 
+    // --- Ensure mesh connection to target before sending OFFER ---
+
+    if let Err(e) = runtime.ensure_connected(&device_id).await {
+        return DaemonResponse::error(
+            id,
+            error_code::INTERNAL_ERROR,
+            format!("Failed to establish mesh connection to {device_id}: {e}"),
+        );
+    }
+
     // --- Construct and send OFFER with cli_mode=true ---
 
     // Use the tsnet DNS name as sender_addr so the remote can reach us
@@ -520,12 +530,28 @@ async fn handle_push_file(
         save_path: Some(remote_path.to_string()),
     };
 
-    adapter.send_offer(&device_id, &offer);
+    // Send the OFFER directly via runtime.send_envelope() instead of through
+    // the bus_tx async pump so we can verify delivery (returns false if no
+    // connection exists). The adapter's pending_send is already registered above.
+    let offer_envelope = truffle_core::protocol::envelope::MeshEnvelope::new(
+        truffle_core::services::file_transfer::adapter::FILE_TRANSFER_NAMESPACE,
+        "OFFER",
+        serde_json::to_value(&offer).unwrap_or_default(),
+    );
+    let sent = runtime.send_envelope(&device_id, &offer_envelope).await;
+
+    if !sent {
+        return DaemonResponse::error(
+            id,
+            error_code::INTERNAL_ERROR,
+            format!("Failed to deliver OFFER to {device_id} — no mesh connection"),
+        );
+    }
 
     info!(
         transfer_id = %transfer_id,
         target = %device_id,
-        "OFFER sent, waiting for ACCEPT"
+        "OFFER sent and delivered, waiting for ACCEPT"
     );
 
     // --- Wait for Complete or Error event (with timeout) ---
@@ -734,6 +760,16 @@ async fn handle_get_file(
 
     let mut event_rx = manager.subscribe_events();
 
+    // --- Ensure mesh connection to target before sending PULL_REQUEST ---
+
+    if let Err(e) = runtime.ensure_connected(&device_id).await {
+        return DaemonResponse::error(
+            id,
+            error_code::INTERNAL_ERROR,
+            format!("Failed to establish mesh connection to {device_id}: {e}"),
+        );
+    }
+
     // --- Send PULL_REQUEST to the remote node ---
 
     let pull_request = truffle_core::services::file_transfer::adapter::FileTransferPullRequest {
@@ -743,12 +779,26 @@ async fn handle_get_file(
         save_path: local_path.to_string(),
     };
 
-    adapter.send_pull_request(&device_id, &pull_request);
+    // Send directly via runtime.send_envelope() so we can verify delivery
+    let pull_envelope = truffle_core::protocol::envelope::MeshEnvelope::new(
+        truffle_core::services::file_transfer::adapter::FILE_TRANSFER_NAMESPACE,
+        "PULL_REQUEST",
+        serde_json::to_value(&pull_request).unwrap_or_default(),
+    );
+    let sent = runtime.send_envelope(&device_id, &pull_envelope).await;
+
+    if !sent {
+        return DaemonResponse::error(
+            id,
+            error_code::INTERNAL_ERROR,
+            format!("Failed to deliver PULL_REQUEST to {device_id} — no mesh connection"),
+        );
+    }
 
     info!(
         request_id = %request_id,
         target = %device_id,
-        "PULL_REQUEST sent, waiting for OFFER + transfer"
+        "PULL_REQUEST sent and delivered, waiting for OFFER + transfer"
     );
 
     // --- Wait for Complete or Error event (with timeout) ---

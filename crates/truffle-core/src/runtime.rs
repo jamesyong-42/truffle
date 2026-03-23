@@ -569,13 +569,20 @@ impl TruffleRuntime {
     // ── Dial / Sidecar ─────────────────────────────────────────────────
 
     /// Dial a peer through the full bridge pipeline.
+    ///
+    /// Uses the BridgeManager's pending_dials map (when available) so that
+    /// outgoing bridge connections are correctly routed back to this dial.
     pub async fn dial_peer(&self, target_dns: &str, port: u16) -> Result<(), String> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
 
+        // Use the bridge manager's pending_dials (Map B) when available,
+        // falling back to the runtime's own map (Map A) before start().
+        let pending = self.pending_dials().await;
+
         // Step 1: Insert BEFORE dial command (prevents race)
         {
-            let mut dials = self.bridge_pending_dials.lock().await;
+            let mut dials = pending.lock().await;
             dials.insert(request_id.clone(), tx);
         }
 
@@ -584,7 +591,7 @@ impl TruffleRuntime {
             let shim_guard = self.shim.lock().await;
             let shim = shim_guard.as_ref().ok_or("no sidecar running")?;
             if let Err(e) = shim.dial_raw(target_dns.to_string(), port, request_id.clone()).await {
-                let mut dials = self.bridge_pending_dials.lock().await;
+                let mut dials = pending.lock().await;
                 dials.remove(&request_id);
                 return Err(format!("dial command failed: {e}"));
             }
@@ -598,7 +605,7 @@ impl TruffleRuntime {
                 return Err("dial cancelled (sender dropped)".into());
             }
             Err(_) => {
-                let mut dials = self.bridge_pending_dials.lock().await;
+                let mut dials = pending.lock().await;
                 dials.remove(&request_id);
                 return Err(format!("dial timed out after {timeout:?}"));
             }
@@ -607,6 +614,35 @@ impl TruffleRuntime {
         // Step 4: Upgrade to WebSocket
         self.connection_manager.handle_outgoing(bridge_conn).await;
         Ok(())
+    }
+
+    /// Ensure a mesh WebSocket connection exists to the given device.
+    ///
+    /// If no connection exists, looks up the device's DNS name from the device
+    /// manager and dials via the sidecar on port 9417 (plain TCP mesh transport).
+    /// Returns `Ok(())` when a connection is confirmed, or `Err` if the device
+    /// is unknown, has no DNS name, or the dial fails.
+    pub async fn ensure_connected(&self, device_id: &str) -> Result<(), String> {
+        // Check if we already have a connection
+        if self.connection_manager.get_connection_by_device(device_id).await.is_some() {
+            return Ok(());
+        }
+
+        // Look up the device to get its DNS name
+        let device = self.mesh_node.device_by_id(device_id).await
+            .ok_or_else(|| format!("device not found: {device_id}"))?;
+
+        let dns_name = device.tailscale_dns_name
+            .ok_or_else(|| format!("device {device_id} has no DNS name"))?;
+
+        tracing::info!(
+            device_id = %device_id,
+            dns_name = %dns_name,
+            "No mesh connection to device, dialing..."
+        );
+
+        // Dial via port 9417 (plain TCP, avoids double-TLS issue with port 443)
+        self.dial_peer(&dns_name, 9417).await
     }
 
     async fn bootstrap_sidecar(
