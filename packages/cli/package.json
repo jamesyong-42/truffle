@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/truffle-cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "CLI for Truffle mesh networking",
   "license": "MIT",
   "author": "James Yong",

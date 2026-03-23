@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.3...truffle-v0.2.4) (2026-03-23)
+
+
+### Features
+
+* **cli:** bootstrap file transfer subsystem on daemon startup (RFC 011 Phase 1) ([db61168](https://github.com/jamesyong-42/truffle/commit/db6116825d8cb59a3e0d80d2568438d56e9fc60e))
+* **file-transfer:** add PULL_REQUEST protocol for downloads (RFC 011 Phase 3) ([59cc3f4](https://github.com/jamesyong-42/truffle/commit/59cc3f44167366aa53a26754878262fad979b68e))
+* **file-transfer:** auto-accept CLI-mode transfers (RFC 011 Phase 5) ([42935b4](https://github.com/jamesyong-42/truffle/commit/42935b4e0834d97b73ec1a96c1f118143882a3c9))
+* **file-transfer:** cleanup dead code and polish CLI (RFC 011 Phase 6) ([46df5e6](https://github.com/jamesyong-42/truffle/commit/46df5e6c92eb3dc7b8db678f276aafe6126786ba))
+* **file-transfer:** implement real upload flow (RFC 011 Phase 2) ([cfbeb52](https://github.com/jamesyong-42/truffle/commit/cfbeb528da175bbe39cf9c315193a3decba11221))
+* **file-transfer:** stream progress notifications to CLI (RFC 011 Phase 4) ([ee1c6e8](https://github.com/jamesyong-42/truffle/commit/ee1c6e8190bd81806d77fc6dc67490f357d07f91))
+
+
+### Bug Fixes
+
+* ls CONNECTION column, tcp --check routing, send name resolution, dial dedup ([dbaac56](https://github.com/jamesyong-42/truffle/commit/dbaac562b1baaec9483330a1fe0c9774c1f1acd3))
+* use port 9417 (TCP) for mesh dial instead of 443 (TLS) ([c73cff3](https://github.com/jamesyong-42/truffle/commit/c73cff3e7e9f50bf555a6cb7ebca3cbb0fbdd4ac))
+
 ## [0.2.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.2...truffle-v0.2.3) (2026-03-22)
 
 
