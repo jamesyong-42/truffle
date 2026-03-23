@@ -13,7 +13,7 @@ use tracing::debug;
 
 use super::ipc;
 use super::pid;
-use super::protocol::{DaemonRequest, DaemonResponse};
+use super::protocol::{DaemonNotification, DaemonRequest, DaemonResponse};
 use crate::config::TruffleConfig;
 
 /// Client for communicating with the truffle daemon.
@@ -147,6 +147,76 @@ impl DaemonClient {
         }
 
         Ok(response.result.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Send a JSON-RPC request and receive the response, processing
+    /// intermediate notifications.
+    ///
+    /// Like `request()`, but the daemon may send multiple JSON lines before
+    /// the final response. Lines without an `id` field are JSON-RPC
+    /// notifications and are forwarded to the `on_notification` callback.
+    /// The line with a matching `id` is the final response.
+    ///
+    /// This is used for long-running operations like file transfers, where
+    /// the daemon streams progress notifications before the final result.
+    pub async fn request_with_notifications(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        on_notification: impl Fn(&DaemonNotification),
+    ) -> Result<serde_json::Value, ClientError> {
+        let stream = self.connect().await?;
+        let (mut reader, mut writer) = stream.into_split();
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = DaemonRequest::new(id, method, params);
+
+        let request_json =
+            serde_json::to_string(&request).map_err(|e| ClientError::IoError(e.to_string()))?;
+
+        debug!(method = method, id = id, "Sending request to daemon (with notifications)");
+
+        writer
+            .write_line(&request_json)
+            .await
+            .map_err(|e| ClientError::IoError(e.to_string()))?;
+
+        // Read lines until we get the final response (line with matching `id`).
+        loop {
+            let line = reader
+                .next_line()
+                .await
+                .map_err(|e| ClientError::IoError(e.to_string()))?
+                .ok_or_else(|| {
+                    ClientError::IoError("Daemon closed connection without responding".into())
+                })?;
+
+            // Parse as generic JSON to check for `id` field
+            let raw: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|e| ClientError::ParseError(e.to_string()))?;
+
+            if raw.get("id").is_some() {
+                // This is the final response
+                let response: DaemonResponse = serde_json::from_value(raw)
+                    .map_err(|e| ClientError::ParseError(e.to_string()))?;
+
+                if let Some(err) = response.error {
+                    return Err(ClientError::DaemonError {
+                        code: err.code,
+                        message: err.message,
+                    });
+                }
+
+                return Ok(response.result.unwrap_or(serde_json::Value::Null));
+            }
+
+            // No `id` field -- this is a notification
+            if let Ok(notif) = serde_json::from_value::<DaemonNotification>(raw) {
+                on_notification(&notif);
+            }
+            // If it fails to parse as a notification, skip silently
+            // (robustness: don't crash on unexpected messages)
+        }
     }
 
     /// Ensure the daemon is running, starting it if necessary.

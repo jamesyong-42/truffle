@@ -124,6 +124,42 @@ pub mod method {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// JSON-RPC 2.0 notification type (no `id` field)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A JSON-RPC 2.0 notification from daemon to CLI.
+///
+/// Notifications are distinguished from responses by the absence of an `id`
+/// field. They are used for streaming progress events during long-running
+/// operations like file transfers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonNotification {
+    /// Must be "2.0".
+    pub jsonrpc: String,
+    /// Notification method name (e.g., "cp.progress").
+    pub method: String,
+    /// Notification parameters.
+    pub params: serde_json::Value,
+}
+
+impl DaemonNotification {
+    /// Create a new notification.
+    pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
+/// Well-known notification method names.
+pub mod notification {
+    /// File transfer progress update.
+    pub const CP_PROGRESS: &str = "cp.progress";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Error codes
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -240,5 +276,50 @@ mod tests {
         let req: DaemonRequest = serde_json::from_str(json).unwrap();
         assert!(req.params.is_object());
         assert!(req.params.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_daemon_notification_serialization() {
+        let notif = DaemonNotification::new(
+            notification::CP_PROGRESS,
+            serde_json::json!({
+                "transfer_id": "ft-abc",
+                "percent": 50.0,
+                "bytes_per_second": 1024000.0,
+            }),
+        );
+        let json = serde_json::to_string(&notif).unwrap();
+
+        // Notification should not have "id" field
+        assert!(!json.contains("\"id\""));
+        assert!(json.contains("\"jsonrpc\""));
+        assert!(json.contains("\"cp.progress\""));
+
+        let parsed: DaemonNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.jsonrpc, "2.0");
+        assert_eq!(parsed.method, "cp.progress");
+        assert_eq!(parsed.params["percent"], 50.0);
+    }
+
+    #[test]
+    fn test_notification_vs_response_distinguishable() {
+        // A notification has no "id" field
+        let notif_json = r#"{"jsonrpc":"2.0","method":"cp.progress","params":{"percent":25.0}}"#;
+        let resp_json = r#"{"jsonrpc":"2.0","id":1,"result":{"done":true}}"#;
+
+        // The notification should parse as a notification
+        let notif: DaemonNotification = serde_json::from_str(notif_json).unwrap();
+        assert_eq!(notif.method, "cp.progress");
+
+        // The response should parse as a response
+        let resp: DaemonResponse = serde_json::from_str(resp_json).unwrap();
+        assert_eq!(resp.id, 1);
+
+        // We can distinguish them by checking for "id" field in raw JSON
+        let notif_val: serde_json::Value = serde_json::from_str(notif_json).unwrap();
+        assert!(notif_val.get("id").is_none());
+
+        let resp_val: serde_json::Value = serde_json::from_str(resp_json).unwrap();
+        assert!(resp_val.get("id").is_some());
     }
 }

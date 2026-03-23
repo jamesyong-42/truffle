@@ -292,6 +292,9 @@ impl DaemonServer {
     /// Handle a single client connection.
     ///
     /// Reads newline-delimited JSON-RPC requests and sends back responses.
+    /// For long-running operations (like file transfers), the handler may
+    /// send JSON-RPC notifications (lines without an `id` field) before
+    /// the final response.
     async fn handle_connection(stream: ipc::IpcStream, ctx: &Arc<DaemonContext>) {
         let (mut reader, mut writer) = stream.into_split();
 
@@ -314,19 +317,71 @@ impl DaemonServer {
                 }
             };
 
-            let response = handler::dispatch(&request, ctx).await;
+            // Create a notification channel for this request.
+            // The handler can send notifications (e.g., progress events)
+            // which we forward to the client as JSON lines before the
+            // final response.
+            let (notif_tx, mut notif_rx) =
+                tokio::sync::mpsc::unbounded_channel::<super::protocol::DaemonNotification>();
 
-            let resp_json = match serde_json::to_string(&response) {
-                Ok(j) => j,
-                Err(e) => {
-                    error!("Failed to serialize response: {e}");
-                    continue;
+            // Spawn the handler in a separate task so we can concurrently
+            // drain notifications while waiting for the final response.
+            let ctx_clone = Arc::clone(ctx);
+            let mut dispatch_handle = tokio::spawn(async move {
+                handler::dispatch(&request, &ctx_clone, notif_tx).await
+            });
+
+            // Forward notifications as they arrive, then wait for the final response.
+            loop {
+                tokio::select! {
+                    // Bias towards draining notifications before checking the
+                    // dispatch result, so progress lines arrive in order.
+                    biased;
+
+                    Some(notif) = notif_rx.recv() => {
+                        if let Ok(notif_json) = serde_json::to_string(&notif) {
+                            if writer.write_line(&notif_json).await.is_err() {
+                                // Client disconnected; abort the handler
+                                dispatch_handle.abort();
+                                return;
+                            }
+                        }
+                    }
+
+                    result = &mut dispatch_handle => {
+                        // Drain any remaining notifications that were sent
+                        // before the handler returned.
+                        while let Ok(notif) = notif_rx.try_recv() {
+                            if let Ok(notif_json) = serde_json::to_string(&notif) {
+                                if writer.write_line(&notif_json).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Write the final response
+                        match result {
+                            Ok(response) => {
+                                let resp_json = match serde_json::to_string(&response) {
+                                    Ok(j) => j,
+                                    Err(e) => {
+                                        error!("Failed to serialize response: {e}");
+                                        break;
+                                    }
+                                };
+
+                                if writer.write_line(&resp_json).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Handler task failed: {e}");
+                            }
+                        }
+
+                        break;
+                    }
                 }
-            };
-
-            if writer.write_line(&resp_json).await.is_err() {
-                // Client disconnected
-                break;
             }
         }
     }

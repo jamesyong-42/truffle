@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
-use crate::daemon::protocol::method;
+use crate::daemon::protocol::{method, DaemonNotification};
 use crate::output;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -239,14 +239,18 @@ async fn do_upload(
 
     // Send via daemon's push_file command -- no file data, just metadata.
     // The daemon reads the file directly from disk (it runs on the same machine).
+    // Use request_with_notifications to receive streaming progress updates.
     let result = client
-        .request(
+        .request_with_notifications(
             method::PUSH_FILE,
             serde_json::json!({
                 "node": node,
                 "local_path": abs_local_path.to_string_lossy(),
                 "remote_path": dest_path,
             }),
+            |notif| {
+                render_progress(notif);
+            },
         )
         .await;
 
@@ -279,12 +283,16 @@ async fn do_upload(
 }
 
 /// Download a file from a remote node via the daemon.
+///
+/// The CLI sends only metadata (node, paths) to the daemon via JSON-RPC.
+/// The daemon sends a PULL_REQUEST to the remote node, which responds with
+/// an OFFER. The daemon auto-accepts and receives the file over the mesh.
 async fn do_download(
     client: &DaemonClient,
     node: &str,
     remote_path: &str,
     local_path: &Path,
-    verify: bool,
+    _verify: bool,
 ) -> Result<(), String> {
     let file_name = Path::new(remote_path)
         .file_name()
@@ -300,6 +308,15 @@ async fn do_download(
         local_path.to_path_buf()
     };
 
+    // Resolve dest_path to absolute (daemon writes to disk directly)
+    let abs_dest_path = if dest_path.is_absolute() {
+        dest_path.clone()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Can't determine working directory: {e}"))?
+            .join(&dest_path)
+    };
+
     // Show transfer info
     println!();
     println!(
@@ -312,14 +329,19 @@ async fn do_download(
 
     let started = Instant::now();
 
-    // Request file from daemon
+    // Request file from daemon's get_file command -- no file data in response,
+    // the daemon handles receiving the file via the mesh and writing to disk.
     let result = client
-        .request(
+        .request_with_notifications(
             method::GET_FILE,
             serde_json::json!({
                 "node": node,
-                "path": remote_path,
+                "remote_path": remote_path,
+                "local_path": abs_dest_path.to_string_lossy(),
             }),
+            |notif| {
+                render_progress(notif);
+            },
         )
         .await;
 
@@ -327,34 +349,14 @@ async fn do_download(
 
     match result {
         Ok(resp) => {
-            let data_b64 = resp["data_base64"]
-                .as_str()
-                .unwrap_or("");
-            let file_data = base64_decode(data_b64)?;
-            let file_size = file_data.len() as u64;
+            let transferred = resp["bytes_transferred"].as_u64().unwrap_or(0);
+            output::print_progress_complete(transferred, elapsed);
 
-            // Write to local file
-            std::fs::write(&dest_path, &file_data)
-                .map_err(|e| format!("Can't write to {}: {e}", dest_path.display()))?;
-
-            output::print_progress_complete(file_size, elapsed);
-
-            if verify {
-                let local_hash = compute_sha256(&dest_path)?;
-                let remote_hash = resp["sha256"].as_str().unwrap_or("");
-                if !remote_hash.is_empty() && remote_hash == local_hash {
-                    output::print_success("SHA-256 verified");
-                } else if remote_hash.is_empty() {
-                    // Still compute and display local hash
-                    output::print_success(&format!("Downloaded ({} SHA-256: {})", output::format_bytes(file_size), &local_hash[..16]));
-                } else {
-                    output::print_error(
-                        "SHA-256 mismatch",
-                        &format!("Local:  {}\nRemote: {}", local_hash, remote_hash),
-                        "The file may have been corrupted. Try again.",
-                    );
-                    return Err("SHA-256 mismatch".to_string());
-                }
+            // The daemon performs SHA-256 verification on both sides during transfer.
+            // Report the result if available.
+            let sha256 = resp["sha256"].as_str().unwrap_or("");
+            if !sha256.is_empty() {
+                output::print_success(&format!("SHA-256: {}", &sha256[..16.min(sha256.len())]));
             }
 
             Ok(())
@@ -372,10 +374,26 @@ async fn do_download(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Progress rendering
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Render a progress notification as a terminal progress bar.
+///
+/// Called by `request_with_notifications()` for each `cp.progress`
+/// notification received from the daemon during a file transfer.
+fn render_progress(notification: &DaemonNotification) {
+    let total = notification.params["total_bytes"].as_i64().unwrap_or(0) as u64;
+    let current = notification.params["bytes_transferred"].as_i64().unwrap_or(0) as u64;
+    let speed = notification.params["bytes_per_second"].as_f64().unwrap_or(0.0);
+    output::print_progress(current, total, speed);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Compute SHA-256 hash of a file.
+#[allow(dead_code)]
 fn compute_sha256(path: &Path) -> Result<String, String> {
     use std::io::Read;
 
@@ -448,6 +466,7 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Base64 decode a string to bytes.
+#[allow(dead_code)]
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     fn char_to_val(c: u8) -> Result<u8, String> {
         match c {

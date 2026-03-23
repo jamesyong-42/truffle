@@ -15,7 +15,7 @@ use truffle_core::services::file_transfer::adapter::{
 use truffle_core::services::file_transfer::manager::FileTransferManager;
 use truffle_core::services::file_transfer::types::{FileInfo, FileTransferEvent};
 
-use super::protocol::{error_code, method, DaemonRequest, DaemonResponse};
+use super::protocol::{error_code, method, notification, DaemonNotification, DaemonRequest, DaemonResponse};
 
 /// Context bundling all daemon-owned resources needed by request handlers.
 ///
@@ -31,7 +31,15 @@ pub struct DaemonContext {
 /// Dispatch a JSON-RPC request to the appropriate handler.
 ///
 /// Returns a `DaemonResponse` with either a result or an error.
-pub async fn dispatch(request: &DaemonRequest, ctx: &DaemonContext) -> DaemonResponse {
+///
+/// The `notification_tx` channel is used by long-running handlers (like
+/// file transfer) to send streaming progress notifications back to the
+/// client before the final response.
+pub async fn dispatch(
+    request: &DaemonRequest,
+    ctx: &DaemonContext,
+    notification_tx: tokio::sync::mpsc::UnboundedSender<DaemonNotification>,
+) -> DaemonResponse {
     let runtime = &ctx.runtime;
     let started_at = ctx.started_at;
     let shutdown_signal = &ctx.shutdown_signal;
@@ -54,12 +62,12 @@ pub async fn dispatch(request: &DaemonRequest, ctx: &DaemonContext) -> DaemonRes
         // Phase 10: Communication
         "chat_start" => handle_chat_start(request.id, &request.params, runtime).await,
 
-        // Phase 11: File transfer
+        // Phase 11: File transfer (with progress notifications)
         method::PUSH_FILE => {
-            handle_push_file(request.id, &request.params, ctx).await
+            handle_push_file(request.id, &request.params, ctx, notification_tx).await
         }
         method::GET_FILE => {
-            handle_get_file(request.id, &request.params, &ctx.file_transfer_adapter).await
+            handle_get_file(request.id, &request.params, ctx).await
         }
 
         _ => DaemonResponse::error(
@@ -324,6 +332,7 @@ async fn handle_push_file(
     id: u64,
     params: &serde_json::Value,
     ctx: &DaemonContext,
+    notification_tx: tokio::sync::mpsc::UnboundedSender<DaemonNotification>,
 ) -> DaemonResponse {
     let runtime = &ctx.runtime;
     let adapter = &ctx.file_transfer_adapter;
@@ -514,6 +523,7 @@ async fn handle_push_file(
     // --- Wait for Complete or Error event (with timeout) ---
     // The adapter's ACCEPT handler will register_send + send_file when ACCEPT arrives.
     // We watch for the final Complete or Error event from the manager.
+    // Progress events are forwarded as JSON-RPC notifications to the CLI.
 
     loop {
         let remaining = overall_timeout.saturating_sub(started.elapsed());
@@ -526,6 +536,29 @@ async fn handle_push_file(
         }
 
         match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Ok(FileTransferEvent::Progress {
+                transfer_id: ref tid,
+                bytes_transferred,
+                total_bytes,
+                percent,
+                bytes_per_second,
+                eta,
+                ..
+            })) if tid == &transfer_id => {
+                // Forward progress as a JSON-RPC notification
+                let _ = notification_tx.send(DaemonNotification::new(
+                    notification::CP_PROGRESS,
+                    serde_json::json!({
+                        "transfer_id": transfer_id,
+                        "bytes_transferred": bytes_transferred,
+                        "total_bytes": total_bytes,
+                        "percent": percent,
+                        "bytes_per_second": bytes_per_second,
+                        "eta": eta,
+                    }),
+                ));
+                continue;
+            }
             Ok(Ok(FileTransferEvent::Complete {
                 transfer_id: ref tid,
                 ref sha256,
@@ -581,7 +614,7 @@ async fn handle_push_file(
                 );
             }
             Ok(Ok(_)) => {
-                // Progress or other event for different transfer, skip
+                // Event for different transfer or unrelated type, skip
                 continue;
             }
             Err(_) => {
@@ -595,15 +628,28 @@ async fn handle_push_file(
     }
 }
 
-/// Handle `get_file` -- download a file from a remote node.
+/// Handle `get_file` -- download a file from a remote node via the file transfer subsystem.
 ///
-/// Currently a stub. Full implementation will come in Phase 3.
+/// Orchestrates the PULL_REQUEST reverse-roles download flow:
+/// 1. Parse params: node, remote_path, local_path
+/// 2. Resolve node to device_id
+/// 3. Send PULL_REQUEST via adapter
+/// 4. Wait for incoming OFFER from the remote node (it becomes the sender)
+/// 5. The auto-accept from Phase 5 handles accepting with the local save_path
+/// 6. Wait for transfer Complete/Error event
+/// 7. Return result
 async fn handle_get_file(
     id: u64,
     params: &serde_json::Value,
-    _adapter: &Arc<FileTransferAdapter>,
+    ctx: &DaemonContext,
 ) -> DaemonResponse {
-    let _node = match params.get("node").and_then(|v| v.as_str()) {
+    let runtime = &ctx.runtime;
+    let adapter = &ctx.file_transfer_adapter;
+    let manager = &ctx.file_transfer_manager;
+
+    // --- Parse params ---
+
+    let node = match params.get("node").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
             return DaemonResponse::error(
@@ -614,27 +660,185 @@ async fn handle_get_file(
         }
     };
 
-    let _path = match params.get("path").and_then(|v| v.as_str()) {
+    let remote_path = match params.get("remote_path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => {
             return DaemonResponse::error(
                 id,
                 error_code::INVALID_PARAMS,
-                "Missing required parameter: 'path'",
+                "Missing required parameter: 'remote_path'",
             );
         }
     };
 
-    // TODO: In the full implementation (Phase 3), this will:
-    // 1. Resolve the node name to a Tailscale peer
-    // 2. Send a PULL_REQUEST via the adapter
-    // 3. Return the file data
+    let local_path = match params.get("local_path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => {
+            return DaemonResponse::error(
+                id,
+                error_code::INVALID_PARAMS,
+                "Missing required parameter: 'local_path'",
+            );
+        }
+    };
 
-    DaemonResponse::error(
-        id,
-        error_code::INTERNAL_ERROR,
-        "File download not yet implemented (requires Phase 3 implementation)",
-    )
+    // --- Validate local_path parent directory exists ---
+
+    let local = std::path::Path::new(local_path);
+    if let Some(parent) = local.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return DaemonResponse::error(
+                id,
+                error_code::INVALID_PARAMS,
+                format!("Parent directory does not exist: {}", parent.display()),
+            );
+        }
+    }
+
+    // --- Resolve node to device_id ---
+
+    let device_id = match resolve_node_device_id(runtime, node).await {
+        Some(did) => did,
+        None => {
+            return DaemonResponse::error(
+                id,
+                error_code::NODE_NOT_FOUND,
+                format!("Node not found: {node}"),
+            );
+        }
+    };
+
+    // --- Generate request ID ---
+
+    let request_id = generate_transfer_id();
+
+    info!(
+        request_id = %request_id,
+        remote_path = %remote_path,
+        local_path = %local_path,
+        target = %device_id,
+        "Starting file download (PULL_REQUEST)"
+    );
+
+    // --- Subscribe to manager events BEFORE sending PULL_REQUEST ---
+    // This ensures we don't miss the Complete event from the auto-accepted transfer.
+
+    let mut event_rx = manager.subscribe_events();
+
+    // --- Send PULL_REQUEST to the remote node ---
+
+    let pull_request = truffle_core::services::file_transfer::adapter::FileTransferPullRequest {
+        request_id: request_id.clone(),
+        remote_path: remote_path.to_string(),
+        requester_device_id: adapter.local_device_id().to_string(),
+        save_path: local_path.to_string(),
+    };
+
+    adapter.send_pull_request(&device_id, &pull_request);
+
+    info!(
+        request_id = %request_id,
+        target = %device_id,
+        "PULL_REQUEST sent, waiting for OFFER + transfer"
+    );
+
+    // --- Wait for Complete or Error event (with timeout) ---
+    // The remote node will:
+    //   1. Receive PULL_REQUEST
+    //   2. Validate the file, prepare it (stat + hash)
+    //   3. Send OFFER back with cli_mode=true and save_path=local_path
+    // Our adapter will:
+    //   1. Receive the OFFER
+    //   2. Auto-accept it (Phase 5 cli_mode handling)
+    //   3. Receive the file data via HTTP
+    //   4. Emit Complete or Error event
+
+    let overall_timeout = tokio::time::Duration::from_secs(120);
+    let started = Instant::now();
+
+    loop {
+        let remaining = overall_timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return DaemonResponse::error(
+                id,
+                error_code::TIMEOUT,
+                "File download timed out",
+            );
+        }
+
+        match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Ok(FileTransferEvent::Complete {
+                transfer_id: ref tid,
+                ref sha256,
+                size,
+                duration_ms,
+                ref direction,
+                ..
+            })) if direction == "receive" => {
+                // Accept any receive-direction Complete event since we don't know
+                // the transfer_id the remote side will generate for the OFFER
+                info!(
+                    transfer_id = %tid,
+                    size = size,
+                    duration_ms = duration_ms,
+                    "File download complete"
+                );
+                return DaemonResponse::success(
+                    id,
+                    serde_json::json!({
+                        "transfer_id": tid,
+                        "bytes_transferred": size,
+                        "sha256": sha256,
+                        "duration_ms": duration_ms,
+                    }),
+                );
+            }
+            Ok(Ok(FileTransferEvent::Error {
+                ref code,
+                ref message,
+                ref transfer_id,
+                ..
+            })) => {
+                // Accept any error since we can't filter by our request_id
+                // (the remote generates a new transfer_id)
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    format!("Download failed ({code}): {message} [transfer: {transfer_id}]"),
+                );
+            }
+            Ok(Ok(FileTransferEvent::Cancelled {
+                transfer_id: ref tid,
+            })) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    format!("Download was cancelled [transfer: {tid}]"),
+                );
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                continue;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    "Event channel closed during download",
+                );
+            }
+            Ok(Ok(_)) => {
+                // Progress or other event, skip
+                continue;
+            }
+            Err(_) => {
+                return DaemonResponse::error(
+                    id,
+                    error_code::TIMEOUT,
+                    "File download timed out",
+                );
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
