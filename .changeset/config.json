@@ -21,6 +21,7 @@
     "@vibecook/truffle-docs",
     "@vibecook/example-discovery",
     "@vibecook/example-chat",
-    "@vibecook/example-shared-state"
+    "@vibecook/example-shared-state",
+    "@vibecook/example-electron-kitchen-sink"
   ]
 }

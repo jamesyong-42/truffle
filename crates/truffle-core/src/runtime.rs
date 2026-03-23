@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 use crate::bridge::header::Direction;
-use crate::bridge::manager::{BridgeConnection, BridgeManager, ChannelHandler};
+use crate::bridge::manager::{BridgeConnection, BridgeHandler, BridgeManager, ChannelHandler};
 use crate::bridge::shim::{GoShim, ShimConfig, ShimLifecycleEvent};
 use crate::http::proxy::{ProxyTarget, ReverseProxyHandler};
 use crate::http::push::{PushApiHandler, PushManager};
@@ -141,6 +141,8 @@ pub struct TruffleRuntimeBuilder {
     // Timing
     announce_interval: Option<Duration>,
     discovery_timeout: Option<Duration>,
+    // Extra bridge handlers registered by the application layer
+    extra_bridge_handlers: Vec<(u16, Direction, Arc<dyn BridgeHandler>)>,
 }
 
 impl TruffleRuntimeBuilder {
@@ -161,6 +163,7 @@ impl TruffleRuntimeBuilder {
             metadata: None,
             announce_interval: None,
             discovery_timeout: None,
+            extra_bridge_handlers: vec![],
         }
     }
 
@@ -168,6 +171,13 @@ impl TruffleRuntimeBuilder {
     /// **Required** -- build() will fail without this.
     pub fn hostname(mut self, prefix: impl Into<String>) -> Self {
         self.hostname_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Register an extra bridge handler for a port/direction.
+    /// These are added to the BridgeManager before it starts running.
+    pub fn bridge_handler(mut self, port: u16, direction: Direction, handler: Arc<dyn BridgeHandler>) -> Self {
+        self.extra_bridge_handlers.push((port, direction, handler));
         self
     }
 
@@ -310,6 +320,8 @@ impl TruffleRuntimeBuilder {
             config: runtime_config,
             ephemeral: self.ephemeral,
             tags: self.tags,
+            extra_bridge_handlers: Mutex::new(self.extra_bridge_handlers),
+            bridge_manager_pending: Mutex::new(None),
         };
 
         Ok((runtime, event_rx))
@@ -344,6 +356,10 @@ pub struct TruffleRuntime {
     ephemeral: Option<bool>,
     /// ACL tags to advertise.
     tags: Option<Vec<String>>,
+    /// Extra bridge handlers registered by the application layer.
+    extra_bridge_handlers: Mutex<Vec<(u16, Direction, Arc<dyn BridgeHandler>)>>,
+    /// Bridge manager's pending_dials Arc (set during start(), used by external DialFns).
+    bridge_manager_pending: Mutex<Option<Arc<Mutex<HashMap<String, oneshot::Sender<BridgeConnection>>>>>>,
 }
 
 impl TruffleRuntime {
@@ -380,6 +396,8 @@ impl TruffleRuntime {
             },
             ephemeral: None,
             tags: None,
+            extra_bridge_handlers: Mutex::new(vec![]),
+            bridge_manager_pending: Mutex::new(None),
         };
 
         (runtime, event_rx)
@@ -458,8 +476,15 @@ impl TruffleRuntime {
     }
 
     /// Access the pending bridge dials map (for bridge dialing).
-    pub fn pending_dials(&self) -> &Arc<Mutex<HashMap<String, oneshot::Sender<BridgeConnection>>>> {
-        &self.bridge_pending_dials
+    /// After start(), returns the BridgeManager's Arc (shared with the bridge accept loop).
+    /// Before start(), returns the runtime's own Arc (which won't receive bridge connections).
+    pub async fn pending_dials(&self) -> Arc<Mutex<HashMap<String, oneshot::Sender<BridgeConnection>>>> {
+        let guard = self.bridge_manager_pending.lock().await;
+        if let Some(ref arc) = *guard {
+            arc.clone()
+        } else {
+            self.bridge_pending_dials.clone()
+        }
     }
 
     /// Access the message bus for namespace-based pub/sub.
@@ -630,8 +655,19 @@ impl TruffleRuntime {
         bridge_manager.add_handler(443, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx.clone())));
         bridge_manager.add_handler(9417, Direction::Outgoing, Arc::new(ChannelHandler::new(ws_out_tx)));
 
-        // Use the bridge manager's pending_dials Arc directly
+        // Register any extra bridge handlers from the builder
+        {
+            let mut handlers = self.extra_bridge_handlers.lock().await;
+            for (port, direction, handler) in handlers.drain(..) {
+                bridge_manager.add_handler(port, direction, handler);
+            }
+        }
+
+        // Get the bridge manager's pending_dials Arc.
+        // This is the authoritative map — the BridgeManager routes outgoing
+        // connections here. Store it for external DialFns (file transfer).
         let bridge_pending = bridge_manager.pending_dials().clone();
+        *self.bridge_manager_pending.lock().await = Some(bridge_pending.clone());
 
         // Spawn bridge
         tokio::spawn(async move {

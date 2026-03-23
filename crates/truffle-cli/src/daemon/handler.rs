@@ -502,10 +502,18 @@ async fn handle_push_file(
 
     // --- Construct and send OFFER with cli_mode=true ---
 
+    // Use the tsnet DNS name as sender_addr so the remote can reach us
+    // via the sidecar bridge on port 9418
+    let local_device = ctx.runtime.local_device().await;
+    let sender_addr = local_device
+        .tailscale_dns_name
+        .map(|dns| format!("{dns}:9418"))
+        .unwrap_or_else(|| adapter.local_addr().to_string());
+
     let offer = FileTransferOffer {
         transfer_id: transfer_id.clone(),
         sender_device_id: adapter.local_device_id().to_string(),
-        sender_addr: adapter.local_addr().to_string(),
+        sender_addr,
         file: file_info,
         token: token.clone(),
         cli_mode: true,

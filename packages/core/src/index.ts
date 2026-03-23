@@ -26,3 +26,6 @@ export type {
 
 // Sidecar binary resolution
 export { resolveSidecarPath } from './sidecar.js';
+
+// High-level API
+export { createMeshNode, type CreateMeshNodeOptions } from './create-mesh-node.js';

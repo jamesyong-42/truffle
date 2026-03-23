@@ -6,10 +6,12 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
+use truffle_core::bridge::header::Direction;
+use truffle_core::bridge::manager::TcpProxyHandler;
 use truffle_core::runtime::TruffleRuntime;
 use truffle_core::services::file_transfer::adapter::{
     FileTransferAdapter, FileTransferAdapterConfig,
@@ -98,15 +100,26 @@ impl DaemonServer {
             config.node.state_dir.clone()
         };
 
-        // Build the runtime
-        // Use "truffle" as the shared mesh prefix so all nodes can discover
-        // each other. The machine hostname is used as the display name only.
+        // Start the file transfer axum server early (we need the port for the bridge handler)
+        let (manager_event_tx, manager_event_rx) =
+            tokio::sync::broadcast::channel::<FileTransferEvent>(256);
+        let ft_config = FileTransferConfig::default();
+        let ft_manager = FileTransferManager::new(ft_config, manager_event_tx);
+        let ft_listener_port = start_file_transfer_listener(Arc::clone(&ft_manager))
+            .await
+            .map_err(|e| format!("Failed to start file transfer listener: {e}"))?;
+        info!(port = ft_listener_port, "File transfer HTTP listener started");
+
+        // Build the runtime with a bridge handler for file transfer port 9418
+        // This proxies incoming tsnet connections on 9418 to the local axum server
+        let ft_proxy = Arc::new(TcpProxyHandler::new(format!("127.0.0.1:{ft_listener_port}")));
         let (runtime, _mesh_rx) = TruffleRuntime::builder()
             .hostname("truffle")
             .device_name(&config.node.name)
             .device_type("cli")
             .sidecar_path(sidecar_path)
             .state_dir(&state_dir)
+            .bridge_handler(9418, Direction::Incoming, ft_proxy)
             .build()
             .map_err(|e| format!("Failed to build runtime: {e}"))?;
 
@@ -118,31 +131,36 @@ impl DaemonServer {
             .await
             .map_err(|e| format!("Failed to start runtime: {e}"))?;
 
-        // ── File transfer subsystem bootstrap ──────────────────────────
+        // ── File transfer subsystem wiring ──────────────────────────
 
-        // 1. Create the manager event channel (broadcast for multiple consumers)
-        let (manager_event_tx, manager_event_rx) =
-            tokio::sync::broadcast::channel::<FileTransferEvent>(256);
+        // Tell the sidecar to listen on port 9418 for file transfer
+        {
+            let shim_guard = runtime.shim().lock().await;
+            if let Some(ref s) = *shim_guard {
+                let _ = s.listen(9418, false).await;
+            }
+        }
 
-        // 2. Create the FileTransferManager
-        let ft_config = FileTransferConfig::default();
-        let ft_manager = FileTransferManager::new(ft_config, manager_event_tx);
+        // Create a DialFn for the adapter (dials through the Go sidecar bridge)
+        let dial_fn = create_dial_fn(&runtime).await;
 
-        // 3. Start the axum file transfer HTTP server on an ephemeral local port
-        let ft_listener_port = start_file_transfer_listener(Arc::clone(&ft_manager))
-            .await
-            .map_err(|e| format!("Failed to start file transfer listener: {e}"))?;
-        info!(port = ft_listener_port, "File transfer HTTP listener started");
-
-        // 4. Create a DialFn for the adapter (dials through the Go sidecar bridge)
-        let dial_fn = create_dial_fn(&runtime);
-
-        // 5. Create the FileTransferAdapter
+        // Create the FileTransferAdapter
         let (bus_tx, bus_rx) = mpsc::unbounded_channel();
         let (adapter_event_tx, _adapter_event_rx) = mpsc::unbounded_channel();
 
         let device_id = runtime.device_id().await;
-        let local_addr = format!("127.0.0.1:{ft_listener_port}");
+        // Wait briefly for the node to come online and get a DNS name
+        let mut local_addr = format!("127.0.0.1:{ft_listener_port}");
+        for _ in 0..30 {
+            let device = runtime.local_device().await;
+            if let Some(ref dns) = device.tailscale_dns_name {
+                if !dns.is_empty() {
+                    local_addr = format!("{dns}:9418");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
         let ft_adapter = FileTransferAdapter::new(
             FileTransferAdapterConfig {
@@ -453,9 +471,9 @@ async fn start_file_transfer_listener(
 ///
 /// The DialFn is used by the file transfer sender to establish a TCP connection
 /// to the receiver's axum HTTP server via the Tailscale network.
-fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
+async fn create_dial_fn(runtime: &Arc<TruffleRuntime>) -> DialFn {
     let shim = runtime.shim().clone();
-    let pending = runtime.pending_dials().clone();
+    let pending = runtime.pending_dials().await;
 
     Arc::new(move |addr: &str| {
         let shim = shim.clone();

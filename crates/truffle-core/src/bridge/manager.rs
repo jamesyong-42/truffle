@@ -56,6 +56,42 @@ impl BridgeHandler for ChannelHandler {
     }
 }
 
+/// Handler that proxies bridge connections to a local TCP server (e.g., axum).
+///
+/// When the bridge receives an incoming connection on the registered port,
+/// this handler connects to the local target and does bidirectional copy.
+pub struct TcpProxyHandler {
+    target_addr: String,
+}
+
+impl TcpProxyHandler {
+    pub fn new(target_addr: String) -> Self {
+        Self { target_addr }
+    }
+}
+
+impl BridgeHandler for TcpProxyHandler {
+    fn handle(&self, conn: BridgeConnection) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        let target = self.target_addr.clone();
+        Box::pin(async move {
+            let local = match TcpStream::connect(&target).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("TcpProxyHandler: failed to connect to {target}: {e}");
+                    return;
+                }
+            };
+            let (mut bridge_read, mut bridge_write) = tokio::io::split(conn.stream);
+            let (mut local_read, mut local_write) = tokio::io::split(local);
+            // Use join! so both directions run until completion (not select! which cancels one)
+            let _ = tokio::join!(
+                tokio::io::copy(&mut bridge_read, &mut local_write),
+                tokio::io::copy(&mut local_read, &mut bridge_write),
+            );
+        })
+    }
+}
+
 /// Route key for dispatching bridge connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RouteKey {
