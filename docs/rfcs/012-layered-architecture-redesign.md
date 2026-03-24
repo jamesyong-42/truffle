@@ -604,46 +604,289 @@ truffle-cli/src/
 
 ---
 
-## 8. Migration Path
+## 8. Implementation Plan: Clean Rebuild (Bottom-Up)
 
-This is a significant refactor. Suggested phased approach:
+**Strategy**: Build the new architecture from scratch alongside the old code. No migration, no wrapping, no facade pattern. The old code stays untouched until the new stack is fully built and tested, then we swap entirely.
 
-### Phase 1: Extract NetworkProvider trait
-- Create `network/mod.rs` with `NetworkProvider` trait
-- Implement `TailscaleProvider` wrapping existing GoShim + BridgeManager
-- Move bridge/* and shim.rs into `network/tailscale/`
-- `Node` wraps `TruffleRuntime` initially (facade pattern)
-- **Test**: all existing commands still work
+**Why not migrate**: The old architecture has fundamental coupling issues (application code in core, transport-dependent discovery, bridge internals leaking everywhere). Trying to migrate incrementally means every phase must maintain backward compatibility with broken abstractions. A clean rebuild is faster and produces better code.
 
-### Phase 2: Replace polling with WatchIPNBus
-- Add `WatchIPNBus` to Go sidecar
-- Remove `get_peers()` polling loop
-- Remove `device-announce` broadcast
-- PeerRegistry populated purely from Layer 3 events
-- **Test**: `truffle ls` shows peers without any WS connections
+**Workspace setup**: New code lives in a parallel crate `truffle-core-v2/` during development. Old `truffle-core/` stays untouched. When v2 is complete, we rename and delete the old.
 
-### Phase 3: Extract transport traits
-- Create `StreamTransport` and `RawTransport` traits
-- Wrap existing ConnectionManager as `WebSocketTransport`
-- `TcpTransport` wraps `NetworkProvider.dial_tcp()`
-- **Test**: `node.send()` and `node.open_tcp()` work
+```
+truffle/
+├── crates/
+│   ├── truffle-core/        ← OLD (untouched during rebuild)
+│   ├── truffle-core-v2/     ← NEW (built layer by layer)
+│   ├── truffle-cli/         ← updated LAST (swap to v2)
+│   └── ...
+└── packages/
+    └── sidecar-slim/        ← Go sidecar (updated for WatchIPNBus)
+```
 
-### Phase 4: Move file transfer to Layer 7
-- Move `services/file_transfer/` to `truffle-cli/src/apps/`
-- Replace HTTP PUT with raw TCP streaming
-- Remove axum file server, TcpProxyHandler, port 9418
-- `truffle cp` uses `node.send()` (signaling) + `node.open_tcp()` (data)
-- **Test**: file transfer works without any bridge-level infrastructure
+---
 
-### Phase 5: Move remaining apps to Layer 7
-- Move HttpRouter, PushManager out of truffle-core
-- Clean up `mesh/` module — collapse into `session/`
-- **Test**: truffle-core has zero application-specific code
+### Phase 1: Layer 3 — Network
 
-### Phase 6: Add QUIC + UDP transports
-- Implement `QuicTransport` (for video streaming)
-- Implement `UdpTransport` (for low-latency)
-- **Test**: `node.open_quic()` and `node.open_udp()` work
+**Build**: `truffle-core-v2/src/network/`
+
+**Goal**: A working `TailscaleProvider` that starts, discovers peers via WatchIPNBus, and provides `dial_tcp()` / `listen_tcp()`.
+
+**Deliverables**:
+- `NetworkProvider` trait (complete API)
+- `TailscaleProvider` implementation
+  - Spawns Go sidecar
+  - Bridge TCP listener + binary header protocol
+  - stdin/stdout command/event channel
+  - `WatchIPNBus` event loop (replaces `getPeers` polling)
+  - `dial_tcp()` / `listen_tcp()` / `bind_udp()` with clean `TcpStream` / `UdpSocket` return
+  - `ping()` via Tailscale TSMP
+  - All bridge internals (pending_dials, session token, header format) are **private**
+- Go sidecar update: add `WatchIPNBus` handler, emit `tsnet:peerChanged` events
+
+**Tests**:
+- Unit: sidecar spawn/stop, command serialization, header parse
+- Integration: start provider, auth, discover peers, dial_tcp between two nodes
+- **Key test**: `provider.peers()` returns peers WITHOUT any Layer 4 transport running
+
+**Acceptance**: Two nodes on the same tailnet can `dial_tcp` to each other and exchange bytes. Zero WebSocket code exists. Zero application code exists. Just raw networking.
+
+**Files**:
+```
+truffle-core-v2/src/
+├── network/
+│   ├── mod.rs              trait NetworkProvider + types
+│   ├── types.rs            NetworkPeer, PeerAddr, NodeIdentity, PingResult, PeerEvent
+│   └── tailscale/
+│       ├── mod.rs           pub struct TailscaleProvider
+│       ├── provider.rs      NetworkProvider impl
+│       ├── sidecar.rs       GoSidecar (spawn, command, events) — PRIVATE
+│       ├── bridge.rs        Bridge (TCP listener, header routing) — PRIVATE
+│       ├── header.rs        Binary header format — PRIVATE
+│       └── protocol.rs      JSON command/event types — PRIVATE
+```
+
+---
+
+### Phase 2: Layer 4 — Transport
+
+**Build**: `truffle-core-v2/src/transport/`
+
+**Goal**: `WebSocketTransport` and `TcpTransport` that use Layer 3 to connect to peers.
+
+**Deliverables**:
+- `StreamTransport` trait + `FramedStream` trait
+- `RawTransport` trait
+- `DatagramTransport` trait (interface only, no impl yet)
+- `WebSocketTransport` implementation
+  - `connect(addr)` → dial via Layer 3, WS upgrade, return `FramedStream`
+  - `listen(port)` → accept via Layer 3, WS upgrade on accept
+  - Handshake: exchange `{ peer_id, capabilities, protocol_version }`
+  - Heartbeat (configurable: 10s ping, 30s timeout)
+  - Binary frame send/receive
+- `TcpTransport` implementation
+  - `open(addr, port)` → `Layer3.dial_tcp()`, return `TcpStream`
+  - `listen(port)` → `Layer3.listen_tcp()`, return listener
+
+**Tests**:
+- Unit: WS handshake, heartbeat, frame encoding
+- Integration: two nodes, WS connect, send/receive frames
+- Integration: two nodes, TCP stream, bidirectional byte transfer
+- **Key test**: WS and TCP work independently — WS failure doesn't break TCP
+
+**Acceptance**: Two nodes can establish WS and TCP connections and exchange data. Zero message routing, zero peer registry, zero application code.
+
+**Files**:
+```
+truffle-core-v2/src/
+├── transport/
+│   ├── mod.rs              StreamTransport, RawTransport, DatagramTransport traits
+│   ├── websocket.rs        WebSocketTransport : StreamTransport
+│   ├── tcp.rs              TcpTransport : RawTransport
+│   ├── quic.rs             (stub — trait impl placeholder for future)
+│   └── udp.rs              (stub — trait impl placeholder for future)
+```
+
+---
+
+### Phase 3: Layer 5 — Session
+
+**Build**: `truffle-core-v2/src/session/`
+
+**Goal**: `PeerRegistry` that tracks peers from Layer 3, manages connections via Layer 4, and provides `send(peer_id, data)`.
+
+**Deliverables**:
+- `PeerRegistry`
+  - Subscribes to Layer 3 `peer_events()` → maintains peer list
+  - Peers exist with `online: true, connected: false` before any transport
+  - Lazy connect: first `send()` triggers WS connect
+  - Connection cache: reuse WS for subsequent sends
+  - Multi-transport tracking: a peer can have WS + TCP + QUIC simultaneously
+  - Auto-reconnect on WS drop (with backoff)
+  - `send(peer_id, data)` → find/create WS → send frame
+  - `broadcast(data)` → send to all connected peers
+  - `subscribe()` → receive frames from any peer
+- `PeerEvent` emissions: Joined, Left, Updated, Connected, Disconnected
+
+**Tests**:
+- Unit: peer add/remove, connection lookup, lazy connect logic
+- Integration: two nodes, Layer 3 discovers peer, first `send()` auto-connects WS, message delivered
+- Integration: kill WS, verify auto-reconnect, second `send()` succeeds
+- **Key test**: `peers()` returns peers with zero connections (pure Layer 3)
+- **Key test**: `send()` to an offline peer returns error (not hang)
+
+**Acceptance**: `registry.send(peer_id, bytes)` delivers data. `registry.peers()` lists all tailnet peers. Connection lifecycle is fully managed. Zero namespace routing, zero envelope format.
+
+**Files**:
+```
+truffle-core-v2/src/
+├── session/
+│   ├── mod.rs              PeerRegistry, PeerState, PeerEvent
+│   ├── connection.rs       Connection tracking (multi-transport)
+│   └── reconnect.rs        Auto-reconnect with backoff
+```
+
+---
+
+### Phase 4: Layer 6 — Envelope
+
+**Build**: `truffle-core-v2/src/envelope/`
+
+**Goal**: Namespace-routed message framing that Layer 5 uses for WS messages.
+
+**Deliverables**:
+- `Envelope` struct: `{ namespace, msg_type, payload, timestamp, from }`
+- `EnvelopeCodec`: serialize/deserialize (JSON default, MessagePack future)
+- Integration with Layer 5: `PeerRegistry.send()` wraps data in envelope before sending on WS
+- Namespace-based `subscribe(namespace)` filtering
+
+**Tests**:
+- Unit: serialize/deserialize roundtrip, namespace filtering
+- Integration: two nodes, send envelope with namespace "test", subscriber receives it, other namespace subscriber does NOT receive it
+
+**Acceptance**: Applications can send namespaced messages and subscribe to specific namespaces. truffle-core never inspects payload contents.
+
+**Files**:
+```
+truffle-core-v2/src/
+├── envelope/
+│   ├── mod.rs              Envelope struct
+│   └── codec.rs            JSON codec (+ future MessagePack)
+```
+
+---
+
+### Phase 5: Node API — Wire It All Together
+
+**Build**: `truffle-core-v2/src/node.rs`
+
+**Goal**: The `Node` struct that exposes the complete public API.
+
+**Deliverables**:
+- `Node::builder()` → `NodeBuilder` (configure name, sidecar path, etc.)
+- `node.peers()`, `node.on_peer_change()` → Layer 5 → Layer 3
+- `node.send()`, `node.broadcast()`, `node.subscribe()` → Layer 6 → Layer 5 → Layer 4
+- `node.open_tcp()`, `node.listen_tcp()` → Layer 4 → Layer 3
+- `node.open_quic()`, `node.open_udp()` → stubs returning `Err("not yet implemented")`
+- `node.ping()`, `node.health()` → Layer 3
+- `node.stop()` → cascade shutdown through all layers
+
+**Tests**:
+- Integration: full Node lifecycle — build, start, discover peers, send message, receive, stop
+- Integration: `node.open_tcp()` → raw TCP stream works
+- Integration: `node.send()` → lazy WS connect → message delivered
+- Integration: `node.peers()` → returns peers with no connections
+- **Key test**: the "multiplayer game" litmus test:
+  ```rust
+  let node = Node::builder().name("test").build().await?;
+  node.send(&peer, "game", b"state-update").await?;
+  let stream = node.open_tcp(&peer, 0).await?;
+  // Both work independently
+  ```
+
+**Acceptance**: The full Node API works end-to-end between two nodes. This is `truffle-core-v2` complete.
+
+**Files**:
+```
+truffle-core-v2/src/
+├── lib.rs                  pub mod network, transport, session, envelope, node
+└── node.rs                 pub struct Node, NodeBuilder
+```
+
+---
+
+### Phase 6: Layer 7 — Rebuild CLI Apps
+
+**Build**: `truffle-cli/src/apps/` (modify existing truffle-cli to use v2)
+
+**Goal**: Rewrite all CLI commands against the `Node` API.
+
+**Deliverables**:
+- `apps/file_transfer/` — cp command using `node.send()` + `node.open_tcp()`
+  - Raw TCP streaming (no HTTP, no axum)
+  - OFFER/ACCEPT via WS, data via TCP
+  - SHA-256 verification, resume support
+- `apps/messaging/` — send + chat using `node.send()` + `node.subscribe()`
+- `apps/proxy/` — proxy + expose using `node.open_tcp()` + `node.listen_tcp()`
+- `apps/diagnostics/` — status, ls, ping, doctor using `node.peers()` + `node.ping()` + `node.health()`
+- `daemon/handler.rs` — rewrite dispatch to use `Node` API only
+- `daemon/server.rs` — simplified: create `Node`, run IPC loop, done
+
+**Tests**:
+- End-to-end: `truffle up` → `truffle ls` → `truffle ping` → `truffle send` → `truffle cp` → `truffle down`
+- Cross-machine: macOS ↔ EC2 Linux peer test (same as current test protocol)
+- Stress: multiple concurrent file transfers
+- Edge: offline peer, killed sidecar, network partition
+
+**Acceptance**: All current working commands (`up`, `down`, `status`, `ls`, `ping`, `send`, `cp`, `tcp`, `doctor`) work identically to v0.2.5 but using the v2 core.
+
+---
+
+### Phase 7: Swap + Cleanup
+
+**Goal**: Replace `truffle-core` with `truffle-core-v2`, delete old code.
+
+**Steps**:
+1. Rename `truffle-core/` → `truffle-core-old/` (keep as reference)
+2. Rename `truffle-core-v2/` → `truffle-core/`
+3. Update all `Cargo.toml` dependencies
+4. Run full test suite
+5. Cross-machine peer test
+6. Delete `truffle-core-old/`
+7. Update truffle-napi and truffle-tauri-plugin to use new Node API
+8. Tag v0.3.0
+
+**Acceptance**: `cargo test --workspace` passes. All CLI commands work. `truffle-core` has zero application-specific code. The `pending_dials` HashMap, `GoShim`, and `BridgeManager` are invisible outside `network/tailscale/`.
+
+---
+
+### Phase 8: Future Transports
+
+**Goal**: Add QUIC and UDP transport implementations.
+
+**Steps**:
+1. Implement `QuicTransport` using `quinn` crate
+2. Implement `UdpTransport` using `tokio::net::UdpSocket`
+3. `node.open_quic()` and `node.open_udp()` become functional
+4. Video streaming app (`fondue`) becomes possible
+
+**No rush**: This phase happens when an application (fondue) needs it.
+
+---
+
+### Timeline Estimate
+
+| Phase | Layer | Effort | Can parallelize? |
+|-------|-------|--------|-----------------|
+| 1 | Layer 3: Network | 2-3 sessions | No (foundation) |
+| 2 | Layer 4: Transport | 1-2 sessions | No (needs Layer 3) |
+| 3 | Layer 5: Session | 1-2 sessions | No (needs Layer 4) |
+| 4 | Layer 6: Envelope | 0.5 session | No (needs Layer 5) |
+| 5 | Node API | 1 session | No (wires all layers) |
+| 6 | Layer 7: CLI Apps | 2-3 sessions | Yes (per app) |
+| 7 | Swap + Cleanup | 0.5 session | No |
+| 8 | QUIC + UDP | Future | Independent |
+
+**Total: ~8-12 focused sessions to complete the rebuild.**
 
 ---
 
