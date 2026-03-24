@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.4...truffle-v0.2.5) (2026-03-24)
+
+
+### Bug Fixes
+
+* DialFn lock contention + TcpProxyHandler shutdown + Connection: close ([afa36b6](https://github.com/jamesyong-42/truffle/commit/afa36b649b8895b71e2a18cecb21c0da586b18d9))
+* ensure mesh connection before file transfer OFFER/PULL_REQUEST ([0352501](https://github.com/jamesyong-42/truffle/commit/03525019c7f69d996d75ece5a303788196e7777a))
+* resolve file transfer blocking_read deadlock + DNS resolution + heartbeat timeouts ([a631d73](https://github.com/jamesyong-42/truffle/commit/a631d73701209cf8256d9c3ea906967b97586225))
+* wire file transfer bridge infrastructure for cross-node cp ([3729c6c](https://github.com/jamesyong-42/truffle/commit/3729c6c0f8e0b9ae6370709e0b3e11a0853a2a46))
+
 ## [0.2.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.3...truffle-v0.2.4) (2026-03-23)
 
 
