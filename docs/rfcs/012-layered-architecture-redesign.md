@@ -714,3 +714,574 @@ The refactor is complete when:
 8. All existing tests pass
 9. The `pending_dials` HashMap is invisible outside `network/tailscale/`
 10. The `GoShim` struct is invisible outside `network/tailscale/`
+
+---
+
+## 11. CLI Command Flows Under New Architecture
+
+Every command uses ONLY the `Node` API. No command touches GoShim, BridgeManager, pending_dials, or bridge headers.
+
+### 11.1 `truffle up`
+
+```
+User                     CLI                    Node                Layer 5          Layer 4          Layer 3
+ │                        │                      │                    │                │                │
+ │── truffle up ─────────→│                      │                    │                │                │
+ │                        │                      │                    │                │                │
+ │                        │── Node::builder()    │                    │                │                │
+ │                        │   .name(hostname)    │                    │                │                │
+ │                        │   .sidecar(path)     │                    │                │                │
+ │                        │   .build().await ───→│                    │                │                │
+ │                        │                      │                    │                │                │
+ │                        │                      │── Layer 3: TailscaleProvider::start()               │
+ │                        │                      │   (spawn sidecar, auth, get IP)    │                │
+ │                        │                      │   [sidecar + bridge are internal,  │                │
+ │                        │                      │    invisible to all other layers]   │                │
+ │                        │                      │                    │                │                │
+ │                        │                      │── Layer 4: WebSocketTransport::listen()              │
+ │                        │                      │   (ready to accept WS from peers)  │                │
+ │                        │                      │                    │                │                │
+ │                        │                      │── Layer 5: PeerRegistry::start()   │                │
+ │                        │                      │   Subscribe to Layer 3 peer events  │                │
+ │                        │                      │                    │                │                │
+ │                        │                      │── Ready            │                │                │
+ │                        │                      │                    │                │                │
+ │                        │── DaemonServer.run()  │                    │                │                │
+ │                        │   (IPC accept loop)  │                    │                │                │
+ │                        │                      │                    │                │                │
+ │                        │── node.on_peer_change()                   │                │                │
+ │                        │   → stream to dashboard                   │                │                │
+ │                        │                      │                    │                │                │
+ │   Background (inside Node, automatic):        │                    │                │                │
+ │                        │                      │                    │                │                │
+ │   Layer 3 emits PeerEvent::Joined(peer)       │                    │                │                │
+ │     → Layer 5: PeerRegistry adds peer         │                    │                │                │
+ │       (online=true, connected=false)          │                    │                │                │
+ │     → NO dial, NO WS — just awareness         │                    │                │                │
+ │     → Layer 5 emits PeerEvent::Joined         │                    │                │                │
+ │                        │                      │                    │                │                │
+ │   First node.send() to this peer:             │                    │                │                │
+ │     → Layer 5: no WS exists, auto-connect     │                    │                │                │
+ │     → Layer 4: WS handshake (peer_id exchange)│                    │                │                │
+ │     → Layer 5: cache connection               │                    │                │                │
+ │     → Layer 5 emits PeerEvent::Connected      │                    │                │                │
+```
+
+**What happens**: Sidecar starts, Tailscale authenticates, WatchIPNBus begins. Peers appear instantly via events. NO polling, NO dialing, NO announce. Connections happen lazily on first use.
+
+---
+
+### 11.2 `truffle down`
+
+```
+User               CLI              Node             Layer 5           Layer 4          Layer 3
+ │                  │                 │                 │                 │                │
+ │── truffle down ─→│                 │                 │                 │                │
+ │                  │── JSON-RPC ────→│                 │                 │                │
+ │                  │  "shutdown"     │                 │                 │                │
+ │                  │                 │── node.stop()   │                 │                │
+ │                  │                 │                 │                 │                │
+ │                  │                 │── Layer 5: for each connected peer:               │
+ │                  │                 │   node.broadcast("_mesh", GOODBYE)                │
+ │                  │                 │   close all WS/TCP/QUIC sessions  │                │
+ │                  │                 │                 │                 │                │
+ │                  │                 │── Layer 4: drop all transports    │                │
+ │                  │                 │                 │                 │                │
+ │                  │                 │── Layer 3: TailscaleProvider.stop()               │
+ │                  │                 │   [internal: sidecar stop, bridge close]          │
+ │                  │                 │                 │                 │                │
+ │                  │── remove PID    │                 │                 │                │
+ │                  │── remove socket │                 │                 │                │
+ │←── "stopped" ────│                 │                 │                 │                │
+```
+
+**What happens**: Broadcast goodbye via existing WS connections, close everything, stop sidecar. One `node.stop()` call — clean cascade through layers.
+
+---
+
+### 11.3 `truffle status`
+
+```
+User               CLI              Node
+ │                  │                 │
+ │── truffle status→│                 │
+ │                  │                 │
+ │                  │── node.local_info()
+ │                  │     → { id, name, ip, dns }     ← from Layer 3
+ │                  │                 │
+ │                  │── node.peers().len()
+ │                  │     → peer count                 ← from Layer 5 (fed by Layer 3)
+ │                  │                 │
+ │                  │── node.health()
+ │                  │     → { uptime, key_expiry }     ← from Layer 3
+ │                  │                 │
+ │←── dashboard ────│                 │
+```
+
+**What happens**: Three reads from the Node. Zero network calls. All data already cached from WatchIPNBus events.
+
+---
+
+### 11.4 `truffle ls`
+
+```
+User             CLI              Node           Layer 5
+ │                │                 │               │
+ │── truffle ls ─→│                 │               │
+ │                │                 │               │
+ │                │── node.peers()  │               │
+ │                │                 │── PeerRegistry.all()
+ │                │                 │               │
+ │                │                 │← Vec<Peer>    │
+ │                │                 │   id           │ ← from Layer 3 (hostname parse)
+ │                │                 │   name         │ ← from Layer 3 (Tailscale HostName)
+ │                │                 │   ip           │ ← from Layer 3 (TailscaleIPs)
+ │                │                 │   online       │ ← from Layer 3 (peer.Online)
+ │                │                 │   connected    │ ← from Layer 5 (has active WS?)
+ │                │                 │   connection   │ ← from Layer 3 (CurAddr/Relay)
+ │                │                 │               │
+ │                │── filter --all  │               │
+ │                │── format table  │               │
+ │                │                 │               │
+ │←── table ──────│                 │               │
+ │                │                 │               │
+ │  NODE      STATUS   CONNECTION  CONNECTED       │
+ │  laptop    ● online direct      yes             │
+ │  server    ● online relay:ord   no              │  ← online but no WS (lazy)
+ │  phone     ○ offline —          no              │
+```
+
+**What happens**: Pure read from PeerRegistry. Zero network calls. Zero WS connections needed. The `CONNECTION` column (direct/relay) comes from Tailscale, not from our WS.
+
+---
+
+### 11.5 `truffle ping`
+
+```
+User                CLI              Node             Layer 3
+ │                   │                │                  │
+ │── truffle ping ──→│                │                  │
+ │   laptop          │                │                  │
+ │                   │                │                  │
+ │                   │── resolve("laptop")               │
+ │                   │   node.peers() → find by name     │
+ │                   │   → peer_id                       │
+ │                   │                │                  │
+ │   [for i in 1..count]:            │                  │
+ │                   │                │                  │
+ │                   │── node.ping(peer_id)              │
+ │                   │                │── NetworkProvider.ping(addr)
+ │                   │                │                  │── Tailscale TSMP ping
+ │                   │                │                  │   (real network round-trip)
+ │                   │                │                  │
+ │                   │                │←── PingResult {  │
+ │                   │                │      latency: 0.25ms,
+ │                   │                │      connection: "direct"
+ │                   │                │    }             │
+ │                   │                │                  │
+ │←── "reply: 0.25ms (direct)" ──────│                  │
+ │                   │                │                  │
+ │   [print stats: 4 sent, 4 received, 0% loss]         │
+ │   [round-trip min/avg/max = 0.15/0.25/0.31 ms]       │
+```
+
+**What happens**: Real Tailscale ping (TSMP/Disco/ICMP). Measures actual network latency and reports connection type. NO WS connection needed. Pure Layer 3.
+
+---
+
+### 11.6 `truffle send`
+
+```
+User                 CLI              Node           Layer 5          Layer 6         Layer 4
+ │                    │                │                │                │               │
+ │── truffle send ───→│                │                │                │               │
+ │   laptop "hello"   │                │                │                │               │
+ │                    │                │                │                │               │
+ │                    │── resolve("laptop") → peer_id   │                │               │
+ │                    │                │                │                │               │
+ │                    │── node.send(peer_id, "chat", b"hello")          │               │
+ │                    │                │                │                │               │
+ │                    │                │── Layer 6: Envelope {           │               │
+ │                    │                │     ns: "chat",                 │               │
+ │                    │                │     type: "text",               │               │
+ │                    │                │     payload: b"hello"           │               │
+ │                    │                │   }                             │               │
+ │                    │                │                │                │               │
+ │                    │                │── Layer 5: PeerRegistry         │               │
+ │                    │                │   Has WS to laptop? ────────────────────────────│
+ │                    │                │                │                │               │
+ │                    │                │   [if NO]:     │                │               │
+ │                    │                │   Layer 4: WebSocketTransport   │               │
+ │                    │                │     .connect(laptop.addr)───────────────────────│
+ │                    │                │   WS handshake: exchange peer_id│               │
+ │                    │                │   Cache connection              │               │
+ │                    │                │                │                │               │
+ │                    │                │   [then]:      │                │               │
+ │                    │                │   ws.send(serialize(envelope))──────────────────│
+ │                    │                │                │                │    WS binary   │
+ │                    │                │                │                │    → bridge    │
+ │                    │                │                │                │    → Go tsnet  │
+ │                    │                │                │                │    → WireGuard │
+ │                    │                │                │                │    → peer      │
+ │                    │                │                │                │               │
+ │←── "Sent to laptop"               │                │                │               │
+```
+
+**What happens**: Envelope created (Layer 6), routed to peer (Layer 5), lazy-connect WS if needed (Layer 4), send. Second call to same peer skips the dial — reuses cached WS.
+
+---
+
+### 11.7 `truffle cp` — Upload (`file.txt → server:/tmp/`)
+
+```
+User              CLI             Daemon (Layer 7 App)          Node
+
+ │── truffle cp ──→│                │                            │
+ │  file.txt       │                │                            │
+ │  server:/tmp/   │                │                            │
+ │                 │── JSON-RPC ───→│                            │
+ │                 │  "push_file"   │                            │
+ │                 │                │                            │
+ │                 │                │── 1. SHA-256 hash file     │
+ │                 │                │                            │
+ │                 │                │── 2. OFFER signaling       │
+ │                 │                │   node.send(server, "ft",  │
+ │                 │                │     Offer { file_name,     │
+ │                 │                │       size, sha256,        │
+ │                 │                │       save_path, token })  │
+ │                 │                │                            │── [Layer 5 → WS → peer]
+ │                 │                │                            │
+ │                 │                │   ┌── server receives OFFER via node.subscribe("ft")
+ │                 │                │   │   validates save_path
+ │                 │                │   │   sends Accept { token } back
+ │                 │                │   └──────────────────────────── [WS → back to us]
+ │                 │                │                            │
+ │                 │                │── 3. Receive ACCEPT        │
+ │                 │                │   via node.subscribe("ft") │
+ │                 │                │                            │
+ │                 │                │── 4. Open raw TCP          │
+ │                 │                │   stream = node.open_tcp(  │
+ │                 │                │     server, 0)             │
+ │                 │                │                            │── [Layer 4 → Layer 3]
+ │                 │                │                            │   [TailscaleProvider.dial_tcp]
+ │                 │                │                            │   [internal: sidecar dial + bridge]
+ │                 │                │                            │── TcpStream returned
+ │                 │                │                            │
+ │                 │                │── 5. Stream file           │
+ │                 │                │   stream.write([8B size])  │
+ │                 │                │   stream.write([32B sha])  │
+ │                 │                │   loop:                    │
+ │                 │                │     chunk = file.read(64KB)│
+ │←── progress ────│                │     stream.write(chunk)    │── [raw bytes → tsnet → peer]
+ │                 │                │                            │
+ │                 │                │   ┌── server reads stream:
+ │                 │                │   │   read size, sha256
+ │                 │                │   │   read chunks → write to /tmp/file.txt
+ │                 │                │   │   verify SHA-256
+ │                 │                │   │   stream.write([0x01]) ← ACK
+ │                 │                │   └────────────────────────────
+ │                 │                │                            │
+ │                 │                │── 6. Read ACK              │
+ │                 │                │   ack = stream.read(1)     │
+ │                 │                │   0x01 = verified OK       │
+ │                 │                │                            │
+ │←── complete ────│←── result ─────│                            │
+ │  "SHA-256 ✓"    │                │                            │
+```
+
+**What happens**: Signaling via existing WS (`node.send`). Data via one-off raw TCP (`node.open_tcp`). No HTTP, no axum, no TcpProxy, no port 9418. The daemon app reads the file and streams it — truffle-core has no knowledge of files.
+
+---
+
+### 11.8 `truffle cp` — Download (`server:/tmp/file.txt → ./`)
+
+```
+User              CLI             Daemon (Layer 7 App)          Node            Server's Daemon
+
+ │── truffle cp ──→│                │                            │                   │
+ │  server:/tmp/f  │                │                            │                   │
+ │  ./             │                │                            │                   │
+ │                 │── JSON-RPC ───→│                            │                   │
+ │                 │  "get_file"    │                            │                   │
+ │                 │                │                            │                   │
+ │                 │                │── 1. PULL_REQUEST          │                   │
+ │                 │                │   node.send(server, "ft",  │                   │
+ │                 │                │     PullRequest {          │                   │
+ │                 │                │       path, requester_id })│                   │
+ │                 │                │                            │── [WS → server] ─→│
+ │                 │                │                            │                   │
+ │                 │                │   ┌── server receives PullRequest              │
+ │                 │                │   │   validate path exists                     │
+ │                 │                │   │   SHA-256 hash file                        │
+ │                 │                │   │   send Offer back via WS                   │
+ │                 │                │   └────────────────────── [WS → back to us] ──→│
+ │                 │                │                            │                   │
+ │                 │                │── 2. Receive OFFER         │                   │
+ │                 │                │   validate, send ACCEPT    │                   │
+ │                 │                │                            │── [WS → server]   │
+ │                 │                │                            │                   │
+ │                 │                │── 3. Listen for TCP        │                   │
+ │                 │                │   listener = node          │                   │
+ │                 │                │     .listen_tcp(0)         │                   │
+ │                 │                │                            │                   │
+ │                 │                │   ┌── server receives ACCEPT                   │
+ │                 │                │   │   stream = node.open_tcp(us, port)         │
+ │                 │                │   │   write [size][sha256][file_bytes]          │
+ │                 │                │   └──────────────── [raw TCP → to us] ─────────│
+ │                 │                │                            │                   │
+ │                 │                │── 4. Accept + receive      │                   │
+ │                 │                │   stream = listener.accept()                   │
+ │                 │                │   read size, sha256        │                   │
+ │                 │                │   read chunks → write to ./file.txt            │
+ │←── progress ────│                │   verify SHA-256           │                   │
+ │                 │                │   stream.write([0x01]) ACK │                   │
+ │                 │                │                            │                   │
+ │←── complete ────│←── result ─────│                            │                   │
+```
+
+**What happens**: PULL_REQUEST via WS, server prepares and sends OFFER back via WS, we accept, server opens raw TCP to us and streams the file. Reversed roles, same protocol.
+
+---
+
+### 11.9 `truffle tcp`
+
+```
+User              CLI               Node              Layer 4         Layer 3
+ │                 │                  │                   │               │
+ │── truffle tcp ─→│                  │                   │               │
+ │   server:5432   │                  │                   │               │
+ │                 │                  │                   │               │
+ │  [check mode]:  │                  │                   │               │
+ │                 │── node.open_tcp( │                   │               │
+ │                 │     server, 5432)│                   │               │
+ │                 │                  │── TcpTransport    │               │
+ │                 │                  │     .open(addr,   │               │
+ │                 │                  │       5432)       │               │
+ │                 │                  │                   │── tsnet.Dial  │
+ │                 │                  │                   │  (addr:5432)  │
+ │                 │                  │← TcpStream (or err)               │
+ │←── "succeeded" ─│                  │                   │               │
+ │                 │                  │                   │               │
+ │  [stream mode]: │                  │                   │               │
+ │                 │── stream = node  │                   │               │
+ │                 │   .open_tcp(     │                   │               │
+ │                 │     server, 5432)│                   │               │
+ │                 │                  │                   │               │
+ │                 │── pipe(stdin/stdout ↔ stream)        │               │
+ │                 │                  │                   │               │
+ │── type data ───→│───→ stream ────→ peer               │               │
+ │←── recv data ───│←─── stream ←─── peer               │               │
+```
+
+**What happens**: One call: `node.open_tcp(peer, port)`. Check mode verifies connectivity. Stream mode pipes stdin/stdout to the raw TCP stream. The daemon is a thin pipe — zero protocol knowledge.
+
+---
+
+### 11.10 `truffle ping`
+
+(Shown in 11.5 above)
+
+---
+
+### 11.11 `truffle doctor`
+
+```
+User               CLI              Node             Layer 3
+ │                  │                 │                 │
+ │── truffle doctor→│                 │                 │
+ │                  │                 │                 │
+ │                  │── Check sidecar binary exists     │
+ │                  │   (filesystem check, no Node)     │
+ │                  │                 │                 │
+ │                  │── node.health() │                 │
+ │                  │                 │── NetworkProvider.health()
+ │                  │                 │                 │── Tailscale state
+ │                  │                 │                 │── Key expiry
+ │                  │                 │                 │── Health warnings
+ │                  │                 │                 │
+ │                  │── node.peers().len() > 0          │
+ │                  │   (mesh reachable?)               │
+ │                  │                 │                 │
+ │                  │── Check config file               │
+ │                  │   (filesystem, no Node)           │
+ │                  │                 │                 │
+ │←── checklist ────│                 │                 │
+ │  ✓ Sidecar found                  │                 │
+ │  ✓ Tailscale connected            │                 │
+ │  ✓ Mesh reachable (3 peers)       │                 │
+ │  ✓ Key expiry: 75 days            │                 │
+ │  ✓ Config valid                   │                 │
+```
+
+**What happens**: Mix of filesystem checks and `Node` API reads. Zero network calls — all data from cached Layer 3 state.
+
+---
+
+### 11.12 Future: `truffle proxy`
+
+```
+User               CLI              Daemon (Layer 7 App)      Node
+ │                  │                 │                         │
+ │── truffle proxy ─→│                │                         │
+ │   5432            │                │                         │
+ │   server:5432     │                │                         │
+ │                  │── JSON-RPC ────→│                         │
+ │                  │                 │                         │
+ │                  │                 │── local = TcpListener   │
+ │                  │                 │   ::bind("127.0.0.1:5432")
+ │                  │                 │                         │
+ │                  │                 │── loop:                 │
+ │                  │                 │   local_conn = local    │
+ │                  │                 │     .accept()           │
+ │                  │                 │                         │
+ │                  │                 │   remote = node         │
+ │                  │                 │     .open_tcp(server,   │
+ │                  │                 │       5432)             │
+ │                  │                 │                         │── [Layer 3 dial]
+ │                  │                 │                         │
+ │                  │                 │   tokio::spawn(         │
+ │                  │                 │     pipe(local ↔ remote)│
+ │                  │                 │   )                     │
+ │                  │                 │                         │
+ │ psql -h 127.0.0.1 -p 5432        │                         │
+ │   → local:5432 → remote:5432 ────│── [raw TCP through tsnet]
+```
+
+**What happens**: Pure Layer 7. Listen locally, `node.open_tcp()` for each accepted connection, pipe bidirectionally. The proxy app is ~30 lines of code.
+
+---
+
+### 11.13 Future: `truffle expose`
+
+```
+User               CLI              Daemon (Layer 7 App)      Node
+ │                  │                 │                         │
+ │── truffle expose─→│                │                         │
+ │   3000            │                │                         │
+ │                  │── JSON-RPC ────→│                         │
+ │                  │                 │                         │
+ │                  │                 │── listener = node       │
+ │                  │                 │   .listen_tcp(3000)     │
+ │                  │                 │                         │── [Layer 3: tsnet.Listen(:3000)]
+ │                  │                 │                         │
+ │                  │                 │── loop:                 │
+ │                  │                 │   remote_conn =         │
+ │                  │                 │     listener.accept()   │
+ │                  │                 │                         │
+ │                  │                 │   local = TcpStream     │
+ │                  │                 │     ::connect(          │
+ │                  │                 │       "127.0.0.1:3000") │
+ │                  │                 │                         │
+ │                  │                 │   tokio::spawn(         │
+ │                  │                 │     pipe(remote ↔ local)│
+ │                  │                 │   )                     │
+ │                  │                 │                         │
+ │ Peer runs: truffle tcp me:3000    │                         │
+ │   → tsnet → listener:3000        │                         │
+ │   → pipe → localhost:3000        │                         │
+```
+
+**What happens**: Reverse of proxy. Listen on tsnet, accept remote connections, pipe to local service. Also ~30 lines.
+
+---
+
+### 11.14 Future: `truffle chat`
+
+```
+User               CLI              Daemon (Layer 7 App)      Node
+ │                  │                 │                         │
+ │── truffle chat ──→│                │                         │
+ │   laptop          │                │                         │
+ │                  │── JSON-RPC ────→│                         │
+ │                  │                 │                         │
+ │                  │                 │── msgs = node           │
+ │                  │                 │   .subscribe("chat")    │
+ │                  │                 │                         │
+ │                  │                 │── spawn receiver:       │
+ │                  │                 │   loop:                 │
+ │                  │                 │     msg = msgs.next()   │
+ │                  │                 │     → write to IPC      │
+ │                  │                 │       (JSON event line) │
+ │                  │                 │                         │
+ │ [interactive]:   │                 │                         │
+ │── "hello" ──────→│── read IPC ───→│                         │
+ │                  │                 │── node.send(laptop,     │
+ │                  │                 │     "chat",             │
+ │                  │                 │     {text:"hello"})     │
+ │                  │                 │                         │── [WS → peer]
+ │                  │                 │                         │
+ │ [receive]:       │                 │                         │
+ │                  │                 │← msg from peer via WS   │
+ │                  │                 │── write to IPC          │
+ │←── "[14:23] laptop: hey" ─────────│                         │
+```
+
+**What happens**: `node.subscribe("chat")` for incoming, `node.send()` for outgoing. The chat app is pure message routing — zero transport knowledge.
+
+---
+
+### 11.15 Future: `truffle stream` (video — fondue)
+
+```
+User               CLI              Daemon (Layer 7 App)      Node           Layer 4
+ │                  │                 │                         │               │
+ │── truffle stream→│                │                         │               │
+ │   start          │                │                         │               │
+ │                  │── JSON-RPC ────→│                         │               │
+ │                  │                 │                         │               │
+ │                  │                 │── node.send(peer,       │               │
+ │                  │                 │   "video",              │               │
+ │                  │                 │   StreamOffer{codec,    │               │
+ │                  │                 │    resolution,fps})     │── [WS → peer] │
+ │                  │                 │                         │               │
+ │                  │                 │── wait StreamAccept     │               │
+ │                  │                 │   via node.subscribe()  │               │
+ │                  │                 │                         │               │
+ │                  │                 │── quic = node           │               │
+ │                  │                 │   .open_quic(peer)      │               │
+ │                  │                 │                         │── QuicTransport
+ │                  │                 │                         │   .connect()  │
+ │                  │                 │                         │               │── tsnet UDP
+ │                  │                 │                         │               │
+ │                  │                 │── video = quic          │               │
+ │                  │                 │   .open_stream()        │               │
+ │                  │                 │── audio = quic          │               │
+ │                  │                 │   .open_stream()        │               │
+ │                  │                 │── ctrl = quic           │               │
+ │                  │                 │   .open_stream()        │               │
+ │                  │                 │                         │               │
+ │                  │                 │── loop:                 │               │
+ │                  │                 │   frame = camera.read() │               │
+ │                  │                 │   encoded = h264(frame) │               │
+ │                  │                 │   video.write(encoded)  │── [QUIC → tsnet → peer]
+ │                  │                 │                         │               │
+ │                  │                 │   audio_pkt = mic.read()│               │
+ │                  │                 │   audio.write(opus(pkt))│── [QUIC → tsnet → peer]
+ │                  │                 │                         │               │
+ │                  │                 │   ctrl_msg = ctrl.read()│               │
+ │                  │                 │   handle(pause/seek/    │               │
+ │                  │                 │    quality_change)      │               │
+```
+
+**What happens**: Signaling via WS (`node.send`). Media via QUIC (`node.open_quic` → independent streams for video/audio/control). Each stream is loss-independent — dropped video frame doesn't stall audio. Pure Layer 7 application.
+
+---
+
+### Summary: Node API usage per command
+
+| Command | `peers()` | `send()` | `subscribe()` | `open_tcp()` | `listen_tcp()` | `open_quic()` | `ping()` | `health()` |
+|---------|-----------|----------|---------------|-------------|----------------|---------------|----------|-----------|
+| `up` | | | | | | | | |
+| `down` | | broadcast | | | | | | |
+| `status` | count | | | | | | | ✓ |
+| `ls` | ✓ | | | | | | | |
+| `ping` | resolve | | | | | | ✓ | |
+| `send` | resolve | ✓ | | | | | | |
+| `cp` (up) | resolve | ✓ | ✓ | ✓ | | | | |
+| `cp` (down) | resolve | ✓ | ✓ | | ✓ | | | |
+| `tcp` | resolve | | | ✓ | | | | |
+| `proxy` | resolve | | | ✓ | | | | |
+| `expose` | | | | | ✓ | | | |
+| `chat` | resolve | ✓ | ✓ | | | | | |
+| `doctor` | count | | | | | | | ✓ |
+| `stream` | resolve | ✓ | ✓ | | | ✓ | | |
