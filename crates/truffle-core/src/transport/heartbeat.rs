@@ -4,11 +4,15 @@ use tokio::sync::mpsc;
 
 use crate::protocol::frame::ControlMessage;
 
-/// Default ping interval (2 seconds, matching TypeScript DEFAULT_HEARTBEAT_PING_INTERVAL_MS).
-pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(2);
+/// Default ping interval.
+/// Relaxed from the TypeScript default (2s) because the Go bridge adds
+/// latency: Rust → bridge TCP → Go → tsnet/WireGuard → remote Go → bridge → Rust.
+/// A 2s/5s ping/timeout caused constant heartbeat_timeout disconnects.
+pub const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Default heartbeat timeout (5 seconds, matching TypeScript DEFAULT_HEARTBEAT_TIMEOUT_MS).
-pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default heartbeat timeout.
+/// Must be generous enough for a full round-trip through the bridge + tsnet.
+pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Heartbeat configuration.
 #[derive(Debug, Clone)]

@@ -149,10 +149,20 @@ impl DaemonServer {
         let (adapter_event_tx, _adapter_event_rx) = mpsc::unbounded_channel();
 
         let device_id = runtime.device_id().await;
-        // Wait briefly for the node to come online and get a DNS name
+        // Wait briefly for the node to come online and get a Tailscale IP.
+        // Prefer the Tailscale IP over DNS name because tsnet MagicDNS may
+        // not have propagated the DNS name for newly created/restarted nodes,
+        // causing `s.server.Dial()` to fail with "no such host".
         let mut local_addr = format!("127.0.0.1:{ft_listener_port}");
         for _ in 0..30 {
             let device = runtime.local_device().await;
+            // Prefer IP (always resolvable) over DNS name (requires MagicDNS)
+            if let Some(ref ip) = device.tailscale_ip {
+                if !ip.is_empty() {
+                    local_addr = format!("{ip}:9418");
+                    break;
+                }
+            }
             if let Some(ref dns) = device.tailscale_dns_name {
                 if !dns.is_empty() {
                     local_addr = format!("{dns}:9418");

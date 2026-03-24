@@ -554,6 +554,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 
 	go func() {
 		if s.server == nil {
+			log.Printf("[handleDial] rid=%s FAIL: node not running", d.RequestID)
 			s.sendEvent("bridge:dialResult", dialResultData{
 				RequestID: d.RequestID,
 				Success:   false,
@@ -564,8 +565,10 @@ func (s *shim) handleDial(data json.RawMessage) {
 
 		// Dial via tsnet
 		addr := fmt.Sprintf("%s:%d", d.Target, d.Port)
+		log.Printf("[handleDial] rid=%s dialing %s", d.RequestID, addr)
 		tsnetConn, err := s.server.Dial(s.ctx, "tcp", addr)
 		if err != nil {
+			log.Printf("[handleDial] rid=%s DIAL FAILED: %v", d.RequestID, err)
 			s.sendEvent("bridge:dialResult", dialResultData{
 				RequestID: d.RequestID,
 				Success:   false,
@@ -573,6 +576,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 			})
 			return
 		}
+		log.Printf("[handleDial] rid=%s dial succeeded, bridging to Rust", d.RequestID)
 
 		// For port 443, wrap with TLS
 		var conn net.Conn = tsnetConn

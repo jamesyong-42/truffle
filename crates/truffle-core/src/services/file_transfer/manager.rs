@@ -78,13 +78,15 @@ impl FileTransferManager {
 
     /// Look up a transfer by ID, validating the token.
     /// Token must be 64 hex chars.
-    pub fn get_transfer(&self, id: &str, token: &str) -> Result<Arc<Transfer>, String> {
+    pub async fn get_transfer(&self, id: &str, token: &str) -> Result<Arc<Transfer>, String> {
         // Validate token format: 64 hex chars
         if token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("invalid token format for transfer: {id}"));
         }
 
-        let transfers = self.transfers.blocking_read();
+        // Use async .read() — blocking_read() deadlocks the tokio runtime
+        // when called from an axum handler, causing hyper to drop the response.
+        let transfers = self.transfers.read().await;
         let t = transfers
             .get(id)
             .ok_or_else(|| format!("transfer not found: {id}"))?;
@@ -903,16 +905,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn get_transfer_validates_token_format() {
+    #[tokio::test]
+    async fn get_transfer_validates_token_format() {
         let (tx, _rx) = broadcast::channel(64);
         let mgr = FileTransferManager::new(FileTransferConfig::default(), tx);
 
         // Short token
-        assert!(mgr.get_transfer("ft-1", "short").is_err());
+        assert!(mgr.get_transfer("ft-1", "short").await.is_err());
         // Non-hex
-        assert!(mgr.get_transfer("ft-1", &"g".repeat(64)).is_err());
+        assert!(mgr.get_transfer("ft-1", &"g".repeat(64)).await.is_err());
         // Not found
-        assert!(mgr.get_transfer("ft-1", &"a".repeat(64)).is_err());
+        assert!(mgr.get_transfer("ft-1", &"a".repeat(64)).await.is_err());
     }
 }

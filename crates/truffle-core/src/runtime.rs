@@ -637,21 +637,26 @@ impl TruffleRuntime {
             return Ok(());
         }
 
-        // Look up the device to get its DNS name
+        // Look up the device to get its dial target.
+        // Prefer Tailscale IP over DNS name because tsnet MagicDNS may not
+        // resolve newly-created node hostnames.
         let device = self.mesh_node.device_by_id(device_id).await
             .ok_or_else(|| format!("device not found: {device_id}"))?;
 
-        let dns_name = device.tailscale_dns_name
-            .ok_or_else(|| format!("device {device_id} has no DNS name"))?;
+        let dial_target = device.tailscale_ip.as_deref()
+            .filter(|ip| !ip.is_empty())
+            .or(device.tailscale_dns_name.as_deref())
+            .ok_or_else(|| format!("device {device_id} has no IP or DNS name"))?
+            .to_string();
 
         tracing::info!(
             device_id = %device_id,
-            dns_name = %dns_name,
+            dial_target = %dial_target,
             "No mesh connection to device, dialing..."
         );
 
         // Dial via port 9417 (plain TCP, avoids double-TLS issue with port 443)
-        self.dial_peer(&dns_name, 9417).await
+        self.dial_peer(&dial_target, 9417).await
     }
 
     async fn bootstrap_sidecar(
@@ -845,6 +850,8 @@ impl TruffleRuntime {
 
                         // Dial online truffle peers via port 9417 (plain TCP).
                         // Port 443 uses ListenTLS which causes double-TLS on dial.
+                        // Prefer Tailscale IP over DNS name for dialing because tsnet
+                        // MagicDNS may not resolve newly-created node hostnames.
                         let local_dns = node.local_device().await
                             .tailscale_dns_name.unwrap_or_default();
                         for peer in &peers_data.peers {
@@ -857,6 +864,10 @@ impl TruffleRuntime {
                                 continue;
                             }
 
+                            // Prefer IP (always resolvable) over DNS name (requires MagicDNS)
+                            let dial_target = peer.tailscale_ips.first()
+                                .cloned()
+                                .unwrap_or_else(|| peer.dns_name.clone());
                             let dns = peer.dns_name.clone();
                             let bp = bridge_pending.clone();
                             let sh = shim.clone();
@@ -871,7 +882,7 @@ impl TruffleRuntime {
                                 let dial_ok = {
                                     let sg = sh.lock().await;
                                     if let Some(ref s) = *sg {
-                                        s.dial_raw(dns.clone(), 9417, rid.clone()).await.is_ok()
+                                        s.dial_raw(dial_target.clone(), 9417, rid.clone()).await.is_ok()
                                     } else {
                                         false
                                     }

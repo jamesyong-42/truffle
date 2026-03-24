@@ -41,22 +41,36 @@ impl FileTransferManager {
             }
         };
 
-        // Query resume offset via HEAD
+        // Query resume offset via HEAD (with retries for intermittent dial failures)
         eprintln!("[send_file] tid={} calling query_resume_offset to {target_addr}", transfer.id);
-        let offset = match self
-            .query_resume_offset(&transfer, &target_addr, &dial_fn)
-            .await
-        {
-            Ok(o) => {
-                eprintln!("[send_file] tid={} resume offset={o}", transfer.id);
-                o
+        let mut offset = None;
+        let mut last_err = String::new();
+        for attempt in 1..=3u32 {
+            match self
+                .query_resume_offset(&transfer, &target_addr, &dial_fn)
+                .await
+            {
+                Ok(o) => {
+                    eprintln!("[send_file] tid={} resume offset={o} (attempt {attempt})", transfer.id);
+                    offset = Some(o);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("[send_file] tid={} resume offset FAILED (attempt {attempt}/3): {e}", transfer.id);
+                    last_err = e;
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("[send_file] tid={} resume offset FAILED: {e}", transfer.id);
+        }
+        let offset = match offset {
+            Some(o) => o,
+            None => {
                 self.fail_transfer(
                     &transfer,
                     error_codes::RESUME_QUERY_ERROR,
-                    &e.to_string(),
+                    &last_err,
                 );
                 return;
             }
@@ -136,17 +150,29 @@ impl FileTransferManager {
             }
         };
 
-        // Dial through Tailscale and send via hyper
-        let stream = match (dial_fn)(&target_addr).await {
-            Ok(s) => s,
-            Err(e) => {
-                if transfer.cancel_token.is_cancelled() {
-                    return;
+        // Dial through Tailscale with retries for intermittent failures
+        let mut stream_result = None;
+        for attempt in 1..=3u32 {
+            match (dial_fn)(&target_addr).await {
+                Ok(s) => {
+                    stream_result = Some(s);
+                    break;
                 }
-                self.fail_transfer(&transfer, error_codes::SEND_ERROR, &e.to_string());
-                return;
+                Err(e) => {
+                    eprintln!("[send_file] tid={} PUT dial FAILED (attempt {attempt}/3): {e}", transfer.id);
+                    if transfer.cancel_token.is_cancelled() {
+                        return;
+                    }
+                    if attempt < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+                    } else {
+                        self.fail_transfer(&transfer, error_codes::SEND_ERROR, &e.to_string());
+                        return;
+                    }
+                }
             }
-        };
+        }
+        let stream = stream_result.unwrap();
 
         let io = hyper_util::rt::TokioIo::new(stream);
 

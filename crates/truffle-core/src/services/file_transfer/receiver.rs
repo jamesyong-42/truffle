@@ -42,7 +42,7 @@ async fn handle_head(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let transfer = match manager.get_transfer(&transfer_id, token) {
+    let transfer = match manager.get_transfer(&transfer_id, token).await {
         Ok(t) => t,
         Err(e) => {
             let err_msg = e.to_string();
@@ -67,6 +67,7 @@ async fn handle_head(
     Response::builder()
         .status(StatusCode::OK)
         .header("upload-offset", offset.to_string())
+        .header("connection", "close")
         .body(Body::empty())
         .unwrap()
 }
@@ -84,7 +85,7 @@ async fn handle_put(
         .unwrap_or("");
 
     // Validate transfer and token
-    let transfer = match manager.get_transfer(&transfer_id, token) {
+    let transfer = match manager.get_transfer(&transfer_id, token).await {
         Ok(t) => t,
         Err(e) => {
             let err_msg = e.to_string();
