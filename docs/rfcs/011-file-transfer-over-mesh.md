@@ -1,6 +1,6 @@
 # RFC 011: File Transfer Over Mesh Connections
 
-**Status**: Proposed
+**Status**: Implemented (v0.2.4-v0.2.5)
 **Created**: 2026-03-22
 **Depends on**: RFC 008 (Vision), RFC 009 (Wire Protocol), RFC 010 (P2P Redesign)
 **Supersedes**: RFC 010 Section 2.6 (Taildrop for `truffle cp`)

@@ -1,13 +1,12 @@
 # Truffle
 
-[![crates.io](https://img.shields.io/crates/v/truffle-core)](https://crates.io/crates/truffle-core)
-[![npm](https://img.shields.io/npm/v/@vibecook/truffle)](https://www.npmjs.com/package/@vibecook/truffle)
 [![CI](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jamesyong-42/truffle?label=latest)](https://github.com/jamesyong-42/truffle/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **P2P mesh networking for your devices, built on Tailscale.**
 
-Truffle gives your devices automatic discovery and direct peer-to-peer communication over Tailscale's encrypted WireGuard tunnels. No coordinator, no election, no central server -- every node connects directly to every other node. The core is written in Rust (~40k LOC, ~982 tests) with a product-grade CLI, Node.js bindings (NAPI-RS), Tauri plugin, and a thin Go sidecar (~1.1k LOC) for Tailscale `tsnet` integration.
+Truffle gives your devices automatic discovery and direct peer-to-peer communication over Tailscale's encrypted WireGuard tunnels. No coordinator, no election, no central server -- every node connects directly to every other node. The core is written in Rust (~41k LOC) with a product-grade CLI, Node.js bindings (NAPI-RS), Tauri plugin, and a thin Go sidecar (~1.1k LOC) for Tailscale `tsnet` integration.
 
 ## Install
 
@@ -15,39 +14,39 @@ Truffle gives your devices automatic discovery and direct peer-to-peer communica
 curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
 ```
 
-## Quick Start (CLI)
+Supports macOS (arm64/x64), Linux (x64/arm64), and Windows (x64).
+
+## Quick Start
 
 ```bash
 truffle up                        # start your node
 truffle ls                        # see who's online
 truffle ping laptop               # check latency
+truffle cp file.txt server:/tmp/  # copy files between devices
+truffle send server "hello"       # send a message
 truffle tcp server:5432           # raw TCP connection
-truffle proxy 5432 server:5432    # port forwarding
-truffle expose 3000               # share local port
-truffle chat laptop               # terminal chat
-truffle cp file.txt server:/tmp/  # copy files
 truffle doctor                    # diagnostics
+truffle down                      # stop your node
 ```
 
-## Quick Start (Rust API)
+## What Works
 
-```rust
-use truffle_core::runtime::TruffleRuntime;
-
-let runtime = TruffleRuntime::builder()
-    .hostname("my-app")
-    .sidecar_path("/path/to/sidecar")
-    .build()?;
-
-let mut events = runtime.start().await?;
-
-// Direct P2P messaging
-runtime.broadcast_envelope(&envelope).await;
-
-// HTTP services
-runtime.http().proxy("/api", "localhost:3000").await?;
-runtime.http().serve_static("/", "./public").await?;
-```
+| Command | Status | Description |
+|---------|--------|-------------|
+| `truffle up/down` | **Working** | Start/stop node, auto-discover peers, establish mesh connections |
+| `truffle status` | **Working** | Show node status, IP, DNS, uptime, peer count |
+| `truffle ls` | **Working** | List peers with online status and connection type |
+| `truffle ping` | **Working** | Connectivity check via Tailscale (direct/relay), latency stats |
+| `truffle cp` | **Working** | File transfer over mesh (HTTP PUT, SHA-256 verified, resume support) |
+| `truffle send` | **Working** | Send messages via mesh WebSocket connections |
+| `truffle tcp` | **Working** | Raw TCP connection through Tailscale (like netcat) |
+| `truffle doctor` | **Working** | Diagnose Tailscale, sidecar, mesh, key expiry |
+| `truffle update` | **Working** | Self-update from GitHub releases |
+| `truffle completion` | **Working** | Shell completions (bash/zsh/fish) |
+| `truffle ws` | Partial | WebSocket connection (handler returns metadata, no interactive streaming yet) |
+| `truffle chat` | Partial | Terminal chat (CLI UI works, daemon handler is metadata-only) |
+| `truffle proxy` | Partial | Port forwarding (handler scaffolded, needs data plane wiring) |
+| `truffle expose` | Partial | Share local port (handler scaffolded, needs data plane wiring) |
 
 ## Architecture
 
@@ -62,25 +61,33 @@ Layer 1: Bridge    -- Go sidecar TCP bridge protocol
 Layer 0: Tailscale -- tsnet, encrypted WireGuard tunnels
 ```
 
-Every node maintains direct WebSocket connections to every other node. Messages are sent point-to-point or fan-out broadcast -- no routing through a hub, no topology management. Tailscale already provides the full-mesh encrypted network; truffle builds application-layer services directly on top of it.
+Every node maintains direct WebSocket connections to every other node. Messages are sent point-to-point or fan-out broadcast -- no routing through a hub, no topology management. Tailscale provides the full-mesh encrypted network; truffle builds application-layer services on top.
+
+### Port Map
+
+| Port | Transport | Purpose |
+|------|-----------|---------|
+| 443 | TLS | Mesh WebSocket (incoming, Tailscale TLS cert) |
+| 9417 | TCP | Mesh WebSocket (outgoing dials, plain TCP) |
+| 9418 | TCP | File transfer (HTTP PUT/HEAD via axum) |
 
 ## Crates & Packages
 
 | Crate / Package | Description |
 |-----------------|-------------|
-| [`truffle-core`](crates/truffle-core) | Rust library -- mesh networking, HTTP services, store sync, file transfer |
-| [`truffle-cli`](crates/truffle-cli) | CLI tool -- `up`, `ls`, `ping`, `proxy`, `expose`, `chat`, `cp`, `doctor` |
+| [`truffle-core`](crates/truffle-core) | Rust library -- mesh networking, HTTP services, file transfer |
+| [`truffle-cli`](crates/truffle-cli) | CLI tool -- `up`, `ls`, `ping`, `cp`, `send`, `tcp`, `doctor` |
 | [`truffle-napi`](crates/truffle-napi) | NAPI-RS native addon for Node.js |
 | [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Tauri v2 plugin for desktop apps |
-| [`sidecar-slim`](sidecar-slim/) | Go sidecar (~1.1k LOC) for Tailscale tsnet integration |
+| [`sidecar-slim`](packages/sidecar-slim/) | Go sidecar for Tailscale tsnet integration |
 
-**npm:** `@vibecook/truffle` (includes platform-specific sidecar binaries)
+**npm:** `@vibecook/truffle` + platform-specific sidecar packages (`@vibecook/truffle-sidecar-*`)
 
 ## Development
 
 ```bash
 cargo build --workspace       # build all Rust crates
-cargo test --workspace        # run ~982 tests
+cargo test --workspace        # run tests (~771 tests)
 pnpm install && pnpm build    # build TypeScript packages
 ```
 
@@ -91,17 +98,26 @@ pnpm install && pnpm build    # build TypeScript packages
 - **Node.js** >= 18 (for NAPI bindings)
 - **Tailscale** installed and authenticated
 
-## Stats
+## Releases
 
-- ~40k LOC Rust + ~1.1k LOC Go
-- ~982 tests
-- 5 crates (truffle-core, truffle-napi, truffle-tauri-plugin, truffle-cli + Go sidecar)
-- v3 wire protocol with typed dispatch
-- Cross-platform: macOS, Linux, Windows
+Automated via [release-please](https://github.com/googleapis/release-please). Push `feat:` or `fix:` commits to main, merge the generated Release PR, and builds trigger automatically for all 5 platforms.
+
+## RFCs
+
+| RFC | Status | Description |
+|-----|--------|-------------|
+| [RFC 003](docs/rfcs/) | Implemented | Rust rewrite (truffle-core, truffle-napi, truffle-tauri-plugin) |
+| [RFC 005](docs/rfcs/) | Implemented | Core refactor (broadcast events, MessageBus dispatch) |
+| [RFC 007](docs/rfcs/) | Implemented | Comprehensive refactor (23 audit fixes) |
+| [RFC 008](docs/rfcs/) | Implemented | 6-layer architecture vision |
+| [RFC 009](docs/rfcs/) | Implemented | Wire protocol v3 (frame types, typed dispatch) |
+| [RFC 010](docs/rfcs/) | Implemented | P2P redesign (remove STAR topology, CLI daemon) |
+| [RFC 011](docs/rfcs/) | Implemented | File transfer over mesh (HTTP PUT, resume, SHA-256) |
 
 ## Documentation
 
-Full documentation at https://jamesyong-42.github.io/truffle/
+- [Architecture: Networking Flows](docs/architecture/networking-flows.md) -- complete flow analysis for every CLI command
+- [GitHub Pages](https://jamesyong-42.github.io/truffle/) -- install scripts and docs site
 
 ## License
 

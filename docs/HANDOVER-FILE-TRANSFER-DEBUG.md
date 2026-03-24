@@ -1,6 +1,8 @@
 # Handover: File Transfer Debugging
 
 > Written: 2026-03-23. For the next agent picking up the `truffle cp` file transfer bug.
+>
+> **UPDATE 2026-03-24: BUG RESOLVED in v0.2.5.** Root cause was `blocking_read()` on a tokio RwLock inside an async axum handler, which deadlocked the runtime. See commit `a631d73`. Additional fixes: Tailscale IP over DNS for dialing, 3x retry with backoff, relaxed heartbeat (10s/30s), Connection: close on HEAD response. 5/5 file transfers pass macOS↔EC2. Debug `eprintln!` logging is still in the codebase and should be removed.
 
 ---
 
