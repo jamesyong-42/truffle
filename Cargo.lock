@@ -4714,6 +4714,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "truffle-cli-v2"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "dirs 5.0.1",
+ "hex",
+ "hostname",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
+ "truffle-core-v2",
+ "uuid",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "truffle-core"
 version = "0.2.2"
 dependencies = [
