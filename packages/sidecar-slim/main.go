@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"tailscale.com/client/tailscale"
+	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
@@ -212,6 +214,18 @@ type stateChangeData struct {
 	State string `json:"state"`
 }
 
+// watchPeersData is the payload for tsnet:watchPeers commands.
+type watchPeersData struct {
+	IncludeAll bool `json:"includeAll,omitempty"`
+}
+
+// peerChangedData is the payload for tsnet:peerChanged events.
+type peerChangedData struct {
+	ChangeType string    `json:"changeType"` // "joined", "left", "updated"
+	PeerID     string    `json:"peerId"`
+	Peer       *peerInfo `json:"peer,omitempty"` // nil for "left" events
+}
+
 // keyExpiringData is the payload for tsnet:keyExpiring events.
 type keyExpiringData struct {
 	ExpiresAt  string `json:"expiresAt"`
@@ -284,6 +298,8 @@ func main() {
 			s.handleUnlisten(cmd.Data)
 		case "tsnet:ping":
 			s.handlePing(cmd.Data)
+		case "tsnet:watchPeers":
+			s.handleWatchPeers(cmd.Data)
 		case "tsnet:pushFile":
 			s.handlePushFile(cmd.Data)
 		case "tsnet:waitingFiles":
@@ -784,6 +800,169 @@ func (s *shim) handlePing(data json.RawMessage) {
 			PeerAddr:  result.Endpoint,
 		})
 	}()
+}
+
+func (s *shim) handleWatchPeers(data json.RawMessage) {
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	go func() {
+		lc, err := s.server.LocalClient()
+		if err != nil {
+			s.sendError("WATCH_PEERS_ERROR", fmt.Sprintf("failed to get local client: %v", err))
+			return
+		}
+
+		// WatchIPNBus gives us real-time notifications about network changes.
+		// We watch for engine updates which include peer state changes.
+		watcher, err := lc.WatchIPNBus(s.ctx, ipn.NotifyWatchEngineUpdates)
+		if err != nil {
+			s.sendError("WATCH_PEERS_ERROR", fmt.Sprintf("WatchIPNBus failed: %v", err))
+			return
+		}
+		defer watcher.Close()
+
+		log.Printf("WatchIPNBus started, listening for peer changes")
+
+		// Track known peers by their stable ID to detect joins/leaves/updates.
+		// We use the same peerInfo format as getPeers so Rust can deserialize uniformly.
+		knownPeers := make(map[string]peerInfo)
+
+		// Seed with current peers via the status API (same as handleGetPeers).
+		status, err := lc.Status(s.ctx)
+		if err == nil {
+			for _, peer := range status.Peer {
+				pi := statusPeerToInfo(peer)
+				knownPeers[pi.ID] = pi
+			}
+		}
+
+		for {
+			n, err := watcher.Next()
+			if err != nil {
+				if s.ctx.Err() != nil {
+					return // context cancelled, clean shutdown
+				}
+				log.Printf("WatchIPNBus error: %v", err)
+				return
+			}
+
+			// When we get a NetMap update, re-fetch the full status and diff
+			// against our known peers. This is simpler and more reliable than
+			// parsing the NetMap directly, and reuses the same code path as
+			// handleGetPeers for consistent output.
+			if n.NetMap == nil {
+				continue
+			}
+
+			newStatus, err := lc.Status(s.ctx)
+			if err != nil {
+				if s.ctx.Err() != nil {
+					return
+				}
+				log.Printf("WatchIPNBus: status fetch failed: %v", err)
+				continue
+			}
+
+			// Build current peer map
+			currentPeers := make(map[string]peerInfo)
+			for _, peer := range newStatus.Peer {
+				pi := statusPeerToInfo(peer)
+				currentPeers[pi.ID] = pi
+			}
+
+			// Detect new peers (joined)
+			for id, pi := range currentPeers {
+				if _, exists := knownPeers[id]; !exists {
+					piCopy := pi
+					s.sendEvent("tsnet:peerChanged", peerChangedData{
+						ChangeType: "joined",
+						PeerID:     id,
+						Peer:       &piCopy,
+					})
+				}
+			}
+
+			// Detect removed peers (left)
+			for id := range knownPeers {
+				if _, exists := currentPeers[id]; !exists {
+					s.sendEvent("tsnet:peerChanged", peerChangedData{
+						ChangeType: "left",
+						PeerID:     id,
+					})
+				}
+			}
+
+			// Detect updated peers
+			for id, newPi := range currentPeers {
+				if oldPi, exists := knownPeers[id]; exists {
+					if watchPeerChanged(oldPi, newPi) {
+						piCopy := newPi
+						s.sendEvent("tsnet:peerChanged", peerChangedData{
+							ChangeType: "updated",
+							PeerID:     id,
+							Peer:       &piCopy,
+						})
+					}
+				}
+			}
+
+			// Update known peers for next iteration
+			knownPeers = currentPeers
+		}
+	}()
+}
+
+// statusPeerToInfo converts an ipnstate.PeerStatus to our peerInfo type.
+// This uses the same field access as handleGetPeers for consistency.
+func statusPeerToInfo(peer *ipnstate.PeerStatus) peerInfo {
+	var ips []string
+	for _, ip := range peer.TailscaleIPs {
+		ips = append(ips, ip.String())
+	}
+	p := peerInfo{
+		ID:           string(peer.ID),
+		Hostname:     peer.HostName,
+		DNSName:      strings.TrimSuffix(peer.DNSName, "."),
+		TailscaleIPs: ips,
+		Online:       peer.Online,
+		OS:           peer.OS,
+		CurAddr:      peer.CurAddr,
+		Relay:        peer.Relay,
+		Expired:      peer.Expired,
+	}
+	if !peer.LastSeen.IsZero() {
+		p.LastSeen = peer.LastSeen.UTC().Format(time.RFC3339)
+	}
+	if peer.KeyExpiry != nil && !peer.KeyExpiry.IsZero() {
+		p.KeyExpiry = peer.KeyExpiry.UTC().Format(time.RFC3339)
+	}
+	return p
+}
+
+// watchPeerChanged returns true if any observable property of the peer has changed.
+func watchPeerChanged(old, new peerInfo) bool {
+	if old.Online != new.Online {
+		return true
+	}
+	if old.CurAddr != new.CurAddr {
+		return true
+	}
+	if old.Relay != new.Relay {
+		return true
+	}
+	if old.Hostname != new.Hostname {
+		return true
+	}
+	if old.DNSName != new.DNSName {
+		return true
+	}
+	if old.Expired != new.Expired {
+		return true
+	}
+	return false
 }
 
 func (s *shim) handlePushFile(data json.RawMessage) {

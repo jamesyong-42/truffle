@@ -4548,6 +4548,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "truffle-core-v2"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hex",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "truffle-napi"
 version = "0.2.2"
 dependencies = [
