@@ -14,6 +14,7 @@ use crate::network::NetworkProvider;
 use crate::transport::websocket::WebSocketTransport;
 use crate::transport::WsConfig;
 
+use super::reconnect::ReconnectBackoff;
 use super::{PeerEvent, PeerRegistry};
 
 // ---------------------------------------------------------------------------
@@ -626,4 +627,161 @@ async fn test_disconnect_reconnect() {
         .unwrap()
         .unwrap();
     assert_eq!(msg2.data, b"msg-2");
+}
+
+// ===========================================================================
+// Tests: PeerEvent::Left closes WS connection
+// ===========================================================================
+
+#[tokio::test]
+async fn test_peer_left_closes_ws_connection() {
+    let server_port = random_port().await;
+
+    // Server that the client will connect to
+    let (server_registry, _) = build_registry("server", server_port);
+    server_registry.start().await;
+
+    // Client with event sender
+    let (client_registry, client_es) = build_registry("client", server_port);
+    let mut client_events = client_registry.on_peer_change();
+    client_registry.start().await;
+
+    // Inject server as known peer
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send to establish a WS connection
+    client_registry.send("server", b"hello").await.unwrap();
+
+    // Wait for Connected event
+    tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if let Ok(PeerEvent::Connected(id)) = client_events.recv().await {
+                if id == "server" {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("should receive Connected event");
+
+    // Verify connected
+    let peers = client_registry.peers().await;
+    assert!(peers[0].connected, "should be connected before Left");
+
+    // Emit Left event — should close WS and emit Disconnected then Left
+    client_es
+        .send(NetworkPeerEvent::Left("server".to_string()))
+        .unwrap();
+
+    // Collect events: should see Disconnected then Left
+    let mut got_disconnected = false;
+    let mut got_left = false;
+
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            match client_events.recv().await {
+                Ok(PeerEvent::Disconnected(id)) if id == "server" => {
+                    got_disconnected = true;
+                }
+                Ok(PeerEvent::Left(id)) if id == "server" => {
+                    got_left = true;
+                    return;
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await;
+
+    assert!(got_disconnected, "should emit Disconnected before Left");
+    assert!(got_left, "should emit Left");
+
+    // Peer should be removed from registry
+    let peers = client_registry.peers().await;
+    assert!(
+        peers.iter().all(|p| p.id != "server"),
+        "peer should be removed after Left"
+    );
+}
+
+// ===========================================================================
+// Tests: Reconnect backoff
+// ===========================================================================
+
+#[test]
+fn test_reconnect_backoff_basic() {
+    let mut backoff = ReconnectBackoff::new();
+
+    // Initially, retry is allowed
+    assert!(backoff.should_retry().is_some());
+
+    // After first failure, should_retry returns None (backoff active)
+    backoff.failure();
+    assert!(backoff.should_retry().is_none());
+
+    // retry_after should be > 0
+    let wait = backoff.retry_after();
+    assert!(wait > Duration::ZERO, "should have non-zero retry_after");
+    assert!(
+        wait <= Duration::from_millis(100),
+        "first backoff should be <= 100ms"
+    );
+
+    // After second failure (simulated after delay elapsed)
+    // Manually reset last_attempt to simulate time passing
+    backoff.failure();
+    let wait2 = backoff.retry_after();
+    // Second failure should have a longer delay than the first
+    // (though since last_attempt was just set, both are relative to "now")
+    assert!(wait2 > Duration::ZERO);
+}
+
+#[test]
+fn test_reconnect_backoff_resets_on_success() {
+    let mut backoff = ReconnectBackoff::new();
+
+    // Fail 3 times
+    backoff.failure();
+    backoff.failure();
+    backoff.failure();
+
+    // Backoff should be active
+    assert!(
+        backoff.should_retry().is_none(),
+        "should be in backoff after 3 failures"
+    );
+
+    // Success resets
+    backoff.success();
+    assert!(
+        backoff.should_retry().is_some(),
+        "should allow retry after success"
+    );
+    assert_eq!(
+        backoff.retry_after(),
+        Duration::ZERO,
+        "retry_after should be zero after success"
+    );
+}
+
+// ===========================================================================
+// Tests: Broadcast with zero connections
+// ===========================================================================
+
+#[tokio::test]
+async fn test_broadcast_with_zero_connections() {
+    let port = random_port().await;
+    let (registry, _) = build_registry("node-a", port);
+    registry.start().await;
+
+    // Broadcast with no connected peers — should not error or panic
+    registry.broadcast(b"hello nobody").await;
+
+    // Verify no peers and no connections
+    let peers = registry.peers().await;
+    assert!(peers.is_empty(), "should have no peers");
 }

@@ -5,7 +5,7 @@
 //! This crate implements the layered architecture described in RFC 012:
 //! - **Layer 3 (Network)**: Peer discovery, addressing, encrypted tunnels via Tailscale
 //! - **Layer 4 (Transport)**: WebSocket, TCP, QUIC protocol transports
-//! - **Layer 5 (Session)**: Peer registry, connection lifecycle (future phases)
+//! - **Layer 5 (Session)**: Peer registry, lazy connections, message routing
 //! - **Layer 6 (Envelope)**: Namespace-based message framing (future phases)
 //!
 //! ## Layer 3 — Network

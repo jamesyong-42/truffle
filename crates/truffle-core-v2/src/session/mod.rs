@@ -13,15 +13,19 @@
 //! - Connections are lazy — established on first `send()`
 //! - Layer 5 does NOT implement any transport protocol — it delegates to Layer 4
 
+pub mod reconnect;
+
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, RwLock};
+
+use self::reconnect::ReconnectBackoff;
 
 use crate::network::{NetworkPeer, NetworkPeerEvent, NetworkProvider, PeerAddr};
 use crate::transport::websocket::{WebSocketTransport, WsFramedStream};
@@ -113,6 +117,13 @@ pub enum SessionError {
     #[error("send failed: {0}")]
     SendFailed(String),
 
+    /// Reconnect backoff is active — wait before retrying.
+    #[error("reconnect backoff: retry after {retry_after:?}")]
+    ReconnectBackoff {
+        /// How long the caller must wait before retrying.
+        retry_after: Duration,
+    },
+
     /// A transport layer error.
     #[error("transport error: {0}")]
     Transport(#[from] crate::transport::TransportError),
@@ -190,6 +201,12 @@ pub struct PeerRegistry<N: NetworkProvider + 'static> {
     /// Active WebSocket connection handles indexed by peer_id.
     ws_connections: Arc<RwLock<HashMap<String, WsConnectionHandle>>>,
 
+    /// Reconnect backoff trackers per peer.
+    peer_backoffs: Arc<RwLock<HashMap<String, ReconnectBackoff>>>,
+
+    /// Set of peer IDs currently being connected to (prevents duplicate dials).
+    connecting: Arc<RwLock<HashSet<String>>>,
+
     /// Event channel for peer changes (discovery + connection lifecycle).
     event_tx: broadcast::Sender<PeerEvent>,
 
@@ -214,6 +231,8 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             ws_transport,
             peers: Arc::new(RwLock::new(HashMap::new())),
             ws_connections: Arc::new(RwLock::new(HashMap::new())),
+            peer_backoffs: Arc::new(RwLock::new(HashMap::new())),
+            connecting: Arc::new(RwLock::new(HashSet::new())),
             event_tx,
             incoming_tx,
         }
@@ -241,6 +260,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     fn spawn_peer_event_loop(&self) {
         let mut events = self.network.peer_events();
         let peers = self.peers.clone();
+        let ws_connections = self.ws_connections.clone();
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
@@ -263,6 +283,21 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                         );
                     }
                     Ok(NetworkPeerEvent::Left(peer_id)) => {
+                        // Close any active WS connection for this peer
+                        let handle = {
+                            let mut conns = ws_connections.write().await;
+                            conns.remove(&peer_id)
+                        };
+                        if let Some(handle) = handle {
+                            let _ = handle.close_tx.send(()).await;
+                            // Emit Disconnected before Left
+                            let _ = event_tx.send(PeerEvent::Disconnected(peer_id.clone()));
+                            tracing::info!(
+                                peer_id = %peer_id,
+                                "session: closed WS connection for departing peer"
+                            );
+                        }
+
                         {
                             let mut map = peers.write().await;
                             map.remove(&peer_id);
@@ -429,16 +464,63 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         }
 
-        // 3. No existing connection — lazily connect via Layer 4
+        // 3. Check reconnect backoff before attempting a new connection
+        {
+            let backoffs = self.peer_backoffs.read().await;
+            if let Some(backoff) = backoffs.get(peer_id) {
+                if backoff.should_retry().is_none() {
+                    let retry_after = backoff.retry_after();
+                    return Err(SessionError::ReconnectBackoff { retry_after });
+                }
+            }
+        }
+
+        // 4. Concurrent send protection — check if another task is already connecting
+        {
+            let mut connecting = self.connecting.write().await;
+            if connecting.contains(peer_id) {
+                // Another send() is already dialing this peer. Fail fast rather
+                // than creating a duplicate connection.
+                return Err(SessionError::ConnectFailed(
+                    "connection already in progress".to_string(),
+                ));
+            }
+            connecting.insert(peer_id.to_string());
+        }
+
+        // 5. No existing connection — lazily connect via Layer 4
         tracing::info!(peer_id = %peer_id, "session: lazy connecting WS");
 
-        let ws_stream = self
-            .ws_transport
-            .connect(&peer_addr)
-            .await
-            .map_err(|e| SessionError::ConnectFailed(e.to_string()))?;
+        let connect_result = self.ws_transport.connect(&peer_addr).await;
 
-        // 4. Create connection handle and spawn connection task
+        // Remove from connecting set regardless of outcome
+        {
+            let mut connecting = self.connecting.write().await;
+            connecting.remove(peer_id);
+        }
+
+        let ws_stream = match connect_result {
+            Ok(stream) => {
+                // Successful connect — reset backoff
+                let mut backoffs = self.peer_backoffs.write().await;
+                backoffs
+                    .entry(peer_id.to_string())
+                    .or_insert_with(ReconnectBackoff::new)
+                    .success();
+                stream
+            }
+            Err(e) => {
+                // Failed connect — increase backoff
+                let mut backoffs = self.peer_backoffs.write().await;
+                backoffs
+                    .entry(peer_id.to_string())
+                    .or_insert_with(ReconnectBackoff::new)
+                    .failure();
+                return Err(SessionError::ConnectFailed(e.to_string()));
+            }
+        };
+
+        // 6. Create connection handle and spawn connection task
         let handle = spawn_connection_task(
             ws_stream,
             peer_id.to_string(),
