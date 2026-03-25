@@ -75,7 +75,7 @@ pub trait StreamTransport: Send + Sync {
 /// This is the primary interface that Layer 5 (Session) uses to exchange
 /// data with peers.
 #[allow(async_fn_in_trait)]
-pub trait FramedStream: Send + 'static {
+pub trait FramedStream: Send + Sync + 'static {
     /// Send a binary message to the peer.
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError>;
 
@@ -258,6 +258,24 @@ impl Default for WsConfig {
             pong_timeout: Duration::from_secs(30),
             max_message_size: 16 * 1024 * 1024, // 16 MiB
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve the best dial address from a [`PeerAddr`].
+///
+/// Prefers IP address (most reliable for Tailscale), falls back to DNS name,
+/// then hostname.
+pub(crate) fn resolve_dial_addr(addr: &PeerAddr) -> String {
+    if let Some(ip) = &addr.ip {
+        ip.to_string()
+    } else if let Some(dns) = &addr.dns_name {
+        dns.clone()
+    } else {
+        addr.hostname.clone()
     }
 }
 

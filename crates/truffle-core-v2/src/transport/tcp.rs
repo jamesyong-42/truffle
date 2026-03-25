@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::network::{NetworkProvider, PeerAddr};
 
-use super::{RawIncoming, RawListener, RawTransport, TransportError};
+use super::{resolve_dial_addr, RawIncoming, RawListener, RawTransport, TransportError};
 
 // ---------------------------------------------------------------------------
 // TcpTransport
@@ -111,15 +111,3 @@ impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
     }
 }
 
-/// Resolve the best dial address from a [`PeerAddr`].
-///
-/// Prefers IP address, falls back to DNS name, then hostname.
-fn resolve_dial_addr(addr: &PeerAddr) -> String {
-    if let Some(ip) = &addr.ip {
-        ip.to_string()
-    } else if let Some(dns) = &addr.dns_name {
-        dns.clone()
-    } else {
-        addr.hostname.clone()
-    }
-}

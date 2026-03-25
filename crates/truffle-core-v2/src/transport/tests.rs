@@ -641,3 +641,165 @@ async fn raw_listener_returns_none_on_channel_close() {
     drop(tx);
     assert!(listener.accept().await.is_none());
 }
+
+// ===========================================================================
+// Heartbeat timeout detection test
+// ===========================================================================
+
+#[tokio::test]
+async fn ws_heartbeat_timeout_detects_dead_peer() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("hb-timeout-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("hb-timeout-client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Very short intervals so the test runs quickly
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_millis(50),
+        pong_timeout: Duration::from_millis(150),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(
+        client_ws.connect(&peer_addr),
+        async { listener.accept().await }
+    );
+
+    let mut client_stream = client_result.unwrap();
+    let mut server_stream = server_stream.unwrap();
+
+    // Verify connection works initially
+    client_stream.send(b"hello").await.unwrap();
+    let msg = server_stream.recv().await.unwrap().expect("should receive");
+    assert_eq!(msg, b"hello");
+
+    // Now stop reading from the server side (simulating dead peer from client's perspective).
+    // The client's heartbeat will send Pings, but since the server is not reading,
+    // the Pong responses won't flow back, and eventually the server's heartbeat
+    // will detect the client is not responding either.
+    //
+    // We drop the server_stream to simulate the peer going away.
+    drop(server_stream);
+
+    // Wait for the heartbeat timeout to fire
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // The client should detect the broken connection: recv returns None or error
+    let result = tokio::time::timeout(Duration::from_secs(2), client_stream.recv()).await;
+    match result {
+        Ok(Ok(None)) => { /* Clean close detected — expected */ }
+        Ok(Err(_)) => { /* Transport error — also acceptable for dead peer */ }
+        Ok(Ok(Some(_))) => panic!("should not receive data from a dead peer"),
+        Err(_) => panic!("recv should not hang forever after heartbeat timeout"),
+    }
+}
+
+// ===========================================================================
+// WS remote close test
+// ===========================================================================
+
+#[tokio::test]
+async fn ws_remote_close_returns_none() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("close-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("close-client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(
+        client_ws.connect(&peer_addr),
+        async { listener.accept().await }
+    );
+
+    let mut client_stream = client_result.unwrap();
+    let mut server_stream = server_stream.unwrap();
+
+    // Server gracefully closes
+    server_stream.close().await.unwrap();
+
+    // Client's recv should return Ok(None) indicating clean close
+    let result = tokio::time::timeout(Duration::from_secs(2), client_stream.recv()).await;
+    match result {
+        Ok(Ok(None)) => { /* Expected: clean close signaled */ }
+        Ok(Err(_)) => { /* Also acceptable: connection closed error */ }
+        Ok(Ok(Some(data))) => panic!("unexpected data after close: {:?}", data),
+        Err(_) => panic!("recv should not hang after remote close"),
+    }
+
+    client_stream.close().await.ok();
+}
+
+// ===========================================================================
+// WS connection failure test
+// ===========================================================================
+
+#[tokio::test]
+async fn ws_connect_to_unreachable_returns_connect_failed() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    let provider = Arc::new(MockNetworkProvider::new("fail-client"));
+
+    let config = WsConfig {
+        port: 1, // port 1 should be unreachable / refused
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let ws = WebSocketTransport::new(provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let result = ws.connect(&peer_addr).await;
+    assert!(result.is_err(), "should fail to connect to unreachable port");
+
+    match result.unwrap_err() {
+        TransportError::ConnectFailed(msg) => {
+            assert!(
+                msg.contains("dial tcp"),
+                "error should mention dial tcp: {msg}"
+            );
+        }
+        other => panic!("expected ConnectFailed, got: {other}"),
+    }
+}

@@ -6,38 +6,48 @@
 //! # Connection flow
 //!
 //! **Client (connect)**:
-//! 1. `NetworkProvider::dial_tcp(addr, port)` → raw `TcpStream`
-//! 2. WebSocket client handshake (`tokio_tungstenite::client_async`)
+//! 1. `NetworkProvider::dial_tcp(addr, port)` -> raw `TcpStream`
+//! 2. WebSocket client handshake (`tokio_tungstenite::client_async_with_config`)
 //! 3. Send [`Handshake`] as a text frame (JSON)
 //! 4. Receive peer's [`Handshake`], validate protocol version
-//! 5. Return [`WsFramedStream`]
+//! 5. Split stream into read/write halves, return [`WsFramedStream`]
 //!
 //! **Server (listen)**:
-//! 1. `NetworkProvider::listen_tcp(port)` → incoming `TcpStream`s
-//! 2. For each: WebSocket server handshake (`tokio_tungstenite::accept_async`)
+//! 1. `NetworkProvider::listen_tcp(port)` -> incoming `TcpStream`s
+//! 2. For each: WebSocket server handshake (`tokio_tungstenite::accept_async_with_config`)
 //! 3. Receive peer's [`Handshake`], validate, send own [`Handshake`]
-//! 4. Yield [`WsFramedStream`] via [`StreamListener`]
+//! 4. Split stream into read/write halves, yield [`WsFramedStream`] via [`StreamListener`]
 //!
 //! # Heartbeat
 //!
 //! After the handshake, a background task sends WebSocket Ping frames at
-//! `WsConfig::ping_interval`. If no Pong is received within
-//! `WsConfig::pong_timeout`, the connection is closed.
+//! `WsConfig::ping_interval` on the write half. The read half updates a
+//! shared `last_pong` timestamp when it receives a Pong. The heartbeat task
+//! checks this timestamp on each ping cycle and closes the connection if
+//! `pong_timeout` has been exceeded.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures_util::stream::SplitSink;
+use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::network::{NetworkProvider, PeerAddr};
 
 use super::{
-    FramedStream, Handshake, StreamListener, StreamTransport, TransportError, WsConfig,
-    PROTOCOL_VERSION,
+    resolve_dial_addr, FramedStream, Handshake, StreamListener, StreamTransport, TransportError,
+    WsConfig, PROTOCOL_VERSION,
 };
+
+/// Handshake timeout — maximum time to wait for handshake exchange.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // WebSocketTransport
@@ -84,6 +94,14 @@ impl<N: NetworkProvider + 'static> WebSocketTransport<N> {
         }
     }
 
+    /// Build a tungstenite `WebSocketConfig` from our `WsConfig`.
+    fn ws_protocol_config(&self) -> WebSocketConfig {
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(self.config.max_message_size);
+        config.max_frame_size = Some(self.config.max_message_size);
+        config
+    }
+
     /// Perform the client-side handshake: send our handshake, receive theirs.
     async fn client_handshake(
         ws: &mut WebSocketStream<TcpStream>,
@@ -109,7 +127,6 @@ impl<N: NetworkProvider + 'static> WebSocketTransport<N> {
 
         Ok(remote_hs)
     }
-
 }
 
 /// Receive and parse a handshake message from a WebSocket stream.
@@ -117,10 +134,8 @@ async fn receive_handshake(
     ws: &mut WebSocketStream<TcpStream>,
 ) -> Result<Handshake, TransportError> {
     match ws.next().await {
-        Some(Ok(Message::Text(text))) => {
-            serde_json::from_str::<Handshake>(&text)
-                .map_err(|e| TransportError::HandshakeFailed(format!("parse handshake: {e}")))
-        }
+        Some(Ok(Message::Text(text))) => serde_json::from_str::<Handshake>(&text)
+            .map_err(|e| TransportError::HandshakeFailed(format!("parse handshake: {e}"))),
         Some(Ok(other)) => Err(TransportError::HandshakeFailed(format!(
             "expected text frame for handshake, got: {other:?}"
         ))),
@@ -147,16 +162,19 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
             .await
             .map_err(|e| TransportError::ConnectFailed(format!("dial tcp: {e}")))?;
 
-        // Step 2: WebSocket client upgrade
+        // Step 2: WebSocket client upgrade (with max_message_size config)
         let ws_url = format!("ws://{dial_addr}:{}/ws", self.config.port);
+        let ws_config = self.ws_protocol_config();
         let (mut ws, _response) =
-            tokio_tungstenite::client_async_with_config(ws_url, tcp_stream, None)
+            tokio_tungstenite::client_async_with_config(ws_url, tcp_stream, Some(ws_config))
                 .await
                 .map_err(|e| TransportError::ConnectFailed(format!("ws upgrade: {e}")))?;
 
-        // Step 3: Exchange handshake
+        // Step 3: Exchange handshake (with timeout)
         let local_hs = self.local_handshake();
-        let remote_hs = Self::client_handshake(&mut ws, &local_hs).await?;
+        let remote_hs = tokio::time::timeout(HANDSHAKE_TIMEOUT, Self::client_handshake(&mut ws, &local_hs))
+            .await
+            .map_err(|_| TransportError::Timeout("handshake timed out".to_string()))??;
 
         tracing::info!(
             remote_peer = %remote_hs.peer_id,
@@ -164,7 +182,7 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
             "ws: connected"
         );
 
-        // Step 4: Build framed stream with heartbeat
+        // Step 4: Build framed stream with split read/write halves
         Ok(WsFramedStream::new(
             ws,
             remote_hs.peer_id,
@@ -190,6 +208,7 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
         let local_hs = self.local_handshake();
         let ping_interval = self.config.ping_interval;
         let pong_timeout = self.config.pong_timeout;
+        let ws_config = self.ws_protocol_config();
 
         tokio::spawn(async move {
             loop {
@@ -198,34 +217,50 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                         let tx = tx.clone();
                         let local_hs = local_hs.clone();
                         let remote_addr = incoming.remote_addr.clone();
+                        let ws_config = ws_config;
 
                         tokio::spawn(async move {
-                            // WS server upgrade
-                            let mut ws = match tokio_tungstenite::accept_async(incoming.stream)
+                            // WS server upgrade (with max_message_size config)
+                            let mut ws =
+                                match tokio_tungstenite::accept_async_with_config(
+                                    incoming.stream,
+                                    Some(ws_config),
+                                )
                                 .await
-                            {
-                                Ok(ws) => ws,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        remote = %remote_addr,
-                                        "ws: upgrade failed: {e}"
-                                    );
-                                    return;
-                                }
-                            };
-
-                            // Server-side handshake
-                            let remote_hs =
-                                match server_handshake_standalone(&mut ws, &local_hs).await {
-                                    Ok(hs) => hs,
+                                {
+                                    Ok(ws) => ws,
                                     Err(e) => {
                                         tracing::warn!(
                                             remote = %remote_addr,
-                                            "ws: handshake failed: {e}"
+                                            "ws: upgrade failed: {e}"
                                         );
                                         return;
                                     }
                                 };
+
+                            // Server-side handshake (with timeout)
+                            let remote_hs = match tokio::time::timeout(
+                                HANDSHAKE_TIMEOUT,
+                                server_handshake_standalone(&mut ws, &local_hs),
+                            )
+                            .await
+                            {
+                                Ok(Ok(hs)) => hs,
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        remote = %remote_addr,
+                                        "ws: handshake failed: {e}"
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        remote = %remote_addr,
+                                        "ws: handshake timed out"
+                                    );
+                                    return;
+                                }
+                            };
 
                             tracing::info!(
                                 remote_peer = %remote_hs.peer_id,
@@ -290,44 +325,90 @@ async fn server_handshake_standalone(
 
 /// A WebSocket-backed [`FramedStream`].
 ///
-/// Wraps a `tokio_tungstenite::WebSocketStream<TcpStream>` and provides
-/// message-oriented send/receive. A background heartbeat task sends Ping
-/// frames at the configured interval.
+/// Uses split read/write halves to avoid mutex contention between the
+/// heartbeat task and the main send/recv path:
+///
+/// - **Write half** (`SplitSink`): Shared via `Arc<Mutex<_>>` between
+///   `send()` and the heartbeat task (which sends Ping frames).
+/// - **Read half** (`SplitStream`): Owned exclusively by `recv()` — no
+///   mutex needed.
+/// - **Heartbeat**: Sends Ping on the write half at `ping_interval`. Tracks
+///   last Pong via `Arc<AtomicU64>` (epoch millis). If `last_pong` exceeds
+///   `pong_timeout`, the connection is closed.
 pub struct WsFramedStream {
-    /// The WebSocket stream, wrapped in a mutex for shared access
-    /// between the heartbeat task and the main send/recv path.
-    ws: Arc<Mutex<WebSocketStream<TcpStream>>>,
+    /// Write half of the WebSocket stream, shared with heartbeat task.
+    write: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+    /// Read half of the WebSocket stream, owned exclusively by recv().
+    read: SplitStream<WebSocketStream<TcpStream>>,
     /// Remote peer ID (from handshake).
     remote_peer_id: String,
     /// Remote address string.
     remote_addr: String,
-    /// Handle to the heartbeat task (aborted on close).
+    /// Handle to the heartbeat task (aborted on close/drop).
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Timestamp (epoch millis) of the last received Pong.
+    last_pong: Arc<AtomicU64>,
+    /// Flag indicating the connection has been closed.
+    closed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for WsFramedStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsFramedStream")
+            .field("remote_peer_id", &self.remote_peer_id)
+            .field("remote_addr", &self.remote_addr)
+            .field("closed", &self.closed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+// SAFETY: All fields are Send. `SplitStream` is Send because
+// `WebSocketStream<TcpStream>` is Send. The Arc-wrapped fields are Sync.
+// We need the explicit Sync impl because `SplitStream` is not Sync,
+// but `WsFramedStream` is only accessed via `&mut self` (exclusive ref)
+// so Sync is safe.
+unsafe impl Sync for WsFramedStream {}
+
+/// Get the current epoch time in milliseconds.
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl WsFramedStream {
-    /// Create a new framed stream with heartbeat.
+    /// Create a new framed stream with split read/write halves and heartbeat.
     fn new(
         ws: WebSocketStream<TcpStream>,
         remote_peer_id: String,
         remote_addr: String,
-        ping_interval: std::time::Duration,
-        pong_timeout: std::time::Duration,
+        ping_interval: Duration,
+        pong_timeout: Duration,
     ) -> Self {
-        let ws = Arc::new(Mutex::new(ws));
+        let (write, read) = ws.split();
+        let write = Arc::new(Mutex::new(write));
+        let last_pong = Arc::new(AtomicU64::new(epoch_millis()));
+        let closed = Arc::new(AtomicBool::new(false));
 
         // Spawn heartbeat task
-        let heartbeat_ws = ws.clone();
-        let heartbeat_addr = remote_addr.clone();
+        let hb_write = write.clone();
+        let hb_last_pong = last_pong.clone();
+        let hb_closed = closed.clone();
+        let hb_addr = remote_addr.clone();
         let heartbeat_handle = tokio::spawn(async move {
-            heartbeat_loop(heartbeat_ws, ping_interval, pong_timeout, &heartbeat_addr).await;
+            heartbeat_loop(hb_write, hb_last_pong, hb_closed, ping_interval, pong_timeout, &hb_addr)
+                .await;
         });
 
         Self {
-            ws,
+            write,
+            read,
             remote_peer_id,
             remote_addr,
             heartbeat_handle: Some(heartbeat_handle),
+            last_pong,
+            closed,
         }
     }
 
@@ -337,11 +418,21 @@ impl WsFramedStream {
     }
 }
 
-/// Background heartbeat loop that sends Ping frames and watches for Pong.
+/// Background heartbeat loop that sends Ping frames and monitors Pong timestamps.
+///
+/// On each `ping_interval` tick:
+/// 1. Check if `last_pong` is within `pong_timeout` — if not, close.
+/// 2. Send a Ping frame on the write half.
+///
+/// This design avoids the old bug where `select!` between `ping_interval` (10s)
+/// and `pong_timeout` (30s) always picked the shorter timer, making timeout
+/// detection dead code.
 async fn heartbeat_loop(
-    ws: Arc<Mutex<WebSocketStream<TcpStream>>>,
-    ping_interval: std::time::Duration,
-    pong_timeout: std::time::Duration,
+    write: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+    last_pong: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+    ping_interval: Duration,
+    pong_timeout: Duration,
     remote_addr: &str,
 ) {
     let mut interval = tokio::time::interval(ping_interval);
@@ -351,38 +442,37 @@ async fn heartbeat_loop(
     loop {
         interval.tick().await;
 
-        // Send a ping
-        {
-            let mut ws = ws.lock().await;
-            let ping_data = b"truffle-ping".to_vec();
-            if let Err(e) = ws.send(Message::Ping(ping_data.into())).await {
-                tracing::debug!(remote = %remote_addr, "heartbeat: ping send failed: {e}");
-                return;
-            }
+        // If the connection was closed externally, stop.
+        if closed.load(Ordering::Acquire) {
+            return;
         }
 
-        // Wait for pong within the timeout.
-        // Note: tokio-tungstenite automatically responds to Ping with Pong at the
-        // protocol level. We send Ping and check that the connection is still alive
-        // by attempting a receive within the timeout. If the connection is dead,
-        // the next recv() or send() will fail, which we detect here.
-        let pong_deadline = tokio::time::sleep(pong_timeout);
-        tokio::pin!(pong_deadline);
+        // Check if last pong is within timeout
+        let last = last_pong.load(Ordering::Acquire);
+        let now = epoch_millis();
+        let elapsed = Duration::from_millis(now.saturating_sub(last));
 
-        // We just verify the connection is still alive by checking if we can
-        // still lock and the stream hasn't errored. The actual pong handling
-        // is done by tungstenite internally.
-        tokio::select! {
-            _ = &mut pong_deadline => {
-                tracing::warn!(remote = %remote_addr, "heartbeat: pong timeout after {pong_timeout:?}");
-                // Close the connection on heartbeat failure
-                let mut ws = ws.lock().await;
-                let _ = ws.close(None).await;
+        if elapsed > pong_timeout {
+            tracing::warn!(
+                remote = %remote_addr,
+                elapsed = ?elapsed,
+                "heartbeat: pong timeout after {pong_timeout:?}"
+            );
+            // Close the connection
+            closed.store(true, Ordering::Release);
+            let mut w = write.lock().await;
+            let _ = w.close().await;
+            return;
+        }
+
+        // Send a ping
+        {
+            let mut w = write.lock().await;
+            let ping_data = b"truffle-ping".to_vec();
+            if let Err(e) = w.send(Message::Ping(ping_data.into())).await {
+                tracing::debug!(remote = %remote_addr, "heartbeat: ping send failed: {e}");
+                closed.store(true, Ordering::Release);
                 return;
-            }
-            _ = tokio::time::sleep(ping_interval) => {
-                // Next ping cycle — connection is presumed alive
-                continue;
             }
         }
     }
@@ -390,34 +480,54 @@ async fn heartbeat_loop(
 
 impl FramedStream for WsFramedStream {
     async fn send(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        let mut ws = self.ws.lock().await;
-        ws.send(Message::Binary(data.to_vec().into()))
+        if self.closed.load(Ordering::Acquire) {
+            return Err(TransportError::ConnectionClosed(
+                "connection already closed".to_string(),
+            ));
+        }
+        let mut w = self.write.lock().await;
+        w.send(Message::Binary(data.to_vec().into()))
             .await
             .map_err(|e| TransportError::WebSocket(format!("send: {e}")))
     }
 
     async fn recv(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
-        let mut ws = self.ws.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         loop {
-            match ws.next().await {
+            match self.read.next().await {
                 Some(Ok(Message::Binary(data))) => return Ok(Some(data.to_vec())),
                 Some(Ok(Message::Text(text))) => {
                     // Layer 4 treats text frames as binary data
                     return Ok(Some(text.as_bytes().to_vec()));
                 }
-                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
-                    // Ping/Pong handled by tungstenite internally; skip
+                Some(Ok(Message::Ping(_))) => {
+                    // We received a Ping — tungstenite auto-sends Pong at the
+                    // protocol level. Just skip and continue reading.
                     continue;
                 }
-                Some(Ok(Message::Close(_))) => return Ok(None),
+                Some(Ok(Message::Pong(_))) => {
+                    // Update last_pong timestamp for the heartbeat checker
+                    self.last_pong.store(epoch_millis(), Ordering::Release);
+                    continue;
+                }
+                Some(Ok(Message::Close(_))) => {
+                    self.closed.store(true, Ordering::Release);
+                    return Ok(None);
+                }
                 Some(Ok(Message::Frame(_))) => {
                     // Raw frame — skip
                     continue;
                 }
                 Some(Err(e)) => {
+                    self.closed.store(true, Ordering::Release);
                     return Err(TransportError::WebSocket(format!("recv: {e}")));
                 }
-                None => return Ok(None),
+                None => {
+                    self.closed.store(true, Ordering::Release);
+                    return Ok(None);
+                }
             }
         }
     }
@@ -428,8 +538,10 @@ impl FramedStream for WsFramedStream {
             handle.abort();
         }
 
-        let mut ws = self.ws.lock().await;
-        ws.close(None)
+        self.closed.store(true, Ordering::Release);
+
+        let mut w = self.write.lock().await;
+        w.close()
             .await
             .map_err(|e| TransportError::WebSocket(format!("close: {e}")))
     }
@@ -449,22 +561,8 @@ impl Drop for WsFramedStream {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Unit tests
 // ---------------------------------------------------------------------------
-
-/// Resolve the best dial address from a [`PeerAddr`].
-///
-/// Prefers IP address (most reliable for Tailscale), falls back to DNS name,
-/// then hostname.
-fn resolve_dial_addr(addr: &PeerAddr) -> String {
-    if let Some(ip) = &addr.ip {
-        ip.to_string()
-    } else if let Some(dns) = &addr.dns_name {
-        dns.clone()
-    } else {
-        addr.hostname.clone()
-    }
-}
 
 #[cfg(test)]
 mod unit_tests {
