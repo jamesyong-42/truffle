@@ -16,14 +16,6 @@
           "path": "crates/truffle-core/Cargo.toml"
         },
         {
-          "type": "generic",
-          "path": "crates/truffle-napi/Cargo.toml"
-        },
-        {
-          "type": "generic",
-          "path": "crates/truffle-tauri-plugin/Cargo.toml"
-        },
-        {
           "type": "json",
           "path": "npm/truffle-sidecar-darwin-arm64/package.json",
           "jsonpath": "$.version"
@@ -46,26 +38,6 @@
         {
           "type": "json",
           "path": "npm/truffle-sidecar-win32-x64/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "packages/cli/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "packages/react/package.json",
-          "jsonpath": "$.version"
-        },
-        {
-          "type": "json",
-          "path": "crates/truffle-napi/package.json",
           "jsonpath": "$.version"
         }
       ]

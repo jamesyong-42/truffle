@@ -1,4 +1,4 @@
-name: NAPI Build
+name: NAPI Build (disabled - truffle-napi removed from workspace)
 
 env:
   DEBUG: napi:*
@@ -17,6 +17,7 @@ on:
 
 jobs:
   build:
+    if: false  # truffle-napi is no longer in the workspace (RFC 012 Phase 7)
     strategy:
       fail-fast: false
       matrix:
