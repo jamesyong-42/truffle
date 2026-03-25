@@ -1,36 +1,25 @@
 //! `truffle up` -- start the truffle daemon.
-//!
-//! If `foreground` is true, runs the daemon inline with a live status dashboard.
-//! Otherwise, forks a background daemon process and shows a brief status summary.
 
+use crate::apps::file_transfer::receive;
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
 use crate::daemon::server::DaemonServer;
 use crate::output;
 
-use truffle_core::runtime::TruffleEvent;
-
 /// Start the daemon.
-///
-/// If `foreground` is true, run the daemon in the current process (blocking)
-/// with a live status dashboard. Otherwise, fork a background process and
-/// return immediately after showing a brief status.
 pub async fn run(
     config: &TruffleConfig,
     name: Option<&str>,
     foreground: bool,
 ) -> Result<(), String> {
-    // Apply CLI overrides to config
     let mut config = config.clone();
     if let Some(name) = name {
         config.node.name = name.to_string();
     }
 
-    // Check if daemon is already running
     let client = DaemonClient::new();
     if client.is_daemon_running() {
-        // Try to get current status for a helpful message
         if let Ok(result) = client
             .request(method::STATUS, serde_json::json!({}))
             .await
@@ -46,7 +35,7 @@ pub async fn run(
                 uptime,
             );
         } else {
-            println!("Daemon is already running. Use 'truffle down' first, or 'truffle status' to check.");
+            println!("Daemon is already running. Use 'truffle down' first.");
         }
         return Ok(());
     }
@@ -58,23 +47,12 @@ pub async fn run(
     }
 }
 
-/// Run the daemon in the foreground with a live event-driven dashboard.
-///
-/// Subscribes to `TruffleEvent`s to display auth URLs, online status, peer
-/// changes, and other lifecycle events in real time.
 async fn run_foreground(config: &TruffleConfig) -> Result<(), String> {
     println!();
-    println!("  {}", output::bold("truffle"));
-    println!(
-        "  {}",
-        output::dim(&"\u{2500}".repeat(39))
-    );
+    println!("  {}", output::bold("truffle v2"));
+    println!("  {}", output::dim(&"\u{2500}".repeat(39)));
     println!();
-    println!(
-        "  {:<12}{}",
-        "Node",
-        output::bold(&config.node.name)
-    );
+    println!("  {:<12}{}", "Node", output::bold(&config.node.name));
     println!(
         "  {:<12}{} {}",
         "Status",
@@ -89,136 +67,102 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), String> {
 
     let server = DaemonServer::start(config).await?;
 
-    // Subscribe to runtime events for auth / online status updates
-    let mut event_rx = server.subscribe();
+    // Spawn the file transfer receive handler
+    let node = server.node().clone();
+    let output_dir = dirs::download_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("truffle")
+        .to_string_lossy()
+        .to_string();
+    let _ft_handle = receive::spawn_receive_handler(node.clone(), output_dir);
 
-    // Spawn a task to display events as they arrive
-    let node_name = config.node.name.clone();
-    tokio::spawn(async move {
-        loop {
-            match event_rx.recv().await {
-                Ok(event) => match event {
-                    TruffleEvent::AuthRequired { auth_url } => {
-                        println!();
-                        println!("  {}", output::bold("Authentication required"));
-                        println!("  {}", output::dim(&"\u{2500}".repeat(39)));
-                        println!();
-                        println!("  Visit this URL to authenticate:");
-                        println!();
-                        println!("    {}", output::bold(&auth_url));
-                        println!();
-                        println!("  {}", output::dim("Waiting for authentication..."));
-                    }
-                    TruffleEvent::AuthComplete => {
-                        println!();
-                        println!(
-                            "  {:<12}{} {}",
-                            "Auth",
-                            output::status_indicator("online"),
-                            "authenticated",
-                        );
-                    }
-                    TruffleEvent::Online { ip, dns_name } => {
-                        println!();
-                        println!("  {}", output::dim(&"\u{2500}".repeat(39)));
-                        println!();
-                        println!(
-                            "  {:<12}{}",
-                            "Node",
-                            output::bold(&node_name)
-                        );
-                        println!(
-                            "  {:<12}{} {}",
-                            "Status",
-                            output::status_indicator("online"),
-                            output::status_label("online"),
-                        );
-                        println!("  {:<12}{}", "IP", ip);
-                        println!("  {:<12}{}", "DNS", output::dim(&dns_name));
-                        println!(
-                            "  {:<12}{}",
-                            "Socket",
-                            output::dim(&TruffleConfig::socket_path().display().to_string()),
-                        );
-                        println!();
-                        println!("  Listening for connections...");
-                        println!(
-                            "  {}",
-                            output::dim("Press Ctrl+C to stop, or run 'truffle down' from another terminal."),
-                        );
-                        println!();
-                    }
-                    TruffleEvent::PeerDiscovered(device) => {
-                        println!(
-                            "  {} peer discovered: {} ({})",
-                            output::status_indicator("online"),
-                            output::bold(&device.name),
-                            device.tailscale_ip.as_deref().unwrap_or("no ip"),
-                        );
-                    }
-                    TruffleEvent::PeerOffline(device_id) => {
-                        println!(
-                            "  {} peer offline: {}",
-                            output::status_indicator("offline"),
-                            device_id,
-                        );
-                    }
-                    TruffleEvent::SidecarCrashed { exit_code, stderr_tail } => {
-                        println!();
-                        println!(
-                            "  {} Sidecar crashed (exit code: {:?})",
-                            output::status_indicator("offline"),
-                            exit_code,
-                        );
-                        if !stderr_tail.is_empty() {
-                            for line in stderr_tail.lines().take(5) {
-                                println!("    {}", output::dim(line));
-                            }
-                        }
-                    }
-                    TruffleEvent::SidecarStateChanged { state } => {
-                        println!(
-                            "  {:<12}{}",
-                            "Tailscale",
-                            output::dim(&state),
-                        );
-                    }
-                    TruffleEvent::Error(msg) => {
-                        println!(
-                            "  {} {}",
-                            output::status_indicator("offline"),
-                            msg,
-                        );
-                    }
-                    // Other events are logged by tracing, not shown on dashboard
-                    _ => {}
-                },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Event stream lagged, missed {n} events");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break;
-                }
-            }
-        }
-    });
+    // Show node info once available
+    let info = node.local_info();
+    let ip_str = info.ip.map(|ip| ip.to_string()).unwrap_or_default();
 
-    // Print fallback status in case no Online event arrives quickly
-    // (e.g. sidecar already authenticated from previous session)
     println!();
+    println!("  {}", output::dim(&"\u{2500}".repeat(39)));
+    println!();
+    println!("  {:<12}{}", "Node", output::bold(&info.name));
+    println!(
+        "  {:<12}{} {}",
+        "Status",
+        output::status_indicator("online"),
+        output::status_label("online"),
+    );
+    if !ip_str.is_empty() {
+        println!("  {:<12}{}", "IP", ip_str);
+    }
+    if let Some(ref dns) = info.dns_name {
+        if !dns.is_empty() {
+            println!("  {:<12}{}", "DNS", output::dim(dns));
+        }
+    }
     println!(
         "  {:<12}{}",
         "Socket",
         output::dim(&TruffleConfig::socket_path().display().to_string()),
     );
+    println!();
+    println!("  Listening for connections...");
+    println!(
+        "  {}",
+        output::dim("Press Ctrl+C to stop, or run 'truffle down' from another terminal."),
+    );
+    println!();
 
-    // Enter the accept loop (blocks until shutdown)
+    // Subscribe to peer events for live display
+    let mut peer_rx = server.subscribe_peer_events();
+    tokio::spawn(async move {
+        loop {
+            match peer_rx.recv().await {
+                Ok(event) => {
+                    use truffle_core::session::PeerEvent;
+                    match event {
+                        PeerEvent::Joined(state) => {
+                            println!(
+                                "  {} peer discovered: {} ({})",
+                                output::status_indicator("online"),
+                                output::bold(&state.name),
+                                state.ip,
+                            );
+                        }
+                        PeerEvent::Left(id) => {
+                            println!(
+                                "  {} peer offline: {}",
+                                output::status_indicator("offline"),
+                                id,
+                            );
+                        }
+                        PeerEvent::Connected(id) => {
+                            println!(
+                                "  {} peer connected: {}",
+                                output::status_indicator("online"),
+                                id,
+                            );
+                        }
+                        PeerEvent::Disconnected(id) => {
+                            println!(
+                                "  {} peer disconnected: {}",
+                                output::status_indicator("offline"),
+                                id,
+                            );
+                        }
+                        PeerEvent::Updated(_) => {}
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Peer event stream lagged, missed {n} events");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     server.run().await?;
-
     Ok(())
 }
 
-/// Fork a background daemon and wait for it to be ready.
 async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("Failed to get current executable: {e}"))?;
@@ -234,7 +178,6 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // On Unix, use setsid to fully detach the child
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -246,9 +189,6 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         }
     }
 
-    // On Windows, use CREATE_NO_WINDOW to prevent a console window from
-    // flashing and to avoid the child being terminated when the parent
-    // console is closed.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -259,7 +199,6 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
     cmd.spawn()
         .map_err(|e| format!("Failed to start background daemon: {e}"))?;
 
-    // Wait for daemon to be ready
     let client = DaemonClient::new();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
     loop {
@@ -268,7 +207,6 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         }
 
         if client.is_daemon_running() {
-            // Try to connect to the socket
             if client.connect().await.is_ok() {
                 break;
             }
@@ -277,27 +215,14 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
-    // Wait for Tailscale to connect (poll status until non-offline)
+    // Show status
     println!();
-    println!("  {}", output::bold("truffle"));
-    println!(
-        "  {}",
-        output::dim(&"\u{2500}".repeat(39))
-    );
+    println!("  {}", output::bold("truffle v2"));
+    println!("  {}", output::dim(&"\u{2500}".repeat(39)));
     println!();
-    println!(
-        "  {:<12}{}",
-        "Node",
-        output::bold(&config.node.name)
-    );
-    println!(
-        "  {:<12}{} {}",
-        "Status",
-        output::status_indicator("connecting"),
-        output::status_label("connecting"),
-    );
+    println!("  {:<12}{}", "Node", output::bold(&config.node.name));
 
-    // Poll until we get a real status (online, authRequired) or timeout
+    // Poll for status
     let status_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     let mut final_status = None;
     while tokio::time::Instant::now() < status_deadline {
@@ -306,10 +231,9 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
             .await
         {
             let status = result["status"].as_str().unwrap_or("offline");
-            let ip = result["tailscale_ip"].as_str().unwrap_or("");
-            let auth_url = result["auth_url"].as_str().unwrap_or("");
+            let ip = result["ip"].as_str().unwrap_or("");
 
-            if !ip.is_empty() || !auth_url.is_empty() || status == "online" {
+            if !ip.is_empty() || status == "online" {
                 final_status = Some(result);
                 break;
             }
@@ -317,8 +241,6 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 
-    // Clear "connecting" and show actual status
-    println!();
     if let Some(result) = final_status {
         let status = result["status"].as_str().unwrap_or("online");
         println!(
@@ -327,22 +249,14 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
             output::status_indicator(status),
             output::status_label(status),
         );
-
-        if let Some(ip) = result["tailscale_ip"].as_str() {
+        if let Some(ip) = result["ip"].as_str() {
             if !ip.is_empty() {
                 println!("  {:<12}{}", "IP", ip);
             }
         }
-        if let Some(dns) = result["tailscale_dns_name"].as_str() {
+        if let Some(dns) = result["dns_name"].as_str() {
             if !dns.is_empty() {
                 println!("  {:<12}{}", "DNS", output::dim(dns));
-            }
-        }
-        if let Some(auth_url) = result["auth_url"].as_str() {
-            if !auth_url.is_empty() {
-                println!();
-                println!("  {}", output::bold("Authentication required"));
-                println!("  Visit: {}", auth_url);
             }
         }
     } else {
@@ -350,12 +264,14 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
             "  {:<12}{} {}",
             "Status",
             output::status_indicator("connecting"),
-            output::dim("Tailscale is starting up..."),
+            output::dim("Starting up..."),
         );
-        println!("  Run '{}' to check progress", output::bold("truffle status"));
+        println!(
+            "  Run '{}' to check progress",
+            output::bold("truffle status")
+        );
     }
 
     println!();
-
     Ok(())
 }

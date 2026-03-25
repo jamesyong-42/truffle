@@ -1,6 +1,6 @@
 # RFC 012: Layered Architecture Redesign
 
-**Status**: Proposed
+**Status**: Implemented
 **Created**: 2026-03-24
 **Author**: James Yong + Claude
 **Supersedes**: RFC 008 (6-layer vision — replaces with cleaner separation)
@@ -610,15 +610,15 @@ truffle-cli/src/
 
 **Why not migrate**: The old architecture has fundamental coupling issues (application code in core, transport-dependent discovery, bridge internals leaking everywhere). Trying to migrate incrementally means every phase must maintain backward compatibility with broken abstractions. A clean rebuild is faster and produces better code.
 
-**Workspace setup**: New code lives in a parallel crate `truffle-core-v2/` during development. Old `truffle-core/` stays untouched. When v2 is complete, we rename and delete the old.
+**Workspace setup**: The v2 crates have been promoted to primary names. Old crates deleted.
 
 ```
 truffle/
 ├── crates/
-│   ├── truffle-core/        ← OLD (untouched during rebuild)
-│   ├── truffle-core-v2/     ← NEW (built layer by layer)
-│   ├── truffle-cli/         ← updated LAST (swap to v2)
-│   └── ...
+│   ├── truffle-core/        ← v2 architecture (clean layered design)
+│   ├── truffle-cli/         ← v2 CLI (Node API)
+│   ├── truffle-napi/        ← needs update to new Node API (excluded from workspace)
+│   └── truffle-tauri-plugin/← needs update to new Node API (excluded from workspace)
 └── packages/
     └── sidecar-slim/        ← Go sidecar (updated for WatchIPNBus)
 ```
@@ -841,19 +841,19 @@ truffle-core-v2/src/
 
 ---
 
-### Phase 7: Swap + Cleanup
+### Phase 7: Swap + Cleanup -- COMPLETE
 
 **Goal**: Replace `truffle-core` with `truffle-core-v2`, delete old code.
 
 **Steps**:
-1. Rename `truffle-core/` → `truffle-core-old/` (keep as reference)
-2. Rename `truffle-core-v2/` → `truffle-core/`
-3. Update all `Cargo.toml` dependencies
-4. Run full test suite
-5. Cross-machine peer test
-6. Delete `truffle-core-old/`
-7. Update truffle-napi and truffle-tauri-plugin to use new Node API
-8. Tag v0.3.0
+1. Rename `truffle-core/` -> `truffle-core-old/` (keep as reference) -- DONE
+2. Rename `truffle-core-v2/` -> `truffle-core/` -- DONE
+3. Update all `Cargo.toml` dependencies -- DONE
+4. Run full test suite -- DONE
+5. Cross-machine peer test -- deferred (requires two nodes)
+6. Delete `truffle-core-old/` -- DONE
+7. Update truffle-napi and truffle-tauri-plugin to use new Node API -- deferred (removed from workspace for now)
+8. Tag v0.3.0 -- pending
 
 **Acceptance**: `cargo test --workspace` passes. All CLI commands work. `truffle-core` has zero application-specific code. The `pending_dials` HashMap, `GoShim`, and `BridgeManager` are invisible outside `network/tailscale/`.
 

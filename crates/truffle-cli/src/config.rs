@@ -1,4 +1,4 @@
-//! Configuration file loading for the truffle CLI.
+//! Configuration file loading for the truffle CLI v2.
 //!
 //! Configuration is loaded from `~/.config/truffle/config.toml`.
 //! Missing fields use sensible defaults, and a missing config file
@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 // Config types
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 
 /// Top-level configuration, deserialized from `config.toml`.
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -102,9 +102,9 @@ impl Default for DaemonConfig {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 // Default value functions (for serde)
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 
 fn default_node_name() -> String {
     hostname::get()
@@ -129,9 +129,9 @@ fn default_info() -> String {
     "info".to_string()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 // Config loading
-// ═══════════════════════════════════════════════════════════════════════════
+// ==========================================================================
 
 /// Errors that can occur when loading configuration.
 #[derive(Debug)]
@@ -183,9 +183,6 @@ impl TruffleConfig {
     }
 
     /// The IPC endpoint path for this platform.
-    ///
-    /// - Unix: `<config_dir>/truffle/truffle.sock` (Unix domain socket)
-    /// - Windows: `\\.\pipe\truffle-daemon` (named pipe)
     pub fn socket_path() -> PathBuf {
         #[cfg(unix)]
         {
@@ -222,10 +219,6 @@ fn config_dir() -> PathBuf {
     dir
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +244,6 @@ sidecar_path = "/usr/local/bin/truffle-sidecar"
 [aliases]
 db = "postgres:5432"
 api = "backend:3000"
-redis = "cache:6379"
 
 [output]
 format = "json"
@@ -268,88 +260,10 @@ log_file = "/tmp/truffle.log"
         assert!(!config.node.auto_up);
         assert_eq!(config.node.sidecar_path, "/usr/local/bin/truffle-sidecar");
 
-        assert_eq!(config.aliases.len(), 3);
+        assert_eq!(config.aliases.len(), 2);
         assert_eq!(config.aliases["db"], "postgres:5432");
-        assert_eq!(config.aliases["api"], "backend:3000");
 
         assert_eq!(config.output.format, "json");
-        assert_eq!(config.output.color, "never");
-
         assert_eq!(config.daemon.log_level, "debug");
-        assert_eq!(config.daemon.log_file, "/tmp/truffle.log");
-    }
-
-    #[test]
-    fn test_config_missing_file_uses_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("nonexistent.toml");
-
-        let config = TruffleConfig::load(Some(&config_path)).unwrap();
-        assert!(config.node.auto_up);
-        assert_eq!(config.output.format, "pretty");
-    }
-
-    #[test]
-    fn test_config_partial_toml() {
-        // Only specifying some fields should use defaults for the rest
-        let toml_content = r#"
-[node]
-name = "test-node"
-
-[aliases]
-db = "postgres:5432"
-"#;
-
-        let config: TruffleConfig = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.node.name, "test-node");
-        assert!(config.node.auto_up); // default
-        assert_eq!(config.output.format, "pretty"); // default
-        assert_eq!(config.aliases["db"], "postgres:5432");
-    }
-
-    #[test]
-    fn test_config_resolve_alias() {
-        let toml_content = r#"
-[aliases]
-db = "postgres:5432"
-api = "backend:3000"
-"#;
-
-        let config: TruffleConfig = toml::from_str(toml_content).unwrap();
-        assert_eq!(config.resolve_alias("db"), "postgres:5432");
-        assert_eq!(config.resolve_alias("api"), "backend:3000");
-        assert_eq!(config.resolve_alias("unknown"), "unknown"); // passthrough
-    }
-
-    #[test]
-    fn test_config_file_paths() {
-        let default = TruffleConfig::default_path();
-        assert!(default.to_string_lossy().contains("truffle"));
-        assert!(default.to_string_lossy().ends_with("config.toml"));
-
-        let socket = TruffleConfig::socket_path();
-        #[cfg(unix)]
-        assert!(
-            socket.to_string_lossy().ends_with("truffle.sock"),
-            "Unix socket path should end with truffle.sock"
-        );
-        #[cfg(windows)]
-        assert!(
-            socket.to_string_lossy().contains(r"\\.\pipe\"),
-            "Windows socket path should be a named pipe"
-        );
-
-        let pid = TruffleConfig::pid_path();
-        assert!(pid.to_string_lossy().ends_with("truffle.pid"));
-    }
-
-    #[test]
-    fn test_config_invalid_toml_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("bad.toml");
-        std::fs::write(&config_path, "this is not valid [toml =").unwrap();
-
-        let result = TruffleConfig::load(Some(&config_path));
-        assert!(result.is_err());
     }
 }

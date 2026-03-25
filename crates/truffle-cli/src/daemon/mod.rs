@@ -1,21 +1,11 @@
-//! Daemon process for the truffle CLI.
+//! Daemon process for the truffle CLI v2.
 //!
-//! The daemon holds a `TruffleRuntime` instance and listens on a
-//! platform-appropriate IPC transport (Unix socket on macOS/Linux, named pipe
-//! on Windows) for JSON-RPC 2.0 requests from CLI commands. This eliminates
-//! the need to start/stop the runtime for every command invocation.
+//! The daemon holds a `Node<TailscaleProvider>` and listens on IPC for JSON-RPC
+//! requests from CLI commands.
 //!
-//! # Architecture
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────┐
-//! │  truffle daemon                                          │
-//! │                                                          │
-//! │  TruffleRuntime (MeshNode + Bridge + GoShim)            │
-//! │  IPC Server (Unix socket / Windows named pipe)          │
-//! │  PID File (<config_dir>/truffle/truffle.pid)            │
-//! └─────────────────────────────────────────────────────────┘
-//! ```
+//! This is MUCH simpler than v1:
+//! - No FileTransferManager, BridgeManager, DialFn, axum, or TcpProxyHandler
+//! - Just: Node + IPC loop. That's it.
 
 pub mod client;
 pub mod handler;

@@ -15,7 +15,7 @@ packages/sidecar-slim/sidecar-slim-linux
 packages/core/bin/
 
 # Test sidecar binary (built from Go source)
-crates/truffle-core-v2/tests/test-sidecar
+crates/truffle-core/tests/test-sidecar
 
 # VitePress
 docs/.vitepress/dist/

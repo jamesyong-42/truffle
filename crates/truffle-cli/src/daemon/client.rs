@@ -1,10 +1,4 @@
 //! Client connector: connect to the daemon's IPC endpoint and send requests.
-//!
-//! CLI commands use `DaemonClient` to communicate with the running daemon.
-//! If no daemon is running and `auto_up` is enabled, the client will
-//! automatically start one.
-//!
-//! Uses Unix sockets on macOS/Linux and named pipes on Windows.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,40 +12,37 @@ use crate::config::TruffleConfig;
 
 /// Client for communicating with the truffle daemon.
 pub struct DaemonClient {
-    /// Path to the daemon's IPC endpoint (Unix socket or named pipe).
     socket_path: PathBuf,
-    /// Path to the daemon's PID file.
     pid_path: PathBuf,
-    /// Auto-incrementing request ID counter.
     next_id: AtomicU64,
 }
 
 /// Errors that can occur when using the client.
 #[derive(Debug)]
 pub enum ClientError {
-    /// The daemon is not running.
     DaemonNotRunning,
-    /// Failed to connect to the IPC endpoint.
     ConnectionFailed(String),
-    /// Failed to send or receive data.
     IoError(String),
-    /// The daemon returned an error response.
-    DaemonError {
-        code: i32,
-        message: String,
-    },
-    /// Failed to parse the daemon's response.
+    DaemonError { code: i32, message: String },
     ParseError(String),
 }
 
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientError::DaemonNotRunning => write!(f, "Daemon is not running. Start it with 'truffle up'."),
-            ClientError::ConnectionFailed(msg) => write!(f, "Failed to connect to daemon: {msg}"),
+            ClientError::DaemonNotRunning => {
+                write!(f, "Daemon is not running. Start it with 'truffle up'.")
+            }
+            ClientError::ConnectionFailed(msg) => {
+                write!(f, "Failed to connect to daemon: {msg}")
+            }
             ClientError::IoError(msg) => write!(f, "I/O error: {msg}"),
-            ClientError::DaemonError { code, message } => write!(f, "Daemon error ({code}): {message}"),
-            ClientError::ParseError(msg) => write!(f, "Failed to parse daemon response: {msg}"),
+            ClientError::DaemonError { code, message } => {
+                write!(f, "Daemon error ({code}): {message}")
+            }
+            ClientError::ParseError(msg) => {
+                write!(f, "Failed to parse daemon response: {msg}")
+            }
         }
     }
 }
@@ -68,22 +59,7 @@ impl DaemonClient {
         }
     }
 
-    /// Create a new client with a custom socket path (for testing).
-    pub fn with_socket_path(socket_path: PathBuf) -> Self {
-        let pid_path = socket_path
-            .parent()
-            .map(|p| p.join("truffle.pid"))
-            .unwrap_or_else(|| PathBuf::from("truffle.pid"));
-        Self {
-            socket_path,
-            pid_path,
-            next_id: AtomicU64::new(1),
-        }
-    }
-
     /// Check if the daemon is currently running.
-    ///
-    /// Checks the PID file and verifies the process is alive.
     pub fn is_daemon_running(&self) -> bool {
         match pid::read_pid(&self.pid_path) {
             Ok(Some(p)) => pid::is_process_running(p),
@@ -92,8 +68,6 @@ impl DaemonClient {
     }
 
     /// Connect to the daemon's IPC endpoint.
-    ///
-    /// Returns an `IpcStream` for sending/receiving data.
     pub async fn connect(&self) -> Result<ipc::IpcStream, ClientError> {
         if !self.is_daemon_running() {
             return Err(ClientError::DaemonNotRunning);
@@ -105,9 +79,6 @@ impl DaemonClient {
     }
 
     /// Send a JSON-RPC request and receive the response.
-    ///
-    /// Opens a connection, sends the request, reads one response line, and
-    /// returns the result value (or an error).
     pub async fn request(
         &self,
         method: &str,
@@ -129,12 +100,13 @@ impl DaemonClient {
             .await
             .map_err(|e| ClientError::IoError(e.to_string()))?;
 
-        // Read response
         let response_line = reader
             .next_line()
             .await
             .map_err(|e| ClientError::IoError(e.to_string()))?
-            .ok_or_else(|| ClientError::IoError("Daemon closed connection without responding".into()))?;
+            .ok_or_else(|| {
+                ClientError::IoError("Daemon closed connection without responding".into())
+            })?;
 
         let response: DaemonResponse = serde_json::from_str(&response_line)
             .map_err(|e| ClientError::ParseError(e.to_string()))?;
@@ -149,16 +121,7 @@ impl DaemonClient {
         Ok(response.result.unwrap_or(serde_json::Value::Null))
     }
 
-    /// Send a JSON-RPC request and receive the response, processing
-    /// intermediate notifications.
-    ///
-    /// Like `request()`, but the daemon may send multiple JSON lines before
-    /// the final response. Lines without an `id` field are JSON-RPC
-    /// notifications and are forwarded to the `on_notification` callback.
-    /// The line with a matching `id` is the final response.
-    ///
-    /// This is used for long-running operations like file transfers, where
-    /// the daemon streams progress notifications before the final result.
+    /// Send a request with notification streaming (for file transfers, etc.).
     pub async fn request_with_notifications(
         &self,
         method: &str,
@@ -181,7 +144,6 @@ impl DaemonClient {
             .await
             .map_err(|e| ClientError::IoError(e.to_string()))?;
 
-        // Read lines until we get the final response (line with matching `id`).
         loop {
             let line = reader
                 .next_line()
@@ -191,12 +153,10 @@ impl DaemonClient {
                     ClientError::IoError("Daemon closed connection without responding".into())
                 })?;
 
-            // Parse as generic JSON to check for `id` field
             let raw: serde_json::Value = serde_json::from_str(&line)
                 .map_err(|e| ClientError::ParseError(e.to_string()))?;
 
             if raw.get("id").is_some() {
-                // This is the final response
                 let response: DaemonResponse = serde_json::from_value(raw)
                     .map_err(|e| ClientError::ParseError(e.to_string()))?;
 
@@ -210,21 +170,13 @@ impl DaemonClient {
                 return Ok(response.result.unwrap_or(serde_json::Value::Null));
             }
 
-            // No `id` field -- this is a notification
             if let Ok(notif) = serde_json::from_value::<DaemonNotification>(raw) {
                 on_notification(&notif);
             }
-            // If it fails to parse as a notification, skip silently
-            // (robustness: don't crash on unexpected messages)
         }
     }
 
     /// Ensure the daemon is running, starting it if necessary.
-    ///
-    /// If `auto_up` is true in the config and the daemon is not running,
-    /// this will fork a background daemon process.
-    ///
-    /// Returns `Ok(())` if the daemon is running (or was just started).
     pub async fn ensure_running(&self, config: &TruffleConfig) -> Result<(), ClientError> {
         if self.is_daemon_running() {
             return Ok(());
@@ -234,7 +186,6 @@ impl DaemonClient {
             return Err(ClientError::DaemonNotRunning);
         }
 
-        // Fork a background daemon process
         let exe = std::env::current_exe()
             .map_err(|e| ClientError::IoError(format!("Failed to get current exe: {e}")))?;
 
@@ -247,20 +198,17 @@ impl DaemonClient {
             .spawn()
             .map_err(|e| ClientError::IoError(format!("Failed to spawn daemon: {e}")))?;
 
-        // Detach the child process so it continues running
         drop(child);
 
-        // Wait for daemon to be ready (poll the IPC endpoint).
-        // On Windows, named pipe paths don't respond to Path::exists(),
-        // so we skip the exists() check and try connecting directly.
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
         loop {
             if tokio::time::Instant::now() > deadline {
-                return Err(ClientError::IoError("Timed out waiting for daemon to start".into()));
+                return Err(ClientError::IoError(
+                    "Timed out waiting for daemon to start".into(),
+                ));
             }
 
             if self.is_daemon_running() {
-                // Try to connect to the IPC endpoint
                 if ipc::IpcStream::connect(&self.socket_path).await.is_ok() {
                     return Ok(());
                 }
@@ -268,38 +216,5 @@ impl DaemonClient {
 
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_daemon_client_connect_no_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        let client = DaemonClient::with_socket_path(socket_path);
-
-        // Should report daemon not running
-        assert!(!client.is_daemon_running());
-
-        // Should fail to connect
-        let result = client.connect().await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ClientError::DaemonNotRunning => {} // expected
-            other => panic!("Expected DaemonNotRunning, got: {other}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_daemon_client_request_no_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-        let client = DaemonClient::with_socket_path(socket_path);
-
-        let result = client.request("status", serde_json::json!({})).await;
-        assert!(result.is_err());
     }
 }

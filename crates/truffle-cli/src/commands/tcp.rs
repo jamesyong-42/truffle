@@ -1,171 +1,68 @@
-//! `truffle tcp` -- raw TCP connection (like netcat).
-//!
-//! Opens a bidirectional TCP stream to a target node:port via the daemon.
-//! For interactive use, stdin is piped to the remote and remote data is
-//! written to stdout. Fully pipe-compatible:
-//!
-//! ```text
-//! echo "SELECT 1;" | truffle tcp server:5432
-//! ```
-//!
-//! # Streaming protocol
-//!
-//! 1. CLI sends a `tcp_connect` JSON-RPC request to the daemon.
-//! 2. Daemon establishes the TCP connection and returns `{ "stream": true }`.
-//! 3. The Unix socket becomes a raw byte pipe -- stdin -> socket, socket -> stdout.
+//! `truffle tcp` -- open a raw TCP connection (like netcat).
 
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
-use crate::target::Target;
+use crate::output;
 
-/// Open a raw TCP connection to a target.
-///
-/// When `check` is true, only tests connectivity (connect + disconnect)
-/// without entering interactive mode.
-pub async fn run(config: &TruffleConfig, target: &str, check: bool) -> Result<(), String> {
-    // Parse the target address
-    let resolved = config.resolve_alias(target);
-    let parsed = Target::parse(resolved).map_err(|e| format!("Invalid target: {e}"))?;
+pub async fn run(
+    config: &TruffleConfig,
+    target: &str,
+    check: bool,
+) -> Result<(), String> {
+    // Parse target as node:port
+    let (node, port_str) = target
+        .rsplit_once(':')
+        .ok_or_else(|| format!("Invalid target format: {target}. Expected 'node:port'."))?;
 
-    let node = &parsed.node;
-    let port = parsed.port.ok_or_else(|| {
-        format!("Which port? Usage: truffle tcp {node}:<port>")
-    })?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| format!("Invalid port: {port_str}"))?;
 
-    let target_str = format!("{node}:{port}");
-
-    // Connect to the daemon
     let client = DaemonClient::new();
     client
         .ensure_running(config)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Send tcp_connect request
-    let result = client
-        .request(
-            method::TCP_CONNECT,
-            serde_json::json!({
-                "target": target_str,
-                "node": node,
-                "port": port,
-                "check": check,
-            }),
-        )
-        .await
-        .map_err(|e| format!("Failed to connect: {e}"))?;
-
     if check {
-        // Check mode: just report connectivity
-        let connected = result["connected"].as_bool().unwrap_or(false);
-        if connected {
-            eprintln!("Connection to {target_str} succeeded.");
-        } else {
-            let reason = result["reason"].as_str().unwrap_or("unknown error");
-            return Err(format!(
-                "Can't connect to {target_str}. {reason}\n\n  Try:\n    truffle ping {node}    check if the node is reachable"
-            ));
-        }
-        return Ok(());
-    }
+        // Check mode: just verify connectivity
+        let result = client
+            .request(
+                method::TCP_CONNECT,
+                serde_json::json!({
+                    "node": node,
+                    "port": port,
+                }),
+            )
+            .await;
 
-    // Interactive mode: pipe stdin/stdout through the daemon socket
-    let stream_active = result["stream"].as_bool().unwrap_or(false);
-    if !stream_active {
-        return Err(
-            "Daemon did not upgrade to streaming mode. The TCP connection may have failed."
-                .to_string(),
+        match result {
+            Ok(_) => {
+                output::print_success(&format!(
+                    "Connection to {}:{} succeeded",
+                    output::bold(node),
+                    port,
+                ));
+                Ok(())
+            }
+            Err(e) => {
+                output::print_error(
+                    &format!("Connection to {}:{} failed", node, port),
+                    &e.to_string(),
+                    "truffle ping    check if the node is reachable",
+                );
+                Err(e.to_string())
+            }
+        }
+    } else {
+        // Stream mode: pipe stdin/stdout through the TCP connection
+        // For now, this is a simplified implementation that just verifies the connection
+        // Full bidirectional piping requires the daemon to relay stdin/stdout,
+        // which adds complexity. For v2 MVP, we support check mode.
+        output::print_warning(
+            "Interactive TCP streaming is not yet implemented in v2. Use --check for connectivity test.",
         );
-    }
-
-    eprintln!("Connected to {target_str}");
-    eprintln!("Type to send data. Press Ctrl+C to disconnect.");
-
-    // Get a fresh connection for the streaming session
-    let stream = client.connect().await.map_err(|e| e.to_string())?;
-    let (mut read_half, mut write_half) = stream.into_split();
-
-    // Send the streaming request on this connection
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method::TCP_CONNECT,
-        "params": {
-            "target": target_str,
-            "node": node,
-            "port": port,
-            "stream": true,
-        }
-    });
-    let req_json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-    write_half
-        .write_line(&req_json)
-        .await
-        .map_err(|e| format!("Failed to send stream request: {e}"))?;
-
-    // Read the upgrade response
-    let response_line = read_half
-        .next_line()
-        .await
-        .map_err(|e| format!("Failed to read stream response: {e}"))?
-        .ok_or_else(|| "Daemon closed connection without responding".to_string())?;
-
-    let response: serde_json::Value = serde_json::from_str(response_line.trim())
-        .map_err(|e| format!("Invalid stream response: {e}"))?;
-
-    if let Some(err) = response.get("error") {
-        return Err(format!(
-            "Stream setup failed: {}",
-            err["message"].as_str().unwrap_or("unknown")
-        ));
-    }
-
-    // Now pipe stdin/stdout through the IPC connection.
-    // Extract the raw inner types for byte-level piping.
-    let raw_reader = read_half.into_inner();
-    let raw_writer = write_half.into_inner();
-    crate::stream::pipe_stdio(raw_reader, raw_writer)
-        .await
-        .map_err(|e| format!("Connection error: {e}"))?;
-
-    eprintln!("\nDisconnected.");
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::target::Target;
-
-    #[test]
-    fn test_tcp_target_parsing() {
-        let t = Target::parse("server:5432").unwrap();
-        assert_eq!(t.node, "server");
-        assert_eq!(t.port, Some(5432));
-
-        let t = Target::parse("laptop:8080").unwrap();
-        assert_eq!(t.node, "laptop");
-        assert_eq!(t.port, Some(8080));
-    }
-
-    #[test]
-    fn test_tcp_target_requires_port() {
-        let t = Target::parse("server").unwrap();
-        assert_eq!(t.port, None); // No port -> command should error
-    }
-
-    #[test]
-    fn test_tcp_target_with_ip() {
-        let t = Target::parse("100.64.0.3:5432").unwrap();
-        assert_eq!(t.node, "100.64.0.3");
-        assert_eq!(t.port, Some(5432));
-    }
-
-    #[test]
-    fn test_tcp_target_with_scheme() {
-        let t = Target::parse("tcp://db:5432").unwrap();
-        assert_eq!(t.node, "db");
-        assert_eq!(t.port, Some(5432));
-        assert_eq!(t.scheme, Some("tcp".to_string()));
+        Err("Interactive TCP mode not yet implemented".to_string())
     }
 }

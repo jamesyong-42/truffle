@@ -1,16 +1,10 @@
 [package]
 name = "truffle-core"
-version = "0.2.2"
+version = "0.1.0"
 edition = "2021"
-description = "Mesh networking for local-first apps, built on Tailscale"
+description = "Truffle mesh networking core (clean architecture)"
 license = "MIT"
 repository = "https://github.com/jamesyong-42/truffle"
-homepage = "https://github.com/jamesyong-42/truffle"
-documentation = "https://docs.rs/truffle-core"
-readme = "../../README.md"
-keywords = ["mesh", "networking", "tailscale", "local-first", "p2p"]
-categories = ["network-programming", "asynchronous"]
-exclude = ["tests/", "benches/"]
 
 [lib]
 name = "truffle_core"
@@ -18,37 +12,20 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs", "process"] }
-axum = "0.8"
-tokio-tungstenite = "0.28"
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = "0.1"
-bytes = "1"
-futures-util = { version = "0.3", features = ["sink"] }
-sha2 = "0.10"
-hex = "0.4"
-getrandom = "0.2"
-pin-project-lite = "0.2"
-rmp-serde = "1.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "2"
 tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
-tokio-util = { version = "0.7", features = ["io"] }
-tokio-stream = "0.1"
-http-body-util = "0.1"
-scopeguard = "1"
-rand = "0.9"
+hex = "0.4"
+getrandom = "0.2"
 subtle = "2"
-p256 = { version = "0.13", features = ["ecdsa"] }
-base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", features = ["sink"] }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
 
 [dev-dependencies]
-tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["fs"] }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
