@@ -431,6 +431,191 @@ fn truffle_hostnames_accepted() {
     assert!(super::provider::is_truffle_peer("truffle-"));
 }
 
+// ===== Phase 1 audit fix tests =====
+
+/// Verify that `bind_udp()` returns `NetworkError::Internal` with "not yet implemented"
+/// rather than panicking. (Phase 1 audit fix: graceful error instead of todo!())
+#[tokio::test]
+async fn test_bind_udp_returns_not_implemented() {
+    use super::provider::{TailscaleConfig, TailscaleProvider};
+    use crate::network::NetworkProvider;
+
+    let config = TailscaleConfig {
+        binary_path: "/nonexistent/sidecar".into(),
+        hostname: "truffle-test".to_string(),
+        state_dir: "/tmp/test-state".to_string(),
+        auth_key: None,
+        ephemeral: None,
+        tags: None,
+    };
+    let provider = TailscaleProvider::new(config);
+
+    let result = provider.bind_udp(1234).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("not yet implemented") || msg.contains("UDP"),
+        "expected 'not yet implemented' message, got: {msg}"
+    );
+    // Ensure it's the Internal variant specifically
+    assert!(
+        matches!(err, crate::network::NetworkError::Internal(_)),
+        "expected NetworkError::Internal, got: {err:?}"
+    );
+}
+
+/// Verify that `local_identity()` returns a default `NodeIdentity` before `start()` is called,
+/// rather than panicking. (Phase 1 audit fix: replaced RwLock::unwrap panic with safe default.)
+#[test]
+fn test_local_identity_default_before_start() {
+    use super::provider::{TailscaleConfig, TailscaleProvider};
+    use crate::network::NetworkProvider;
+
+    let config = TailscaleConfig {
+        binary_path: "/nonexistent/sidecar".into(),
+        hostname: "truffle-test".to_string(),
+        state_dir: "/tmp/test-state".to_string(),
+        auth_key: None,
+        ephemeral: None,
+        tags: None,
+    };
+    let provider = TailscaleProvider::new(config);
+
+    // This must not panic — it should return a default NodeIdentity
+    let identity = provider.local_identity();
+    assert!(identity.hostname.is_empty(), "hostname should be empty before start");
+    assert!(identity.id.is_empty(), "id should be empty before start");
+    assert!(identity.name.is_empty(), "name should be empty before start");
+    assert!(identity.dns_name.is_none(), "dns_name should be None before start");
+    assert!(identity.ip.is_none(), "ip should be None before start");
+}
+
+/// Verify that `local_addr()` returns a default `PeerAddr` before `start()` is called,
+/// rather than panicking. (Phase 1 audit fix: replaced RwLock::unwrap panic with safe default.)
+#[test]
+fn test_local_addr_default_before_start() {
+    use super::provider::{TailscaleConfig, TailscaleProvider};
+    use crate::network::NetworkProvider;
+
+    let config = TailscaleConfig {
+        binary_path: "/nonexistent/sidecar".into(),
+        hostname: "truffle-test".to_string(),
+        state_dir: "/tmp/test-state".to_string(),
+        auth_key: None,
+        ephemeral: None,
+        tags: None,
+    };
+    let provider = TailscaleProvider::new(config);
+
+    // This must not panic — it should return a default PeerAddr
+    let addr = provider.local_addr();
+    assert!(addr.hostname.is_empty(), "hostname should be empty before start");
+    assert!(addr.ip.is_none(), "ip should be None before start");
+    assert!(addr.dns_name.is_none(), "dns_name should be None before start");
+}
+
+/// Verify that `Bridge::local_port()` returns `Result<u16>` (not a panic) and gives a valid port.
+/// (Phase 1 audit fix: changed from `u16` to `Result<u16, NetworkError>`.)
+#[tokio::test]
+async fn test_bridge_local_port_returns_result() {
+    use super::bridge::Bridge;
+
+    let token = [0xABu8; 32];
+    let bridge = Bridge::bind(token).await.expect("bridge should bind");
+
+    // local_port() now returns Result — verify it succeeds and gives a real port
+    let port = bridge.local_port().expect("local_port should return Ok");
+    assert!(port > 0, "port should be non-zero (ephemeral port)");
+}
+
+/// Verify that BridgeHeader roundtrips correctly when request_id, remote_addr, and
+/// remote_dns_name are all empty with Outgoing direction.
+/// (Edge case: outgoing with empty remote fields — not the same as the existing
+/// empty-fields test which uses Incoming direction.)
+#[tokio::test]
+async fn test_header_write_read_roundtrip_with_empty_fields() {
+    let header = BridgeHeader {
+        session_token: test_token(),
+        direction: Direction::Outgoing,
+        service_port: 8080,
+        request_id: String::new(),
+        remote_addr: String::new(),
+        remote_dns_name: String::new(),
+    };
+
+    let mut buf = Vec::new();
+    header.write_to(&mut buf).await.unwrap();
+
+    // All variable-length fields are empty, so size = MIN_HEADER_SIZE
+    assert_eq!(buf.len(), MIN_HEADER_SIZE);
+
+    let mut cursor = Cursor::new(buf);
+    let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+    assert_eq!(header, parsed);
+
+    // Verify each field individually to catch any corruption
+    assert_eq!(parsed.direction, Direction::Outgoing);
+    assert_eq!(parsed.service_port, 8080);
+    assert!(parsed.request_id.is_empty());
+    assert!(parsed.remote_addr.is_empty());
+    assert!(parsed.remote_dns_name.is_empty());
+}
+
+/// Verify that all `NetworkError` variants produce meaningful `Display` output.
+/// (Phase 1 audit: ensure thiserror derives produce non-empty messages.)
+#[test]
+fn test_network_error_display() {
+    use crate::network::NetworkError;
+    use std::time::Duration;
+
+    let cases: Vec<(NetworkError, &str)> = vec![
+        (NetworkError::NotRunning, "not running"),
+        (NetworkError::AlreadyRunning, "already running"),
+        (NetworkError::StartFailed("oops".into()), "oops"),
+        (NetworkError::StopFailed("halt".into()), "halt"),
+        (
+            NetworkError::AuthRequired {
+                url: "https://login.tailscale.com/a/xyz".into(),
+            },
+            "https://login.tailscale.com/a/xyz",
+        ),
+        (NetworkError::DialFailed("refused".into()), "refused"),
+        (NetworkError::DialTimeout(Duration::from_secs(30)), "30"),
+        (NetworkError::ListenFailed("bind".into()), "bind"),
+        (NetworkError::PingFailed("timeout".into()), "timeout"),
+        (NetworkError::SidecarError("crash".into()), "crash"),
+        (NetworkError::BridgeError("bad header".into()), "bad header"),
+        (NetworkError::Internal("bug".into()), "bug"),
+    ];
+
+    for (error, expected_substring) in &cases {
+        let display = format!("{error}");
+        assert!(
+            !display.is_empty(),
+            "Display for {error:?} should not be empty"
+        );
+        assert!(
+            display.contains(expected_substring),
+            "Display for {error:?} should contain '{expected_substring}', got: '{display}'"
+        );
+    }
+
+    // Also test the Io and Serialize variants produce non-empty output
+    let io_err = NetworkError::Io(std::io::Error::new(
+        std::io::ErrorKind::ConnectionRefused,
+        "refused",
+    ));
+    let io_display = format!("{io_err}");
+    assert!(!io_display.is_empty());
+    assert!(io_display.contains("refused"), "Io display: {io_display}");
+
+    let json_err: Result<serde_json::Value, _> = serde_json::from_str("{bad json");
+    let ser_err = NetworkError::Serialize(json_err.unwrap_err());
+    let ser_display = format!("{ser_err}");
+    assert!(!ser_display.is_empty());
+}
+
 // ===== Integration tests (require real Tailscale network) =====
 
 /// Integration test: Start provider, authenticate, verify running state.
