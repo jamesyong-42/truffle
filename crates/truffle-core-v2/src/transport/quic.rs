@@ -125,7 +125,7 @@ fn build_server_config(config: &QuicConfig) -> Result<quinn::ServerConfig, Trans
 /// This is safe because Tailscale already provides mutual authentication
 /// and encryption via WireGuard. The QUIC TLS is purely for protocol compliance.
 fn build_client_config() -> Result<quinn::ClientConfig, TransportError> {
-    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
@@ -133,6 +133,9 @@ fn build_client_config() -> Result<quinn::ClientConfig, TransportError> {
     .dangerous()
     .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
     .with_no_client_auth();
+
+    // Must match the server's ALPN protocol, otherwise the TLS handshake fails.
+    tls_config.alpn_protocols = vec![b"truffle".to_vec()];
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
@@ -142,6 +145,8 @@ fn build_client_config() -> Result<quinn::ClientConfig, TransportError> {
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_concurrent_bidi_streams(100u32.into());
     transport_config.max_concurrent_uni_streams(0u32.into());
+    // Keep-alive to prevent idle timeouts during tests and real usage
+    transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
     client_config.transport_config(Arc::new(transport_config));
 
     Ok(client_config)
