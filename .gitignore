@@ -31,3 +31,5 @@ docs/.vitepress/cache/
 .idea/
 .vscode/
 *.swp
+sidecar-slim-linux
+test-sidecar

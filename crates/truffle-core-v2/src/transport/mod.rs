@@ -208,6 +208,11 @@ impl DatagramSocket {
         let (n, addr) = self.socket.recv_from(buf).await.map_err(TransportError::Io)?;
         Ok((n, addr.to_string()))
     }
+
+    /// Return the local address this socket is bound to.
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr, TransportError> {
+        self.socket.local_addr().map_err(TransportError::Io)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +240,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+// Re-export transport configurations from submodules.
+pub use quic::QuicConfig;
+pub use udp::UdpConfig;
 
 /// Configuration for WebSocket transport.
 #[derive(Debug, Clone)]

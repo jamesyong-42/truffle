@@ -508,50 +508,294 @@ async fn tcp_transport_wraps_network_provider() {
 }
 
 // ===========================================================================
-// QUIC stub tests
+// UDP transport tests
 // ===========================================================================
 
 #[tokio::test]
-async fn quic_stream_returns_not_implemented() {
-    use crate::transport::quic::QuicTransport;
+async fn udp_send_recv() {
+    use crate::transport::udp::{UdpConfig, UdpTransport};
 
-    let provider = Arc::new(MockNetworkProvider::new("quic-test"));
-    let quic = QuicTransport::new(provider);
+    let provider = Arc::new(MockNetworkProvider::new("udp-test"));
+    let udp = UdpTransport::new(provider, UdpConfig::default());
 
-    let addr = PeerAddr {
+    // Bind two sockets on ephemeral ports
+    let socket_a = udp.bind(0).await.unwrap();
+    let socket_b = udp.bind(0).await.unwrap();
+
+    // Use 127.0.0.1 with the assigned port (local_addr may return 0.0.0.0)
+    let port_a = socket_a.local_addr().unwrap().port();
+    let port_b = socket_b.local_addr().unwrap().port();
+    let addr_a = format!("127.0.0.1:{port_a}");
+    let addr_b = format!("127.0.0.1:{port_b}");
+
+    // Send from A to B
+    let msg = b"hello udp";
+    let sent = socket_a.send_to(msg, &addr_b).await.unwrap();
+    assert_eq!(sent, msg.len());
+
+    // Receive on B
+    let mut buf = [0u8; 1024];
+    let (n, sender) = socket_b.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], msg);
+    assert_eq!(sender, addr_a);
+}
+
+#[tokio::test]
+async fn udp_large_datagram() {
+    use crate::transport::udp::{UdpConfig, UdpTransport};
+
+    let provider = Arc::new(MockNetworkProvider::new("udp-large"));
+    let udp = UdpTransport::new(provider, UdpConfig::default());
+
+    let socket_a = udp.bind(0).await.unwrap();
+    let socket_b = udp.bind(0).await.unwrap();
+
+    let port_b = socket_b.local_addr().unwrap().port();
+    let addr_b = format!("127.0.0.1:{port_b}");
+
+    // MTU-sized payload (~1400 bytes, typical for Ethernet minus headers)
+    let payload: Vec<u8> = (0..1400).map(|i| (i % 256) as u8).collect();
+
+    let sent = socket_a.send_to(&payload, &addr_b).await.unwrap();
+    assert_eq!(sent, payload.len());
+
+    let mut buf = [0u8; 2048];
+    let (n, _sender) = socket_b.recv_from(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], &payload[..]);
+}
+
+// ===========================================================================
+// QUIC transport tests
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_connect_and_handshake() {
+    use crate::transport::quic::{QuicConfig, QuicTransport};
+
+    let server_provider = Arc::new(MockNetworkProvider::new("quic-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("quic-client"));
+
+    // Use port 0 so the OS assigns an ephemeral port
+    let server_config = QuicConfig {
+        port: 0,
+        max_streams: 100,
+    };
+
+    let server_quic = QuicTransport::new(server_provider, server_config);
+    let mut listener = server_quic.listen().await.unwrap();
+    let actual_port = listener.port;
+    assert_ne!(actual_port, 0, "should have been assigned a real port");
+
+    // Client config uses the actual port from the server listener
+    let client_config = QuicConfig {
+        port: actual_port,
+        max_streams: 100,
+    };
+
+    let client_quic = QuicTransport::new(client_provider, client_config);
+    let peer_addr = PeerAddr {
         ip: Some("127.0.0.1".parse().unwrap()),
         hostname: "localhost".to_string(),
         dns_name: None,
     };
 
-    // StreamTransport
-    let result = quic.connect(&addr).await;
-    assert!(matches!(result, Err(TransportError::NotImplemented(_))));
+    // Connect client and accept on server concurrently
+    let (client_result, server_stream) = tokio::join!(
+        client_quic.connect(&peer_addr),
+        async { listener.accept().await }
+    );
 
-    let result = StreamTransport::listen(&quic).await;
-    assert!(matches!(result, Err(TransportError::NotImplemented(_))));
+    let client_stream = client_result.expect("client connect should succeed");
+    let server_stream = server_stream.expect("server should accept a connection");
 
-    // RawTransport
-    let result = RawTransport::open(&quic, &addr, 8080).await;
-    assert!(matches!(result, Err(TransportError::NotImplemented(_))));
+    // Verify peer IDs from handshake
+    assert_eq!(client_stream.remote_peer_id(), "quic-server");
+    assert_eq!(server_stream.remote_peer_id(), "quic-client");
 
-    let result = RawTransport::listen(&quic, 8080).await;
-    assert!(matches!(result, Err(TransportError::NotImplemented(_))));
+    // Verify peer addresses are non-empty
+    assert!(!client_stream.peer_addr().is_empty());
+    assert!(!server_stream.peer_addr().is_empty());
 }
 
-// ===========================================================================
-// UDP stub tests
-// ===========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_send_recv() {
+    use crate::transport::quic::{QuicConfig, QuicTransport};
+
+    let server_provider = Arc::new(MockNetworkProvider::new("quic-send-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("quic-send-client"));
+
+    let server_config = QuicConfig {
+        port: 0,
+        max_streams: 100,
+    };
+
+    let server_quic = QuicTransport::new(server_provider, server_config);
+    let mut listener = server_quic.listen().await.unwrap();
+    let actual_port = listener.port;
+
+    let client_config = QuicConfig {
+        port: actual_port,
+        max_streams: 100,
+    };
+
+    let client_quic = QuicTransport::new(client_provider, client_config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(
+        client_quic.connect(&peer_addr),
+        async { listener.accept().await }
+    );
+
+    let mut client_stream = client_result.unwrap();
+    let mut server_stream = server_stream.unwrap();
+
+    // Client sends, server receives
+    let msg = b"hello from quic client";
+    client_stream.send(msg).await.unwrap();
+
+    let received = server_stream.recv().await.unwrap().expect("should receive message");
+    assert_eq!(received, msg);
+
+    // Server sends, client receives
+    let reply = b"hello from quic server";
+    server_stream.send(reply).await.unwrap();
+
+    let received = client_stream.recv().await.unwrap().expect("should receive reply");
+    assert_eq!(received, reply);
+
+    // Clean close
+    client_stream.close().await.unwrap();
+    server_stream.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quic_bidirectional() {
+    use crate::transport::quic::{QuicConfig, QuicTransport};
+
+    let server_provider = Arc::new(MockNetworkProvider::new("quic-bidi-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("quic-bidi-client"));
+
+    let server_config = QuicConfig {
+        port: 0,
+        max_streams: 100,
+    };
+
+    let server_quic = QuicTransport::new(server_provider, server_config);
+    let mut listener = server_quic.listen().await.unwrap();
+    let actual_port = listener.port;
+
+    let client_config = QuicConfig {
+        port: actual_port,
+        max_streams: 100,
+    };
+
+    let client_quic = QuicTransport::new(client_provider, client_config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(
+        client_quic.connect(&peer_addr),
+        async { listener.accept().await }
+    );
+
+    let mut client_stream = client_result.unwrap();
+    let mut server_stream = server_stream.unwrap();
+
+    // Test various binary payloads bidirectionally
+    let test_cases: Vec<Vec<u8>> = vec![
+        vec![],                                  // empty
+        vec![0x00],                              // single null byte
+        vec![0xFF; 1024],                        // 1KB of 0xFF
+        (0..=255).map(|b| b as u8).collect(),    // all byte values
+        b"utf8 text as binary".to_vec(),
+    ];
+
+    for payload in &test_cases {
+        // Client -> Server
+        client_stream.send(payload).await.unwrap();
+        let received = server_stream.recv().await.unwrap().expect("should receive");
+        assert_eq!(
+            &received, payload,
+            "client->server roundtrip failed for payload of len {}",
+            payload.len()
+        );
+
+        // Server -> Client
+        server_stream.send(payload).await.unwrap();
+        let received = client_stream.recv().await.unwrap().expect("should receive");
+        assert_eq!(
+            &received, payload,
+            "server->client roundtrip failed for payload of len {}",
+            payload.len()
+        );
+    }
+
+    client_stream.close().await.unwrap();
+    server_stream.close().await.unwrap();
+}
 
 #[tokio::test]
-async fn udp_returns_not_implemented() {
-    use crate::transport::udp::UdpTransport;
+async fn quic_multiple_sequential_messages() {
+    use crate::transport::quic::{QuicConfig, QuicTransport};
 
-    let provider = Arc::new(MockNetworkProvider::new("udp-test"));
-    let udp = UdpTransport::new(provider);
+    let server_provider = Arc::new(MockNetworkProvider::new("quic-multi-server"));
+    let client_provider = Arc::new(MockNetworkProvider::new("quic-multi-client"));
 
-    let result = udp.bind(9000).await;
-    assert!(matches!(result, Err(TransportError::NotImplemented(_))));
+    let server_config = QuicConfig {
+        port: 0,
+        max_streams: 100,
+    };
+
+    let server_quic = QuicTransport::new(server_provider, server_config);
+    let mut listener = server_quic.listen().await.unwrap();
+    let actual_port = listener.port;
+
+    let client_config = QuicConfig {
+        port: actual_port,
+        max_streams: 100,
+    };
+
+    let client_quic = QuicTransport::new(client_provider, client_config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(
+        client_quic.connect(&peer_addr),
+        async { listener.accept().await }
+    );
+
+    let mut client_stream = client_result.unwrap();
+    let mut server_stream = server_stream.unwrap();
+
+    // Send 50 messages rapidly and verify ordering
+    let count = 50;
+    for i in 0..count {
+        let msg = format!("message-{i}");
+        client_stream.send(msg.as_bytes()).await.unwrap();
+    }
+
+    for i in 0..count {
+        let received = server_stream.recv().await.unwrap().expect("should receive");
+        let expected = format!("message-{i}");
+        assert_eq!(
+            received,
+            expected.as_bytes(),
+            "message ordering broken at index {i}"
+        );
+    }
+
+    client_stream.close().await.unwrap();
+    server_stream.close().await.unwrap();
 }
 
 // ===========================================================================
