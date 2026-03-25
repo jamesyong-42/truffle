@@ -802,11 +802,13 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		listenAddr := fmt.Sprintf("%s:%d", tsIP, d.Port)
 
 		// Bind tsnet PacketConn
+		log.Printf("UDP relay: calling ListenPacket(%q, %q)", "udp", listenAddr)
 		tsnetPC, err := s.server.ListenPacket("udp", listenAddr)
 		if err != nil {
 			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("ListenPacket %s: %v", listenAddr, err))
 			return
 		}
+		log.Printf("UDP relay: ListenPacket succeeded, local addr = %v", tsnetPC.LocalAddr())
 
 		// Bind local relay UDP socket on ephemeral port
 		localPC, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -839,6 +841,21 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		})
 
 		log.Printf("UDP relay started: tsnet %s <-> 127.0.0.1:%d", listenAddr, localPort)
+
+		// Self-test: verify the tsnet PacketConn can send to itself.
+		// This catches misconfigurations early (wrong address format, etc).
+		// Use the actual bound address from LocalAddr so ephemeral port 0 works.
+		go func() {
+			selfAddr := tsnetPC.LocalAddr()
+			testPayload := []byte("truffle-udp-selftest")
+			log.Printf("UDP relay self-test: sending %d bytes to self at %v", len(testPayload), selfAddr)
+			nw, werr := tsnetPC.WriteTo(testPayload, selfAddr)
+			if werr != nil {
+				log.Printf("UDP relay self-test: WriteTo FAILED: %v", werr)
+			} else {
+				log.Printf("UDP relay self-test: WriteTo sent %d bytes to self OK", nw)
+			}
+		}()
 
 		// We need to track the Rust peer's address so we can relay inbound packets to it.
 		// The Rust side "connects" its UDP socket to our local relay, so we learn its
@@ -931,6 +948,12 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 
 			if prevRustAddr == nil {
 				log.Printf("UDP relay: learned Rust peer address: %v", senderAddr)
+			}
+
+			// Check for registration packet — learn address but don't forward
+			if n >= 20 && string(buf[:20]) == "TRUFFLE_UDP_REGISTER" {
+				log.Printf("UDP relay: registration packet from Rust at %v", senderAddr)
+				continue
 			}
 
 			if n < 6 {

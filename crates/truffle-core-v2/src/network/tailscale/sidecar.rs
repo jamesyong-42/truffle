@@ -132,6 +132,31 @@ impl GoSidecar {
                 NetworkError::SidecarError("failed to capture stdin".into())
             })?;
 
+            // Forward sidecar stderr so Go log.Printf output is visible.
+            if let Some(stderr) = child_proc.stderr.take() {
+                let stderr_shutdown = shutdown.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stderr).lines();
+                    loop {
+                        tokio::select! {
+                            _ = stderr_shutdown.notified() => break,
+                            result = reader.next_line() => {
+                                match result {
+                                    Ok(Some(line)) => {
+                                        eprintln!("[sidecar-stderr] {line}");
+                                    }
+                                    Ok(None) => break,
+                                    Err(e) => {
+                                        tracing::warn!("sidecar stderr read error: {e}");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // Spawn stdin writer task
             Self::spawn_stdin_writer(stdin, stdin_rx, shutdown.clone());
 

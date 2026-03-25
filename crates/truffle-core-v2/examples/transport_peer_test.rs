@@ -46,6 +46,16 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing so debug logs from NetworkUdpSocket are visible.
+    // Set RUST_LOG=debug (or =trace) to see detailed relay logging.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     // Parse args
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {

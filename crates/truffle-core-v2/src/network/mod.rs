@@ -284,11 +284,24 @@ impl NetworkUdpSocket {
         framed.extend_from_slice(&port.to_be_bytes());
         framed.extend_from_slice(data);
 
+        tracing::debug!(
+            target_addr = %addr,
+            payload_len = data.len(),
+            framed_len = framed.len(),
+            relay_addr = ?self.inner.peer_addr().ok(),
+            "NetworkUdpSocket: sending framed datagram to relay"
+        );
+
         let n = self
             .inner
             .send(&framed)
             .await
             .map_err(NetworkError::Io)?;
+
+        tracing::debug!(
+            bytes_sent = n,
+            "NetworkUdpSocket: framed datagram sent to relay"
+        );
 
         // Return the number of payload bytes sent (subtract header)
         Ok(n.saturating_sub(UDP_ADDR_HEADER_SIZE))
@@ -298,6 +311,8 @@ impl NetworkUdpSocket {
     ///
     /// The relay prepends a 6-byte address header to each inbound datagram.
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), NetworkError> {
+        tracing::debug!("NetworkUdpSocket: waiting for inbound datagram from relay...");
+
         // Read into a temporary buffer that includes space for the header
         let mut tmp = vec![0u8; UDP_ADDR_HEADER_SIZE + buf.len()];
         let n = self
@@ -320,6 +335,13 @@ impl NetworkUdpSocket {
         // Copy payload to caller's buffer
         let payload_len = n - UDP_ADDR_HEADER_SIZE;
         buf[..payload_len].copy_from_slice(&tmp[UDP_ADDR_HEADER_SIZE..n]);
+
+        tracing::debug!(
+            raw_bytes = n,
+            payload_len = payload_len,
+            sender_addr = %addr,
+            "NetworkUdpSocket: received inbound datagram from relay"
+        );
 
         Ok((payload_len, addr))
     }

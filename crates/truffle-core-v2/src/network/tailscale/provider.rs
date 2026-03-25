@@ -794,10 +794,26 @@ impl super::super::NetworkProvider for TailscaleProvider {
                 ))
             })?;
 
+        let rust_local_addr = local_socket.local_addr().map_err(|e| {
+            NetworkError::Internal(format!("failed to get local UDP addr: {e}"))
+        })?;
+
+        // Send a registration packet so the relay learns our address.
+        // Without this, the relay drops inbound packets because it doesn't
+        // know where to forward them (it learns the Rust peer address from
+        // the first outbound packet).
+        local_socket
+            .send(b"TRUFFLE_UDP_REGISTER")
+            .await
+            .map_err(|e| {
+                NetworkError::Internal(format!("failed to send UDP registration: {e}"))
+            })?;
+
         tracing::info!(
             tsnet_port = port,
-            local_port = local_port,
-            "UDP socket bound via tsnet relay"
+            relay_port = local_port,
+            rust_local_addr = %rust_local_addr,
+            "UDP socket bound via tsnet relay (registered)"
         );
 
         Ok(super::super::NetworkUdpSocket::new(local_socket, port))
