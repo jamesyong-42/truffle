@@ -434,6 +434,23 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// - [`SessionError::ConnectFailed`] if the WS connection cannot be established
     /// - [`SessionError::SendFailed`] if the send operation fails
     pub async fn send(&self, peer_id: &str, data: &[u8]) -> Result<(), SessionError> {
+        // 0. Resolve peer_id: accept either the Tailscale node ID or the
+        //    peer name (hostname).  This mirrors Node::ping() which also
+        //    searches by both id and name.
+        let peer_id = {
+            let map = self.peers.read().await;
+            if map.contains_key(peer_id) {
+                peer_id.to_string()
+            } else {
+                // Fall back to searching by name
+                map.values()
+                    .find(|p| p.name == peer_id)
+                    .map(|p| p.id.clone())
+                    .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))?
+            }
+        };
+        let peer_id = peer_id.as_str();
+
         // 1. Look up peer in the registry
         let peer_addr = {
             let map = self.peers.read().await;

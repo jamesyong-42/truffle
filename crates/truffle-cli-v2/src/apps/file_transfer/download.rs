@@ -32,6 +32,13 @@ pub async fn download<N: NetworkProvider + 'static>(
     let token = uuid::Uuid::new_v4().to_string();
     let requester_id = node.local_info().id;
 
+    // 0. Resolve peer_id to the canonical Tailscale node ID.
+    let peer_id = node
+        .resolve_peer_id(peer_id)
+        .await
+        .map_err(|e| TransferError::Node(e.to_string()))?;
+    let peer_id = peer_id.as_str();
+
     // 1. Send PULL_REQUEST
     let pull_req = FtMessage::PullRequest {
         path: remote_path.to_string(),

@@ -29,6 +29,14 @@ pub async fn upload<N: NetworkProvider + 'static>(
 ) -> Result<TransferResult, TransferError> {
     let start = Instant::now();
 
+    // 0. Resolve peer_id to the canonical Tailscale node ID.
+    //    The CLI may pass either the peer name or the node ID.
+    let peer_id = node
+        .resolve_peer_id(peer_id)
+        .await
+        .map_err(|e| TransferError::Node(e.to_string()))?;
+    let peer_id = peer_id.as_str();
+
     // 1. Read and hash the file
     info!(path = local_path, "Hashing file");
     let file_data = tokio::fs::read(local_path)

@@ -44,6 +44,7 @@ pub(crate) enum SidecarInternalEvent {
         hostname: String,
         dns_name: String,
         tailscale_ip: String,
+        node_id: String,
     },
     /// Sidecar stopped.
     Stopped,
@@ -315,6 +316,7 @@ impl GoSidecar {
                             hostname: data.hostname,
                             dns_name: data.dns_name,
                             tailscale_ip: data.tailscale_ip,
+                            node_id: data.node_id,
                         })
                     } else if data.state == "error" {
                         Some(SidecarInternalEvent::Error {

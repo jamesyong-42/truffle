@@ -151,6 +151,9 @@ pub(crate) struct StatusEventData {
     pub dns_name: String,
     #[serde(default, alias = "tailscaleIP")]
     pub tailscale_ip: String,
+    /// Tailscale stable node ID (e.g. "nv8m2uw7se11CNTRL").
+    #[serde(default)]
+    pub node_id: String,
     #[serde(default)]
     pub error: String,
 }

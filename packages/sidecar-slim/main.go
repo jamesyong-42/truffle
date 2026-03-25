@@ -81,6 +81,7 @@ type statusData struct {
 	Hostname    string `json:"hostname,omitempty"`
 	DNSName     string `json:"dnsName,omitempty"`
 	TailscaleIP string `json:"tailscaleIP,omitempty"`
+	NodeID      string `json:"nodeId,omitempty"`
 	Error       string `json:"error,omitempty"`
 }
 
@@ -428,6 +429,7 @@ func (s *shim) waitForRunning(hostname string) {
 				ip = status.TailscaleIPs[0].String()
 			}
 			dnsName := strings.TrimSuffix(status.Self.DNSName, ".")
+			nodeID := string(status.Self.ID)
 
 			s.sendStatus("running", hostname, dnsName, ip, "")
 			s.sendEvent("tsnet:started", statusData{
@@ -435,11 +437,14 @@ func (s *shim) waitForRunning(hostname string) {
 				Hostname:    hostname,
 				DNSName:     dnsName,
 				TailscaleIP: ip,
+				NodeID:      nodeID,
 			})
 
-			// Start listeners
+			// Start the TLS listener (:443) for HTTPS connections.
+			// NOTE: We do NOT start the TCP listener on :9417 here.
+			// The Rust session layer starts it dynamically via tsnet:listen
+			// to avoid double-bind conflicts with the dynamic listener.
 			go s.listenTLS(lc)
-			go s.listenTCP(lc)
 
 			// Start background state monitor
 			go s.monitorState(lc)
@@ -696,20 +701,27 @@ func (s *shim) handleListen(data json.RawMessage) {
 			return
 		}
 
+		// Resolve the actual port (important when d.Port is 0 and the OS
+		// assigns an ephemeral port).
+		actualPort := d.Port
+		if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+			actualPort = uint16(tcpAddr.Port)
+		}
+
 		s.dynamicListenerMu.Lock()
-		s.dynamicListeners[d.Port] = ln
+		s.dynamicListeners[actualPort] = ln
 		s.dynamicListenerMu.Unlock()
 
 		// Also track in the main listener list for cleanup on stop
 		s.trackListener(ln)
 
-		s.sendEvent("tsnet:listening", listeningData{Port: d.Port})
+		s.sendEvent("tsnet:listening", listeningData{Port: actualPort})
 
 		proto := "TCP"
 		if d.TLS {
 			proto = "TLS"
 		}
-		log.Printf("listening %s on :%d (dynamic)", proto, d.Port)
+		log.Printf("listening %s on :%d (dynamic, requested :%d)", proto, actualPort, d.Port)
 
 		for {
 			conn, err := ln.Accept()

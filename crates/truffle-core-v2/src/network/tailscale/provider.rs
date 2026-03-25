@@ -187,6 +187,7 @@ impl TailscaleProvider {
                                 hostname,
                                 dns_name,
                                 tailscale_ip,
+                                node_id,
                             } => {
                                 let ip: Option<IpAddr> = tailscale_ip.parse().ok();
 
@@ -196,6 +197,9 @@ impl TailscaleProvider {
                                     id.dns_name = Some(dns_name.clone());
                                     id.name = hostname.clone();
                                     id.ip = ip;
+                                    if !node_id.is_empty() {
+                                        id.id = node_id;
+                                    }
                                 }
 
                                 {
@@ -608,9 +612,6 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Create channel for incoming connections
         let (tx, rx) = mpsc::channel::<IncomingConnection>(64);
 
-        // Register the channel with the bridge
-        bridge.register_listener(port, tx).await;
-
         // Scope the sidecar lock: subscribe + send listen, then release
         let mut event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
@@ -623,12 +624,16 @@ impl super::super::NetworkProvider for TailscaleProvider {
             event_rx
         };
 
-        // Wait for confirmation or error
-        let confirmation = tokio::time::timeout(Duration::from_secs(10), async {
+        // Wait for confirmation or error.
+        // When port is 0, the sidecar assigns an ephemeral port and reports
+        // the actual port in the Listening event.
+        let actual_port = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match event_rx.recv().await {
-                    Ok(SidecarInternalEvent::Listening { port: p }) if p == port => {
-                        return Ok(());
+                    Ok(SidecarInternalEvent::Listening { port: p })
+                        if port == 0 || p == port =>
+                    {
+                        return Ok(p);
                     }
                     Ok(SidecarInternalEvent::Error { code, message }) => {
                         return Err(NetworkError::ListenFailed(format!("[{code}] {message}")));
@@ -641,11 +646,12 @@ impl super::super::NetworkProvider for TailscaleProvider {
             }
         })
         .await
-        .map_err(|_| NetworkError::ListenFailed("listen confirmation timed out".into()))?;
+        .map_err(|_| NetworkError::ListenFailed("listen confirmation timed out".into()))??;
 
-        confirmation?;
+        // Register the channel with the bridge using the actual port
+        bridge.register_listener(actual_port, tx).await;
 
-        Ok(NetworkTcpListener { port, incoming: rx })
+        Ok(NetworkTcpListener { port: actual_port, incoming: rx })
     }
 
     async fn unlisten_tcp(&self, port: u16) -> Result<(), NetworkError> {

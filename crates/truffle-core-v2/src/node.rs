@@ -325,6 +325,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
         self.session.on_peer_change()
     }
 
+    /// Resolve a peer identifier (name or Tailscale ID) to the canonical
+    /// Tailscale stable node ID.
+    ///
+    /// Returns the input unchanged if it already matches a peer's `id`.
+    /// Falls back to searching by `name` (hostname).
+    pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
+        let peers = self.session.peers().await;
+        peers
+            .iter()
+            .find(|p| p.id == peer_id || p.name == peer_id)
+            .map(|p| p.id.clone())
+            .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))
+    }
+
     // ── Diagnostics ──────────────────────────────────────────────────────
 
     /// Ping a peer via the network layer.
@@ -362,10 +376,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
         namespace: &str,
         data: &[u8],
     ) -> Result<(), NodeError> {
+        // If the data is valid UTF-8 JSON, parse it into a proper JSON value
+        // so the receiver gets a structured object rather than an array of
+        // byte values.  This is critical for the file transfer protocol and
+        // any other protocol that serializes structs to JSON bytes before
+        // calling send().
+        let payload = std::str::from_utf8(data)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .unwrap_or_else(|| serde_json::Value::from(data.to_vec()));
+
         let envelope = Envelope::new(
             namespace,
             "message",
-            serde_json::Value::from(data.to_vec()),
+            payload,
         )
         .with_timestamp();
 
@@ -379,10 +403,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Only peers with active WebSocket connections receive the broadcast.
     /// No lazy connections are established.
     pub async fn broadcast(&self, namespace: &str, data: &[u8]) {
+        let payload = std::str::from_utf8(data)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .unwrap_or_else(|| serde_json::Value::from(data.to_vec()));
+
         let envelope = Envelope::new(
             namespace,
             "message",
-            serde_json::Value::from(data.to_vec()),
+            payload,
         )
         .with_timestamp();
 

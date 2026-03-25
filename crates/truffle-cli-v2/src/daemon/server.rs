@@ -70,8 +70,17 @@ impl DaemonServer {
 
         // Build the Node — this is the ONLY thing we need.
         // No FileTransferManager, no BridgeManager, no DialFn, no axum.
+        //
+        // Ensure the tsnet hostname starts with "truffle-" so that other
+        // truffle nodes recognise this peer (the peer-discovery filter in
+        // TailscaleProvider::is_truffle_peer checks for this prefix).
+        let tsnet_hostname = if config.node.name.starts_with("truffle-") {
+            config.node.name.clone()
+        } else {
+            format!("truffle-{}", config.node.name)
+        };
         let mut builder = Node::<TailscaleProvider>::builder()
-            .name(&config.node.name)
+            .name(&tsnet_hostname)
             .sidecar_path(&sidecar_path)
             .state_dir(&state_dir)
             .ws_port(9417);
