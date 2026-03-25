@@ -865,6 +865,8 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 					continue
 				}
 
+				log.Printf("UDP relay inbound: %d bytes from %v", n, remoteAddr)
+
 				// Parse remote address to get IP and port for the header
 				udpAddr, ok := remoteAddr.(*net.UDPAddr)
 				if !ok {
@@ -893,6 +895,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 					continue
 				}
 
+				log.Printf("UDP relay inbound: forwarding %d framed bytes to Rust at %v", len(framed), ra)
 				if _, err := localPC.WriteTo(framed, ra); err != nil {
 					if relayCtx.Err() != nil {
 						return
@@ -922,8 +925,13 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 
 			// Remember the Rust peer's address
 			rustAddrMu.Lock()
+			prevRustAddr := rustAddr
 			rustAddr = senderAddr
 			rustAddrMu.Unlock()
+
+			if prevRustAddr == nil {
+				log.Printf("UDP relay: learned Rust peer address: %v", senderAddr)
+			}
 
 			if n < 6 {
 				log.Printf("UDP relay: outbound packet too short (%d bytes)", n)
@@ -931,16 +939,25 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			}
 
 			// Parse header: [4-byte IPv4][2-byte port BE][payload]
-			targetIP := net.IPv4(buf[0], buf[1], buf[2], buf[3])
+			// IMPORTANT: Use a raw 4-byte net.IP slice instead of net.IPv4()
+			// which returns a 16-byte IPv4-mapped IPv6 address (::ffff:x.x.x.x).
+			// gvisor's gonet.UDPConn.WriteTo passes the IP to tcpip.AddrFromSlice
+			// which treats 16-byte IPs as IPv6. Since our tsnet PacketConn is
+			// bound as udp4, writing to an IPv6 dest would fail silently or
+			// produce a network-unreachable error.
+			targetIP := net.IP(append([]byte(nil), buf[0:4]...))
 			targetPort := binary.BigEndian.Uint16(buf[4:6])
 			payload := buf[6:n]
 
 			targetAddr := &net.UDPAddr{IP: targetIP, Port: int(targetPort)}
+			log.Printf("UDP relay outbound: %d payload bytes -> %v (IP len=%d, raw IP=%x)", len(payload), targetAddr, len(targetIP), []byte(targetIP))
 			if _, err := tsnetPC.WriteTo(payload, targetAddr); err != nil {
 				if relayCtx.Err() != nil {
 					return
 				}
 				log.Printf("UDP relay tsnet write error to %v: %v", targetAddr, err)
+			} else {
+				log.Printf("UDP relay outbound: sent %d bytes to %v OK", len(payload), targetAddr)
 			}
 		}
 	}()
