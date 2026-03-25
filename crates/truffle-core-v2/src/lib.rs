@@ -4,25 +4,35 @@
 //!
 //! This crate implements the layered architecture described in RFC 012:
 //! - **Layer 3 (Network)**: Peer discovery, addressing, encrypted tunnels via Tailscale
-//! - **Layer 4 (Transport)**: WebSocket, TCP, QUIC protocol transports (future phases)
+//! - **Layer 4 (Transport)**: WebSocket, TCP, QUIC protocol transports
 //! - **Layer 5 (Session)**: Peer registry, connection lifecycle (future phases)
 //! - **Layer 6 (Envelope)**: Namespace-based message framing (future phases)
 //!
-//! ## Phase 1: Layer 3 — Network
+//! ## Layer 3 — Network
 //!
-//! The [`NetworkProvider`] trait defines a generic interface for peer discovery
-//! and raw connectivity. The [`TailscaleProvider`] implementation wraps the Go
-//! sidecar (tsnet) to provide encrypted Tailscale tunnels.
+//! The [`NetworkProvider`](network::NetworkProvider) trait defines a generic interface for peer
+//! discovery and raw connectivity. The [`TailscaleProvider`](network::tailscale::TailscaleProvider)
+//! implementation wraps the Go sidecar (tsnet) to provide encrypted Tailscale tunnels.
+//!
+//! ## Layer 4 — Transport
+//!
+//! Three transport trait families sit on top of Layer 3:
+//!
+//! - [`StreamTransport`](transport::StreamTransport) + [`FramedStream`](transport::FramedStream):
+//!   Message-oriented bidirectional connections (WebSocket, future QUIC streams).
+//! - [`RawTransport`](transport::RawTransport): Raw byte streams (TCP).
+//! - [`DatagramTransport`](transport::DatagramTransport): Unreliable datagrams (future UDP/QUIC).
 //!
 //! ```ignore
-//! use truffle_core_v2::network::{NetworkProvider, TailscaleProvider, TailscaleConfig};
+//! use std::sync::Arc;
+//! use truffle_core_v2::transport::{StreamTransport, FramedStream, WsConfig};
+//! use truffle_core_v2::transport::websocket::WebSocketTransport;
 //!
-//! let config = TailscaleConfig { /* ... */ };
-//! let mut provider = TailscaleProvider::new(config);
-//! provider.start().await?;
-//!
-//! let peers = provider.peers().await;
-//! let stream = provider.dial_tcp("peer.tailnet.ts.net", 9417).await?;
+//! let ws = WebSocketTransport::new(network_provider, WsConfig::default());
+//! let mut stream = ws.connect(&peer_addr).await?;
+//! stream.send(b"hello").await?;
+//! let reply = stream.recv().await?;
 //! ```
 
 pub mod network;
+pub mod transport;

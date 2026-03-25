@@ -20,6 +20,8 @@ getrandom = "0.2"
 subtle = "2"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", features = ["sink"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

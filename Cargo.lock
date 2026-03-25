@@ -4551,6 +4551,7 @@ dependencies = [
 name = "truffle-core-v2"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "getrandom 0.2.17",
  "hex",
  "serde",
@@ -4558,6 +4559,7 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "uuid",
