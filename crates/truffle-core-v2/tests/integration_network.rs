@@ -256,6 +256,9 @@ async fn test_peer_events() {
             NetworkPeerEvent::Updated(peer) => {
                 println!("    ~ Updated: {} (ip={}, online={})", peer.hostname, peer.ip, peer.online);
             }
+            NetworkPeerEvent::AuthRequired { url } => {
+                println!("    ! Auth required: {url}");
+            }
         }
     }
 

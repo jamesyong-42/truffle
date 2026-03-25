@@ -220,12 +220,11 @@ impl TailscaleProvider {
                             }
                             SidecarInternalEvent::AuthRequired { auth_url } => {
                                 tracing::info!("tailscale auth required: {auth_url}");
-                                // If start() is still waiting, report the auth requirement
-                                if let Some(tx) = started_tx.take() {
-                                    let _ = tx.send(Err(NetworkError::AuthRequired {
-                                        url: auth_url,
-                                    }));
-                                }
+                                // Emit auth URL via peer events so callers can display it.
+                                // Do NOT consume started_tx — keep waiting for Running state.
+                                let _ = peer_event_tx.send(NetworkPeerEvent::AuthRequired {
+                                    url: auth_url,
+                                });
                             }
                             SidecarInternalEvent::Stopped => {
                                 *state.write().await = ProviderState::Stopped;
@@ -428,10 +427,16 @@ impl super::super::NetworkProvider for TailscaleProvider {
 
         *self.sidecar.lock().await = Some(sidecar);
 
-        // Wait for the sidecar to reach "running" state or report an error
-        let result = tokio::time::timeout(Duration::from_secs(60), started_rx)
+        // Wait for the sidecar to reach "running" state.
+        // Use a generous timeout (5 min) because browser auth may take a while.
+        // Auth URLs are emitted via peer_events() so the caller can display them.
+        let auth_timeout = Duration::from_secs(300);
+        let result = tokio::time::timeout(auth_timeout, started_rx)
             .await
-            .map_err(|_| NetworkError::StartFailed("start timed out after 60s".into()))?
+            .map_err(|_| NetworkError::StartFailed(
+                "timed out waiting for authentication (5 min). \
+                 Subscribe to peer_events() to display auth URLs.".into()
+            ))?
             .map_err(|_| NetworkError::StartFailed("start signal channel dropped".into()))?;
 
         match result {

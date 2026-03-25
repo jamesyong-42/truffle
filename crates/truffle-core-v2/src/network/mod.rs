@@ -34,8 +34,16 @@ use tokio::sync::broadcast;
 pub trait NetworkProvider: Send + Sync {
     /// Start the network provider.
     ///
-    /// This may spawn child processes, bind ports, and perform authentication.
-    /// Returns when the provider is ready to accept connections.
+    /// This spawns child processes, binds ports, and performs authentication.
+    /// If authentication is required (e.g., Tailscale browser auth), the provider
+    /// emits `NetworkPeerEvent::AuthRequired { url }` via `peer_events()` and
+    /// **keeps waiting** until auth completes or the timeout is reached.
+    ///
+    /// Callers should subscribe to `peer_events()` BEFORE calling `start()` to
+    /// receive auth URLs and display them to the user.
+    ///
+    /// Returns `Ok(())` when the provider is fully online, or `Err` if auth
+    /// times out or a fatal error occurs.
     async fn start(&mut self) -> Result<(), NetworkError>;
 
     /// Stop the network provider and clean up all resources.
@@ -140,6 +148,13 @@ pub enum NetworkPeerEvent {
     Left(String),
     /// A peer's metadata changed (IP, relay, online status, etc.).
     Updated(NetworkPeer),
+    /// Authentication is required. The URL should be shown to the user.
+    /// Emitted during `start()` — the provider keeps waiting for auth to complete.
+    /// May be emitted multiple times if the URL expires and is refreshed.
+    AuthRequired {
+        /// URL the user should open in a browser.
+        url: String,
+    },
 }
 
 /// Network address of a peer.
