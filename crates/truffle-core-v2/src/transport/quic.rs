@@ -28,6 +28,19 @@
 //! - **recv**: read 4-byte length prefix, then read that many bytes
 //!
 //! This is simpler than WebSocket framing and well-suited for binary data.
+//!
+//! # tsnet support
+//!
+//! When connected to a [`NetworkProvider`] that supports UDP (e.g.,
+//! [`TailscaleProvider`](crate::network::tailscale::TailscaleProvider)),
+//! the transport uses [`TsnetUdpSocket`](super::quic_socket::TsnetUdpSocket)
+//! to route QUIC datagrams through the tsnet relay instead of creating
+//! a direct host-network socket. This enables QUIC over userspace Tailscale
+//! (tsnet) where the host UDP socket cannot reach peers.
+//!
+//! When no network provider UDP support is available (e.g., loopback tests
+//! with a mock provider), the transport falls back to quinn's default
+//! host-network sockets.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +55,7 @@ use super::{
     resolve_dial_addr, FramedStream, Handshake, StreamListener, StreamTransport, TransportError,
     PROTOCOL_VERSION,
 };
+use super::quic_socket::TsnetUdpSocket;
 
 /// Handshake timeout — maximum time to wait for QUIC handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -242,6 +256,98 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
             protocol_version: PROTOCOL_VERSION,
         }
     }
+
+    /// Try to create a QUIC client endpoint backed by a [`TsnetUdpSocket`].
+    ///
+    /// Binds a UDP socket through the network provider and wraps it in a
+    /// `TsnetUdpSocket` for quinn. Returns the configured `Endpoint`.
+    ///
+    /// Returns `Err` if the network provider does not support UDP
+    /// (e.g., mock providers in tests).
+    async fn try_create_tsnet_client_endpoint(
+        &self,
+        client_config: &quinn::ClientConfig,
+    ) -> Result<quinn::Endpoint, TransportError> {
+        // Bind on port 0 (ephemeral) for the client
+        let net_socket = self.network.bind_udp(0).await.map_err(|e| {
+            TransportError::ConnectFailed(format!("bind_udp for tsnet client: {e}"))
+        })?;
+
+        let tsnet_port = net_socket.tsnet_port();
+        let local_ip = self.network.local_addr().ip.unwrap_or_else(|| {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        });
+        let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
+
+        let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
+
+        let runtime = quinn::default_runtime().ok_or_else(|| {
+            TransportError::ConnectFailed("no async runtime available for quinn".to_string())
+        })?;
+
+        let mut endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            None,
+            tsnet_socket,
+            runtime,
+        )
+        .map_err(|e| TransportError::ConnectFailed(format!("tsnet quic endpoint: {e}")))?;
+
+        endpoint.set_default_client_config(client_config.clone());
+
+        tracing::debug!(
+            tsnet_port,
+            tsnet_addr = %tsnet_addr,
+            "quic: created tsnet client endpoint"
+        );
+
+        Ok(endpoint)
+    }
+
+    /// Try to create a QUIC server endpoint backed by a [`TsnetUdpSocket`].
+    ///
+    /// Binds a UDP socket on the configured port through the network provider
+    /// and wraps it in a `TsnetUdpSocket` for quinn.
+    ///
+    /// Returns `(Endpoint, actual_port)` or `Err` if the provider does not
+    /// support UDP.
+    async fn try_create_tsnet_server_endpoint(
+        &self,
+        server_config: &quinn::ServerConfig,
+    ) -> Result<(quinn::Endpoint, u16), TransportError> {
+        let port = self.config.port;
+        let net_socket = self.network.bind_udp(port).await.map_err(|e| {
+            TransportError::ListenFailed(format!("bind_udp for tsnet server: {e}"))
+        })?;
+
+        let tsnet_port = net_socket.tsnet_port();
+        let local_ip = self.network.local_addr().ip.unwrap_or_else(|| {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        });
+        let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
+
+        let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
+
+        let runtime = quinn::default_runtime().ok_or_else(|| {
+            TransportError::ListenFailed("no async runtime available for quinn".to_string())
+        })?;
+
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server_config.clone()),
+            tsnet_socket,
+            runtime,
+        )
+        .map_err(|e| TransportError::ListenFailed(format!("tsnet quic endpoint: {e}")))?;
+
+        tracing::debug!(
+            tsnet_port,
+            tsnet_addr = %tsnet_addr,
+            "quic: created tsnet server endpoint"
+        );
+
+        Ok((endpoint, tsnet_port))
+    }
 }
 
 impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
@@ -251,11 +357,26 @@ impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
         let dial_addr = resolve_dial_addr(addr);
         tracing::debug!(addr = %dial_addr, port = self.config.port, "quic: dialing peer");
 
-        // Step 1: Create a QUIC client endpoint bound to an ephemeral port
+        // Step 1: Create a QUIC client endpoint.
+        // Try tsnet first (network provider UDP), fall back to direct socket.
         let client_config = build_client_config()?;
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-            .map_err(|e| TransportError::ConnectFailed(format!("create quic endpoint: {e}")))?;
-        endpoint.set_default_client_config(client_config);
+
+        let endpoint = match self.try_create_tsnet_client_endpoint(&client_config).await {
+            Ok(ep) => {
+                tracing::info!("quic: using TsnetUdpSocket for client endpoint");
+                ep
+            }
+            Err(tsnet_err) => {
+                tracing::debug!(
+                    err = %tsnet_err,
+                    "quic: tsnet client endpoint unavailable, falling back to direct socket"
+                );
+                let mut ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+                    .map_err(|e| TransportError::ConnectFailed(format!("create quic endpoint: {e}")))?;
+                ep.set_default_client_config(client_config);
+                ep
+            }
+        };
 
         // Step 2: Connect to the peer
         let remote_addr: SocketAddr = format!("{dial_addr}:{}", self.config.port)
@@ -309,18 +430,33 @@ impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
         // Step 1: Build server config with self-signed cert
         let server_config = build_server_config(&self.config)?;
 
-        // Step 2: Create server endpoint
-        let bind_addr: SocketAddr = format!("0.0.0.0:{port}")
-            .parse()
-            .map_err(|e| TransportError::ListenFailed(format!("parse bind address: {e}")))?;
+        // Step 2: Create server endpoint.
+        // Try tsnet first (network provider UDP), fall back to direct socket.
+        let (endpoint, actual_port) = match self.try_create_tsnet_server_endpoint(&server_config).await {
+            Ok((ep, p)) => {
+                tracing::info!(port = p, "quic: using TsnetUdpSocket for server endpoint");
+                (ep, p)
+            }
+            Err(tsnet_err) => {
+                tracing::debug!(
+                    err = %tsnet_err,
+                    "quic: tsnet server endpoint unavailable, falling back to direct socket"
+                );
+                let bind_addr: SocketAddr = format!("0.0.0.0:{port}")
+                    .parse()
+                    .map_err(|e| TransportError::ListenFailed(format!("parse bind address: {e}")))?;
 
-        let endpoint = quinn::Endpoint::server(server_config, bind_addr)
-            .map_err(|e| TransportError::ListenFailed(format!("quic listen: {e}")))?;
+                let ep = quinn::Endpoint::server(server_config, bind_addr)
+                    .map_err(|e| TransportError::ListenFailed(format!("quic listen: {e}")))?;
 
-        let actual_port = endpoint
-            .local_addr()
-            .map_err(|e| TransportError::ListenFailed(format!("local addr: {e}")))?
-            .port();
+                let actual = ep
+                    .local_addr()
+                    .map_err(|e| TransportError::ListenFailed(format!("local addr: {e}")))?
+                    .port();
+
+                (ep, actual)
+            }
+        };
 
         tracing::debug!(actual_port, "quic: listener bound");
 

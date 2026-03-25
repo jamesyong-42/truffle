@@ -23,6 +23,7 @@
 pub mod tcp;
 pub mod udp;
 pub mod quic;
+pub mod quic_socket;
 pub mod websocket;
 
 #[cfg(test)]

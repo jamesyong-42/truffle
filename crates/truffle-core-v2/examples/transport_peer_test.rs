@@ -266,14 +266,13 @@ async fn run_server() {
     });
 
     // --- QUIC echo server ---
-    // QUIC is SKIPPED in tsnet mode: quinn creates its own UDP endpoint on the
-    // host network, which is not routed through the tsnet sidecar. Binding the
-    // QUIC listener on the server side still works (it listens on 0.0.0.0) but
-    // clients using tsnet cannot reach it. We still start it so that system-
-    // Tailscale clients can test QUIC if desired.
+    // QUIC now uses TsnetUdpSocket when a network provider is available.
+    // The QuicTransport automatically binds via NetworkProvider::bind_udp()
+    // and wraps the socket in TsnetUdpSocket so that datagrams route through
+    // the tsnet relay instead of the host network.
     match QuicTransport::new(provider.clone(), QuicConfig { port: QUIC_PORT, ..QuicConfig::default() }).listen().await {
         Ok(mut quic_listener) => {
-            eprintln!("[server] QUIC listening on port {QUIC_PORT} (note: requires system Tailscale, not tsnet)");
+            eprintln!("[server] QUIC listening on port {QUIC_PORT} (via TsnetUdpSocket)");
             tokio::spawn(async move {
                 loop {
                     match quic_listener.accept().await {
@@ -496,18 +495,48 @@ async fn run_client(server_ip: &str) {
     }
 
     // --- Test C: QUIC ---
-    // SKIP: QUIC creates its own UDP endpoint via quinn which binds directly
-    // on the host network, not through tsnet. For QUIC to work over Tailscale's
-    // userspace networking (tsnet/sidecar), quinn would need custom socket
-    // integration via quinn::Endpoint::new_with_abstract_socket() to route
-    // through the tsnet relay. This is significant integration work.
-    //
-    // QUIC works fine when using the system Tailscale client (which captures
-    // all traffic at the OS level), but not over tsnet.
-    {
-        let skip_msg = "SKIP - QUIC over tsnet requires custom quinn socket integration (not routed through sidecar)";
-        eprintln!("[test/quic] {skip_msg}");
-        results.push(("QUIC", true, skip_msg.to_string()));
+    // QUIC now uses TsnetUdpSocket which routes datagrams through the tsnet
+    // relay. The QuicTransport automatically creates a TsnetUdpSocket-backed
+    // endpoint when NetworkProvider::bind_udp() is available.
+    eprintln!("[test/quic] Connecting to {server_ip}:{QUIC_PORT} via TsnetUdpSocket...");
+    let quic_result = tokio::time::timeout(TEST_TIMEOUT, async {
+        let quic_config = QuicConfig {
+            port: QUIC_PORT,
+            ..QuicConfig::default()
+        };
+        let quic_transport = QuicTransport::new(provider.clone(), quic_config);
+        let mut stream = quic_transport.connect(&peer_addr).await
+            .map_err(|e| format!("connect failed: {e}"))?;
+
+        let msg = b"hello quic";
+        stream.send(msg).await.map_err(|e| format!("send failed: {e}"))?;
+
+        let reply = stream.recv().await.map_err(|e| format!("recv failed: {e}"))?
+            .ok_or_else(|| "stream closed before reply".to_string())?;
+
+        let reply_str = String::from_utf8_lossy(&reply).to_string();
+        stream.close().await.ok(); // best-effort close
+
+        if reply_str == "hello quic" {
+            Ok(format!("echoed {} bytes correctly", reply.len()))
+        } else {
+            Err(format!("expected 'hello quic', got '{reply_str}'"))
+        }
+    }).await;
+
+    match quic_result {
+        Ok(Ok(detail)) => {
+            eprintln!("[test/quic] PASS - {detail}");
+            results.push(("QUIC", true, detail));
+        }
+        Ok(Err(e)) => {
+            eprintln!("[test/quic] FAIL - {e}");
+            results.push(("QUIC", false, e));
+        }
+        Err(_) => {
+            eprintln!("[test/quic] FAIL - timeout after {TEST_TIMEOUT:?}");
+            results.push(("QUIC", false, format!("timeout after {TEST_TIMEOUT:?}")));
+        }
     }
 
     // --- Test D: UDP ---
