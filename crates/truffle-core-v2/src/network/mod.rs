@@ -42,10 +42,18 @@ pub trait NetworkProvider: Send + Sync {
     async fn stop(&mut self) -> Result<(), NetworkError>;
 
     /// Local node's identity (stable ID, hostname, display name).
-    fn local_identity(&self) -> &NodeIdentity;
+    ///
+    /// Returns a clone of the current cached identity. The identity is
+    /// populated after [`start()`](Self::start) completes and may be
+    /// updated when the sidecar reports `tsnet:status`.
+    fn local_identity(&self) -> NodeIdentity;
 
     /// Local node's network address.
-    fn local_addr(&self) -> &PeerAddr;
+    ///
+    /// Returns a clone of the current cached address. The address is
+    /// populated after [`start()`](Self::start) completes and may be
+    /// updated when the sidecar reports `tsnet:status`.
+    fn local_addr(&self) -> PeerAddr;
 
     // ── Discovery (event-driven, NOT polling) ──
 
@@ -75,6 +83,12 @@ pub trait NetworkProvider: Send + Sync {
 
     /// Stop listening on a previously opened port.
     async fn unlisten_tcp(&self, port: u16) -> Result<(), NetworkError>;
+
+    /// Bind a UDP socket on a port via the network tunnel.
+    ///
+    /// Not all providers support UDP. Returns [`NetworkError::Internal`] if
+    /// the provider has not implemented UDP transport yet.
+    async fn bind_udp(&self, port: u16) -> Result<tokio::net::UdpSocket, NetworkError>;
 
     // ── Diagnostics ──
 

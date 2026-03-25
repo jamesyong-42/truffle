@@ -165,9 +165,6 @@ pub(crate) struct StateChangeEventData {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct KeyExpiringEventData {
     pub expires_at: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub expires_in_secs: i64,
 }
 
 /// Data from `tsnet:healthWarning` event.

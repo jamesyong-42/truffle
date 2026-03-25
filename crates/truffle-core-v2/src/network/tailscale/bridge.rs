@@ -72,11 +72,12 @@ impl Bridge {
     }
 
     /// Returns the local port the bridge is listening on.
-    pub fn local_port(&self) -> u16 {
-        self.listener
+    pub fn local_port(&self) -> Result<u16, NetworkError> {
+        Ok(self
+            .listener
             .local_addr()
-            .expect("bridge listener should have local addr")
-            .port()
+            .map_err(|e| NetworkError::Internal(format!("bridge listener local_addr: {e}")))?
+            .port())
     }
 
     /// Register a pending outgoing dial. Returns a receiver that will deliver

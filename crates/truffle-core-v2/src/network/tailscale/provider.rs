@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 use super::bridge::{Bridge, DIAL_TIMEOUT};
 use super::sidecar::{GoSidecar, SidecarConfig, SidecarInternalEvent};
@@ -61,9 +62,15 @@ pub struct TailscaleProvider {
     state: Arc<RwLock<ProviderState>>,
 
     /// Local node identity (populated after start).
-    identity: Arc<RwLock<NodeIdentity>>,
+    ///
+    /// Uses `std::sync::RwLock` (not tokio) so the sync trait methods
+    /// `local_identity()` and `local_addr()` can read without `.await`.
+    identity: Arc<std::sync::RwLock<NodeIdentity>>,
     /// Local node address (populated after start).
-    local_addr: Arc<RwLock<PeerAddr>>,
+    ///
+    /// Uses `std::sync::RwLock` (not tokio) so the sync trait method
+    /// `local_addr()` can read without `.await`.
+    local_addr: Arc<std::sync::RwLock<PeerAddr>>,
 
     /// Cached peer list.
     peers: Arc<RwLock<HashMap<String, NetworkPeer>>>,
@@ -85,10 +92,6 @@ pub struct TailscaleProvider {
 
     /// Session token (32 bytes, generated on start).
     session_token: Arc<RwLock<[u8; 32]>>,
-
-    /// Auth URL receiver for blocking start() during auth.
-    #[allow(dead_code)]
-    auth_url: Arc<Mutex<Option<String>>>,
 }
 
 impl TailscaleProvider {
@@ -101,8 +104,8 @@ impl TailscaleProvider {
         Self {
             config,
             state: Arc::new(RwLock::new(ProviderState::Stopped)),
-            identity: Arc::new(RwLock::new(NodeIdentity::default())),
-            local_addr: Arc::new(RwLock::new(PeerAddr::default())),
+            identity: Arc::new(std::sync::RwLock::new(NodeIdentity::default())),
+            local_addr: Arc::new(std::sync::RwLock::new(PeerAddr::default())),
             peers: Arc::new(RwLock::new(HashMap::new())),
             peer_event_tx,
             health: Arc::new(RwLock::new(HealthInfo {
@@ -114,7 +117,6 @@ impl TailscaleProvider {
             bridge: Arc::new(Mutex::new(None)),
             bridge_shutdown_tx: Arc::new(Mutex::new(None)),
             session_token: Arc::new(RwLock::new([0u8; 32])),
-            auth_url: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -169,8 +171,8 @@ impl TailscaleProvider {
         peers: Arc<RwLock<HashMap<String, NetworkPeer>>>,
         peer_event_tx: broadcast::Sender<NetworkPeerEvent>,
         health: Arc<RwLock<HealthInfo>>,
-        identity: Arc<RwLock<NodeIdentity>>,
-        local_addr: Arc<RwLock<PeerAddr>>,
+        identity: Arc<std::sync::RwLock<NodeIdentity>>,
+        local_addr: Arc<std::sync::RwLock<PeerAddr>>,
         state: Arc<RwLock<ProviderState>>,
         started_tx: Option<oneshot::Sender<Result<(), NetworkError>>>,
     ) {
@@ -189,7 +191,7 @@ impl TailscaleProvider {
                                 let ip: Option<IpAddr> = tailscale_ip.parse().ok();
 
                                 {
-                                    let mut id = identity.write().await;
+                                    let mut id = identity.write().unwrap();
                                     id.hostname = hostname.clone();
                                     id.dns_name = Some(dns_name.clone());
                                     id.name = hostname.clone();
@@ -197,7 +199,7 @@ impl TailscaleProvider {
                                 }
 
                                 {
-                                    let mut addr = local_addr.write().await;
+                                    let mut addr = local_addr.write().unwrap();
                                     addr.hostname = hostname;
                                     addr.dns_name = Some(dns_name);
                                     addr.ip = ip;
@@ -374,7 +376,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
 
         // Start the bridge
         let bridge = Bridge::bind(token).await?;
-        let bridge_port = bridge.local_port();
+        let bridge_port = bridge.local_port()?;
         let bridge = Arc::new(bridge);
 
         // Create bridge shutdown channel
@@ -475,23 +477,12 @@ impl super::super::NetworkProvider for TailscaleProvider {
         Ok(())
     }
 
-    fn local_identity(&self) -> &NodeIdentity {
-        // We need a way to return a reference. Since identity is behind RwLock,
-        // we use a trick: leak a reference. In practice, callers should use
-        // an async version. For the trait, we provide a best-effort approach.
-        //
-        // NOTE: This is a design limitation of the sync trait method.
-        // A real implementation might use a separate sync cache.
-        // For now, we return a static default and update it asynchronously.
-        //
-        // TODO: Revisit this when building Layer 5 — may need to change trait signature.
-        static DEFAULT: std::sync::OnceLock<NodeIdentity> = std::sync::OnceLock::new();
-        DEFAULT.get_or_init(NodeIdentity::default)
+    fn local_identity(&self) -> NodeIdentity {
+        self.identity.read().unwrap().clone()
     }
 
-    fn local_addr(&self) -> &PeerAddr {
-        static DEFAULT: std::sync::OnceLock<PeerAddr> = std::sync::OnceLock::new();
-        DEFAULT.get_or_init(PeerAddr::default)
+    fn local_addr(&self) -> PeerAddr {
+        self.local_addr.read().unwrap().clone()
     }
 
     fn peer_events(&self) -> broadcast::Receiver<NetworkPeerEvent> {
@@ -545,10 +536,12 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // connection back. If the sidecar reports a failure, we get that via
         // the event channel and abort early.
         let result = tokio::time::timeout(DIAL_TIMEOUT, async {
-            // Spawn a task to watch for dial failure events
+            // Spawn a task to watch for dial failure events.
+            // We keep the JoinHandle so we can abort it once the select resolves,
+            // preventing an orphaned task that would loop forever.
             let fail_request_id = request_id.clone();
             let (fail_tx, fail_rx) = oneshot::channel::<String>();
-            tokio::spawn(async move {
+            let fail_watcher: JoinHandle<()> = tokio::spawn(async move {
                 loop {
                     match event_rx.recv().await {
                         Ok(SidecarInternalEvent::DialFailed { request_id: rid, error })
@@ -566,7 +559,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
                 }
             });
 
-            tokio::select! {
+            let result = tokio::select! {
                 stream_result = dial_rx => {
                     stream_result.map_err(|_| NetworkError::DialFailed("dial cancelled".into()))
                 }
@@ -574,7 +567,12 @@ impl super::super::NetworkProvider for TailscaleProvider {
                     let error = fail_result.unwrap_or_else(|_| "dial watcher dropped".to_string());
                     Err(NetworkError::DialFailed(error))
                 }
-            }
+            };
+
+            // Cancel the fail-watcher task so it doesn't leak
+            fail_watcher.abort();
+
+            result
         })
         .await
         .map_err(|_| NetworkError::DialTimeout(DIAL_TIMEOUT))?;
@@ -729,19 +727,29 @@ impl super::super::NetworkProvider for TailscaleProvider {
         result
     }
 
+    async fn bind_udp(&self, _port: u16) -> Result<tokio::net::UdpSocket, NetworkError> {
+        Err(NetworkError::Internal("UDP not yet implemented".into()))
+    }
+
     async fn health(&self) -> HealthInfo {
         self.health.read().await.clone()
     }
 }
 
 impl TailscaleProvider {
-    /// Get the local identity asynchronously (since the trait method is sync).
+    /// Get the local identity (convenience alias — same as the trait method).
+    ///
+    /// Retained for backwards compatibility with existing callers that used
+    /// the old async version.
     pub async fn local_identity_async(&self) -> NodeIdentity {
-        self.identity.read().await.clone()
+        self.identity.read().unwrap().clone()
     }
 
-    /// Get the local address asynchronously (since the trait method is sync).
+    /// Get the local address (convenience alias — same as the trait method).
+    ///
+    /// Retained for backwards compatibility with existing callers that used
+    /// the old async version.
     pub async fn local_addr_async(&self) -> PeerAddr {
-        self.local_addr.read().await.clone()
+        self.local_addr.read().unwrap().clone()
     }
 }

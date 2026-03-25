@@ -102,10 +102,6 @@ pub(crate) enum HeaderError {
         source: std::string::FromUtf8Error,
     },
 
-    #[error("session token mismatch")]
-    #[allow(dead_code)]
-    TokenMismatch,
-
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
