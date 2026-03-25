@@ -732,8 +732,75 @@ impl super::super::NetworkProvider for TailscaleProvider {
         result
     }
 
-    async fn bind_udp(&self, _port: u16) -> Result<tokio::net::UdpSocket, NetworkError> {
-        Err(NetworkError::Internal("UDP not yet implemented".into()))
+    async fn bind_udp(&self, port: u16) -> Result<super::super::NetworkUdpSocket, NetworkError> {
+        if *self.state.read().await != ProviderState::Running {
+            return Err(NetworkError::NotRunning);
+        }
+
+        // Scope the sidecar lock: subscribe + send listenPacket, then release
+        let mut event_rx = {
+            let sidecar_guard = self.sidecar.lock().await;
+            let sidecar = sidecar_guard
+                .as_ref()
+                .ok_or(NetworkError::NotRunning)?;
+
+            let event_rx = sidecar.subscribe();
+            sidecar.send_listen_packet(port).await?;
+            event_rx
+        };
+
+        // Wait for the sidecar to report the local relay port
+        let local_port = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(SidecarInternalEvent::ListeningPacket {
+                        port: p,
+                        local_port,
+                    }) if p == port => {
+                        return Ok(local_port);
+                    }
+                    Ok(SidecarInternalEvent::Error { code, message }) => {
+                        return Err(NetworkError::ListenFailed(format!(
+                            "UDP bind failed [{code}] {message}"
+                        )));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(NetworkError::SidecarError(
+                            "event channel closed".into(),
+                        ));
+                    }
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            NetworkError::ListenFailed("UDP listenPacket confirmation timed out".into())
+        })??;
+
+        // Bind a local UDP socket and connect it to the relay
+        let local_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| {
+                NetworkError::Internal(format!("failed to bind local UDP socket: {e}"))
+            })?;
+
+        local_socket
+            .connect(format!("127.0.0.1:{local_port}"))
+            .await
+            .map_err(|e| {
+                NetworkError::Internal(format!(
+                    "failed to connect local UDP socket to relay: {e}"
+                ))
+            })?;
+
+        tracing::info!(
+            tsnet_port = port,
+            local_port = local_port,
+            "UDP socket bound via tsnet relay"
+        );
+
+        Ok(super::super::NetworkUdpSocket::new(local_socket, port))
     }
 
     async fn health(&self) -> HealthInfo {

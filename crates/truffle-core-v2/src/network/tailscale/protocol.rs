@@ -78,6 +78,13 @@ pub(crate) struct WatchPeersCommandData {
     pub include_all: Option<bool>,
 }
 
+/// Data payload for `tsnet:listenPacket`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListenPacketCommandData {
+    pub port: u16,
+}
+
 // ---------------------------------------------------------------------------
 // Well-known command type strings
 // ---------------------------------------------------------------------------
@@ -91,6 +98,7 @@ pub(crate) mod command_type {
     pub const UNLISTEN: &str = "tsnet:unlisten";
     pub const PING: &str = "tsnet:ping";
     pub const WATCH_PEERS: &str = "tsnet:watchPeers";
+    pub const LISTEN_PACKET: &str = "tsnet:listenPacket";
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +133,7 @@ pub(crate) mod event_type {
     pub const UNLISTENED: &str = "tsnet:unlistened";
     pub const PING_RESULT: &str = "tsnet:pingResult";
     pub const PEER_CHANGED: &str = "tsnet:peerChanged";
+    pub const LISTENING_PACKET: &str = "tsnet:listeningPacket";
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +244,16 @@ pub(crate) struct ListeningEventData {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UnlistenedEventData {
     pub port: u16,
+}
+
+/// Data from `tsnet:listeningPacket` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListeningPacketEventData {
+    /// The tsnet-bound port (the one requested by Rust).
+    pub port: u16,
+    /// The local relay port that Rust should send/recv datagrams to/from.
+    pub local_port: u16,
 }
 
 /// Data from `tsnet:pingResult` event.
@@ -460,5 +479,27 @@ mod tests {
         let event: SidecarEvent = serde_json::from_str(json).unwrap();
         let data: HealthWarningEventData = serde_json::from_value(event.data).unwrap();
         assert_eq!(data.warnings.len(), 2);
+    }
+
+    #[test]
+    fn serialize_listen_packet_command() {
+        let data = ListenPacketCommandData { port: 19420 };
+        let cmd = SidecarCommand {
+            command: command_type::LISTEN_PACKET,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"tsnet:listenPacket\""));
+        assert!(json.contains("\"port\":19420"));
+    }
+
+    #[test]
+    fn deserialize_listening_packet_event() {
+        let json = r#"{"event":"tsnet:listeningPacket","data":{"port":19420,"localPort":54321}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "tsnet:listeningPacket");
+        let data: ListeningPacketEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.port, 19420);
+        assert_eq!(data.local_port, 54321);
     }
 }

@@ -116,6 +116,11 @@ pub trait RawTransport: Send + Sync {
 ///
 /// Used for: real-time video/audio, game state synchronization.
 /// Implementations: UDP, QUIC datagrams (future).
+///
+/// When backed by a [`NetworkProvider`](crate::network::NetworkProvider) that
+/// supports UDP (e.g., `TailscaleProvider`), the transport delegates to
+/// `NetworkProvider::bind_udp` and wraps the returned [`NetworkUdpSocket`]
+/// in a [`DatagramSocket`].
 #[allow(async_fn_in_trait)]
 pub trait DatagramTransport: Send + Sync {
     /// Bind a datagram socket to a peer address.
@@ -188,30 +193,77 @@ pub struct RawIncoming {
 
 /// A datagram socket for sending and receiving unreliable packets.
 ///
-/// Wraps a `tokio::net::UdpSocket` with a convenience API.
-pub struct DatagramSocket {
-    /// The underlying UDP socket.
-    pub socket: tokio::net::UdpSocket,
+/// Supports two modes:
+/// - **Direct**: Wraps a `tokio::net::UdpSocket` for loopback/LAN use.
+/// - **Network**: Wraps a [`NetworkUdpSocket`](crate::network::NetworkUdpSocket)
+///   for Tailscale relay-based UDP.
+pub enum DatagramSocket {
+    /// A direct UDP socket (loopback / LAN).
+    Direct {
+        /// The underlying UDP socket.
+        socket: tokio::net::UdpSocket,
+    },
+    /// A network-relayed UDP socket (Tailscale tsnet).
+    Network {
+        /// The network UDP socket with address-framed relay.
+        socket: crate::network::NetworkUdpSocket,
+    },
 }
 
 impl DatagramSocket {
+    /// Create a direct datagram socket from a tokio UdpSocket.
+    pub fn direct(socket: tokio::net::UdpSocket) -> Self {
+        Self::Direct { socket }
+    }
+
+    /// Create a network-relayed datagram socket from a NetworkUdpSocket.
+    pub fn network(socket: crate::network::NetworkUdpSocket) -> Self {
+        Self::Network { socket }
+    }
+
     /// Send a datagram to the specified address.
     pub async fn send_to(&self, data: &[u8], addr: &str) -> Result<usize, TransportError> {
-        self.socket
-            .send_to(data, addr)
-            .await
-            .map_err(TransportError::Io)
+        match self {
+            Self::Direct { socket } => {
+                socket.send_to(data, addr).await.map_err(TransportError::Io)
+            }
+            Self::Network { socket } => {
+                let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| {
+                    TransportError::ConnectFailed(format!("invalid address '{addr}': {e}"))
+                })?;
+                socket
+                    .send_to(data, sock_addr)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            }
+        }
     }
 
     /// Receive a datagram, returning the data and sender address.
     pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, String), TransportError> {
-        let (n, addr) = self.socket.recv_from(buf).await.map_err(TransportError::Io)?;
-        Ok((n, addr.to_string()))
+        match self {
+            Self::Direct { socket } => {
+                let (n, addr) = socket.recv_from(buf).await.map_err(TransportError::Io)?;
+                Ok((n, addr.to_string()))
+            }
+            Self::Network { socket } => {
+                let (n, addr) = socket
+                    .recv_from(buf)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                Ok((n, addr.to_string()))
+            }
+        }
     }
 
     /// Return the local address this socket is bound to.
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, TransportError> {
-        self.socket.local_addr().map_err(TransportError::Io)
+        match self {
+            Self::Direct { socket } => socket.local_addr().map_err(TransportError::Io),
+            Self::Network { socket } => socket
+                .local_addr()
+                .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))),
+        }
     }
 }
 

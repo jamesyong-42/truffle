@@ -6,15 +6,10 @@
 //!
 //! # Binding
 //!
-//! `UdpTransport::bind(port)` creates a [`DatagramSocket`] bound to
-//! `0.0.0.0:{port}`. When `port` is 0 the OS assigns an ephemeral port.
-//!
-//! # TODO
-//!
-//! Once `NetworkProvider::bind_udp` is implemented for `TailscaleProvider`,
-//! this transport should delegate to it instead of binding directly via
-//! `tokio::net::UdpSocket`. For now, binding to `0.0.0.0` works for both
-//! loopback testing and local-network scenarios.
+//! `UdpTransport::bind(port)` first attempts to delegate to
+//! [`NetworkProvider::bind_udp`] for relay-based UDP (e.g., tsnet). If the
+//! provider does not support UDP, it falls back to binding directly via
+//! `tokio::net::UdpSocket` on `0.0.0.0:{port}`.
 
 use std::sync::Arc;
 
@@ -45,9 +40,9 @@ impl Default for UdpConfig {
 
 /// UDP [`DatagramTransport`] implementation.
 ///
-/// Generic over the [`NetworkProvider`] type `N`. Currently binds directly
-/// via `tokio::net::UdpSocket` since most `NetworkProvider` implementations
-/// do not yet support `bind_udp`.
+/// Generic over the [`NetworkProvider`] type `N`. Attempts to use the provider's
+/// `bind_udp` for network-relayed UDP (Tailscale tsnet). Falls back to direct
+/// `tokio::net::UdpSocket` binding when the provider does not support UDP.
 ///
 /// # Example
 ///
@@ -61,10 +56,6 @@ impl Default for UdpConfig {
 /// ```
 pub struct UdpTransport<N: NetworkProvider> {
     /// Layer 3 network provider.
-    ///
-    /// TODO: Use `network.bind_udp(port)` once TailscaleProvider supports it.
-    /// For now we bind directly to 0.0.0.0.
-    #[allow(dead_code)]
     network: Arc<N>,
     /// UDP configuration.
     #[allow(dead_code)]
@@ -80,20 +71,50 @@ impl<N: NetworkProvider + 'static> UdpTransport<N> {
 
 impl<N: NetworkProvider + 'static> DatagramTransport for UdpTransport<N> {
     async fn bind(&self, port: u16) -> Result<DatagramSocket, TransportError> {
-        let bind_addr = format!("0.0.0.0:{port}");
-        tracing::debug!(addr = %bind_addr, "udp: binding socket");
+        // Try network provider first (e.g., Tailscale tsnet relay)
+        match self.network.bind_udp(port).await {
+            Ok(network_socket) => {
+                tracing::debug!(
+                    port = port,
+                    tsnet_port = network_socket.tsnet_port(),
+                    "udp: bound via network provider"
+                );
+                return Ok(DatagramSocket::network(network_socket));
+            }
+            Err(crate::network::NetworkError::Internal(msg))
+                if msg.contains("not yet implemented") || msg.contains("not supported") =>
+            {
+                tracing::debug!(
+                    port = port,
+                    "udp: network provider does not support UDP, falling back to direct bind"
+                );
+            }
+            Err(crate::network::NetworkError::NotRunning) => {
+                tracing::debug!(
+                    port = port,
+                    "udp: network provider not running, falling back to direct bind"
+                );
+            }
+            Err(e) => {
+                return Err(TransportError::ListenFailed(format!(
+                    "udp bind via network provider: {e}"
+                )));
+            }
+        }
 
-        // TODO: Use self.network.bind_udp(port) when TailscaleProvider supports it.
-        // For now, bind directly via tokio. This works for loopback and LAN.
+        // Fallback: bind directly via tokio (loopback / LAN)
+        let bind_addr = format!("0.0.0.0:{port}");
+        tracing::debug!(addr = %bind_addr, "udp: binding socket directly");
+
         let socket = tokio::net::UdpSocket::bind(&bind_addr)
             .await
             .map_err(|e| TransportError::ListenFailed(format!("udp bind {bind_addr}: {e}")))?;
 
         let local_addr = socket
             .local_addr()
-            .map_err(|e| TransportError::Io(e))?;
-        tracing::debug!(local_addr = %local_addr, "udp: socket bound");
+            .map_err(TransportError::Io)?;
+        tracing::debug!(local_addr = %local_addr, "udp: socket bound directly");
 
-        Ok(DatagramSocket { socket })
+        Ok(DatagramSocket::direct(socket))
     }
 }

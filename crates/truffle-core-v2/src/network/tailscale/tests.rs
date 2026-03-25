@@ -433,10 +433,10 @@ fn truffle_hostnames_accepted() {
 
 // ===== Phase 1 audit fix tests =====
 
-/// Verify that `bind_udp()` returns `NetworkError::Internal` with "not yet implemented"
-/// rather than panicking. (Phase 1 audit fix: graceful error instead of todo!())
+/// Verify that `bind_udp()` returns `NetworkError::NotRunning` when provider not started.
+/// The provider must be running to send commands to the sidecar.
 #[tokio::test]
-async fn test_bind_udp_returns_not_implemented() {
+async fn test_bind_udp_returns_not_running() {
     use super::provider::{TailscaleConfig, TailscaleProvider};
     use crate::network::NetworkProvider;
 
@@ -453,15 +453,9 @@ async fn test_bind_udp_returns_not_implemented() {
     let result = provider.bind_udp(1234).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
-    let msg = format!("{err}");
     assert!(
-        msg.contains("not yet implemented") || msg.contains("UDP"),
-        "expected 'not yet implemented' message, got: {msg}"
-    );
-    // Ensure it's the Internal variant specifically
-    assert!(
-        matches!(err, crate::network::NetworkError::Internal(_)),
-        "expected NetworkError::Internal, got: {err:?}"
+        matches!(err, crate::network::NetworkError::NotRunning),
+        "expected NetworkError::NotRunning, got: {err:?}"
     );
 }
 
@@ -614,6 +608,139 @@ fn test_network_error_display() {
     let ser_err = NetworkError::Serialize(json_err.unwrap_err());
     let ser_display = format!("{ser_err}");
     assert!(!ser_display.is_empty());
+}
+
+// ===== NetworkUdpSocket framing tests =====
+
+/// Verify that NetworkUdpSocket send_to/recv_from correctly frames and unframes
+/// address headers through a loopback UDP relay.
+#[tokio::test]
+async fn test_network_udp_socket_framing_roundtrip() {
+    use crate::network::NetworkUdpSocket;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    // Create a "relay" UDP socket that simulates the Go sidecar relay
+    let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+
+    // Create the NetworkUdpSocket connected to the relay
+    let rust_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rust_addr = rust_socket.local_addr().unwrap();
+    rust_socket
+        .connect(relay_addr)
+        .await
+        .unwrap();
+
+    // Also connect the relay to the rust socket so send/recv work
+    relay.connect(rust_addr).await.unwrap();
+
+    let net_socket = NetworkUdpSocket::new(rust_socket, 19420);
+
+    // Test send_to: Rust -> relay (verify framing)
+    let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)), 9999);
+    let payload = b"hello from rust";
+    net_socket.send_to(payload, target_addr).await.unwrap();
+
+    // Relay receives the framed packet
+    let mut buf = [0u8; 1024];
+    let n = relay.recv(&mut buf).await.unwrap();
+    assert_eq!(n, 6 + payload.len()); // 6-byte header + payload
+
+    // Verify the header
+    assert_eq!(&buf[0..4], &[100, 64, 0, 5]); // IPv4 octets
+    assert_eq!(&buf[4..6], &9999u16.to_be_bytes()); // port BE
+    assert_eq!(&buf[6..n], payload);
+
+    // Test recv_from: relay -> Rust (verify unframing)
+    let sender_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7)), 8888);
+    let reply = b"reply from peer";
+    let mut framed = Vec::new();
+    framed.extend_from_slice(&Ipv4Addr::new(100, 64, 0, 7).octets());
+    framed.extend_from_slice(&8888u16.to_be_bytes());
+    framed.extend_from_slice(reply);
+    relay.send(&framed).await.unwrap();
+
+    let mut recv_buf = [0u8; 1024];
+    let (n, from_addr) = net_socket.recv_from(&mut recv_buf).await.unwrap();
+    assert_eq!(n, reply.len());
+    assert_eq!(&recv_buf[..n], reply);
+    assert_eq!(from_addr, sender_addr);
+}
+
+/// Verify that NetworkUdpSocket rejects IPv6 addresses.
+#[tokio::test]
+async fn test_network_udp_socket_rejects_ipv6() {
+    use crate::network::NetworkUdpSocket;
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+    let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+
+    let rust_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    rust_socket.connect(relay_addr).await.unwrap();
+
+    let net_socket = NetworkUdpSocket::new(rust_socket, 19420);
+
+    let ipv6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1234);
+    let result = net_socket.send_to(b"test", ipv6_addr).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("IPv6"), "expected IPv6 error, got: {msg}");
+}
+
+/// Verify that recv_from rejects packets that are too short.
+#[tokio::test]
+async fn test_network_udp_socket_short_packet() {
+    use crate::network::NetworkUdpSocket;
+
+    let relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+
+    let rust_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rust_addr = rust_socket.local_addr().unwrap();
+    rust_socket.connect(relay_addr).await.unwrap();
+    relay.connect(rust_addr).await.unwrap();
+
+    let net_socket = NetworkUdpSocket::new(rust_socket, 19420);
+
+    // Send a packet that's too short for the address header
+    relay.send(&[1, 2, 3]).await.unwrap();
+
+    let mut buf = [0u8; 1024];
+    let result = net_socket.recv_from(&mut buf).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("too short"), "expected 'too short' error, got: {msg}");
+}
+
+/// Verify that the sidecar ListeningPacket event is correctly mapped.
+#[test]
+fn test_sidecar_listening_packet_event_deserialization() {
+    use super::protocol::{SidecarEvent, ListeningPacketEventData, event_type};
+
+    let json = r#"{"event":"tsnet:listeningPacket","data":{"port":19420,"localPort":54321}}"#;
+    let event: SidecarEvent = serde_json::from_str(json).unwrap();
+    assert_eq!(event.event, event_type::LISTENING_PACKET);
+    let data: ListeningPacketEventData = serde_json::from_value(event.data).unwrap();
+    assert_eq!(data.port, 19420);
+    assert_eq!(data.local_port, 54321);
+}
+
+/// Verify that the sidecar ListenPacket command serializes correctly.
+#[test]
+fn test_sidecar_listen_packet_command_serialization() {
+    use super::protocol::{SidecarCommand, ListenPacketCommandData, command_type};
+
+    let data = ListenPacketCommandData { port: 19420 };
+    let cmd = SidecarCommand {
+        command: command_type::LISTEN_PACKET,
+        data: Some(serde_json::to_value(&data).unwrap()),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    assert!(json.contains("\"command\":\"tsnet:listenPacket\""));
+    assert!(json.contains("\"port\":19420"));
 }
 
 // ===== Integration tests (require real Tailscale network) =====

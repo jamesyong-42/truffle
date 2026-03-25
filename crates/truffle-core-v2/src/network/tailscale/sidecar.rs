@@ -71,6 +71,8 @@ pub(crate) enum SidecarInternalEvent {
     /// Unlistened from a port.
     #[allow(dead_code)]
     Unlistened { port: u16 },
+    /// UDP listening on a port succeeded. `local_port` is the localhost relay port.
+    ListeningPacket { port: u16, local_port: u16 },
     /// Ping result.
     PingResult(PingResultEventData),
     /// Error from sidecar.
@@ -364,6 +366,14 @@ impl GoSidecar {
                     .ok()
                     .map(|d| SidecarInternalEvent::Unlistened { port: d.port })
             }
+            event_type::LISTENING_PACKET => {
+                serde_json::from_value::<ListeningPacketEventData>(event.data)
+                    .ok()
+                    .map(|d| SidecarInternalEvent::ListeningPacket {
+                        port: d.port,
+                        local_port: d.local_port,
+                    })
+            }
             event_type::PING_RESULT => {
                 serde_json::from_value::<PingResultEventData>(event.data)
                     .ok()
@@ -477,6 +487,16 @@ impl GoSidecar {
         let data = PingCommandData { target, ping_type };
         self.send_command(SidecarCommand {
             command: command_type::PING,
+            data: Some(serde_json::to_value(&data)?),
+        })
+        .await
+    }
+
+    /// Send the tsnet:listenPacket command to bind a UDP socket via tsnet.
+    pub async fn send_listen_packet(&self, port: u16) -> Result<(), NetworkError> {
+        let data = ListenPacketCommandData { port };
+        self.send_command(SidecarCommand {
+            command: command_type::LISTEN_PACKET,
             data: Some(serde_json::to_value(&data)?),
         })
         .await

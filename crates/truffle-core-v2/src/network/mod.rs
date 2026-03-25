@@ -8,7 +8,7 @@
 
 pub mod tailscale;
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -94,9 +94,13 @@ pub trait NetworkProvider: Send + Sync {
 
     /// Bind a UDP socket on a port via the network tunnel.
     ///
+    /// Returns a [`NetworkUdpSocket`] that transparently relays datagrams
+    /// through the network provider. The socket supports `send_to` / `recv_from`
+    /// with full remote address information.
+    ///
     /// Not all providers support UDP. Returns [`NetworkError::Internal`] if
     /// the provider has not implemented UDP transport yet.
-    async fn bind_udp(&self, port: u16) -> Result<tokio::net::UdpSocket, NetworkError>;
+    async fn bind_udp(&self, port: u16) -> Result<NetworkUdpSocket, NetworkError>;
 
     // ── Diagnostics ──
 
@@ -229,6 +233,123 @@ pub struct IncomingConnection {
     pub remote_identity: String,
     /// Port the connection arrived on.
     pub port: u16,
+}
+
+// ---------------------------------------------------------------------------
+// NetworkUdpSocket — address-framed UDP relay wrapper
+// ---------------------------------------------------------------------------
+
+/// A UDP socket that relays datagrams through the network provider.
+///
+/// Under the hood, the Rust side talks to a local relay socket. Each outbound
+/// datagram is prefixed with a 6-byte address header (`[4-byte IPv4][2-byte port BE]`)
+/// so the relay (Go sidecar) knows where to forward the packet on the tsnet
+/// network. Inbound datagrams arrive with the same header prepended by the relay.
+///
+/// This struct hides the framing — callers use `send_to` / `recv_from` with
+/// normal `SocketAddr` values.
+pub struct NetworkUdpSocket {
+    /// The underlying tokio UDP socket connected to the local relay.
+    inner: tokio::net::UdpSocket,
+    /// The tsnet-bound port (the logical port on the Tailscale network).
+    tsnet_port: u16,
+}
+
+/// Address header size: 4 bytes IPv4 + 2 bytes port (big-endian).
+const UDP_ADDR_HEADER_SIZE: usize = 6;
+
+impl NetworkUdpSocket {
+    /// Create a new `NetworkUdpSocket` from a tokio UdpSocket and the tsnet port.
+    pub(crate) fn new(inner: tokio::net::UdpSocket, tsnet_port: u16) -> Self {
+        Self { inner, tsnet_port }
+    }
+
+    /// Send a datagram to the specified address via the relay.
+    ///
+    /// The relay will forward the datagram to the target on the tsnet network.
+    pub async fn send_to(&self, data: &[u8], addr: SocketAddr) -> Result<usize, NetworkError> {
+        let ip = match addr.ip() {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => {
+                return Err(NetworkError::Internal(
+                    "NetworkUdpSocket: IPv6 not supported in relay framing".into(),
+                ));
+            }
+        };
+        let port = addr.port();
+
+        // Build framed packet: [4-byte IPv4][2-byte port BE][payload]
+        let mut framed = Vec::with_capacity(UDP_ADDR_HEADER_SIZE + data.len());
+        framed.extend_from_slice(&ip.octets());
+        framed.extend_from_slice(&port.to_be_bytes());
+        framed.extend_from_slice(data);
+
+        let n = self
+            .inner
+            .send(&framed)
+            .await
+            .map_err(NetworkError::Io)?;
+
+        // Return the number of payload bytes sent (subtract header)
+        Ok(n.saturating_sub(UDP_ADDR_HEADER_SIZE))
+    }
+
+    /// Receive a datagram from the relay, returning the payload and sender address.
+    ///
+    /// The relay prepends a 6-byte address header to each inbound datagram.
+    pub async fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), NetworkError> {
+        // Read into a temporary buffer that includes space for the header
+        let mut tmp = vec![0u8; UDP_ADDR_HEADER_SIZE + buf.len()];
+        let n = self
+            .inner
+            .recv(&mut tmp)
+            .await
+            .map_err(NetworkError::Io)?;
+
+        if n < UDP_ADDR_HEADER_SIZE {
+            return Err(NetworkError::Internal(
+                "NetworkUdpSocket: received packet too short for address header".into(),
+            ));
+        }
+
+        // Parse address header
+        let ip = Ipv4Addr::new(tmp[0], tmp[1], tmp[2], tmp[3]);
+        let port = u16::from_be_bytes([tmp[4], tmp[5]]);
+        let addr = SocketAddr::new(IpAddr::V4(ip), port);
+
+        // Copy payload to caller's buffer
+        let payload_len = n - UDP_ADDR_HEADER_SIZE;
+        buf[..payload_len].copy_from_slice(&tmp[UDP_ADDR_HEADER_SIZE..n]);
+
+        Ok((payload_len, addr))
+    }
+
+    /// Return the local address of the underlying relay socket.
+    pub fn local_addr(&self) -> Result<SocketAddr, NetworkError> {
+        self.inner.local_addr().map_err(NetworkError::Io)
+    }
+
+    /// Return the tsnet-bound port (the logical port on the Tailscale network).
+    pub fn tsnet_port(&self) -> u16 {
+        self.tsnet_port
+    }
+
+    /// Get a reference to the inner tokio UdpSocket.
+    ///
+    /// This is the socket connected to the local relay. Direct reads/writes
+    /// bypass the address framing — prefer `send_to` / `recv_from` instead.
+    pub fn inner(&self) -> &tokio::net::UdpSocket {
+        &self.inner
+    }
+}
+
+impl std::fmt::Debug for NetworkUdpSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkUdpSocket")
+            .field("tsnet_port", &self.tsnet_port)
+            .field("local_addr", &self.inner.local_addr().ok())
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

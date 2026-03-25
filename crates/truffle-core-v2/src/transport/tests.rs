@@ -123,7 +123,7 @@ impl NetworkProvider for MockNetworkProvider {
         Ok(())
     }
 
-    async fn bind_udp(&self, _port: u16) -> Result<tokio::net::UdpSocket, NetworkError> {
+    async fn bind_udp(&self, _port: u16) -> Result<crate::network::NetworkUdpSocket, NetworkError> {
         Err(NetworkError::Internal("mock: UDP not supported".into()))
     }
 
