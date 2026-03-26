@@ -101,12 +101,12 @@ cd truffle
 # Build the CLI (requires Rust toolchain)
 cargo build --release -p truffle-cli
 
-# Build the sidecar (requires Go 1.21+)
-cd sidecar && go build -o sidecar-slim ./cmd/slim
+# Build the sidecar (requires Go 1.22+)
+cd packages/sidecar-slim && go build -o sidecar-slim .
 
 # Install
 cp target/release/truffle ~/.config/truffle/bin/
-cp sidecar/sidecar-slim ~/.config/truffle/bin/
+cp packages/sidecar-slim/sidecar-slim ~/.config/truffle/bin/
 ```
 
 ## Updating

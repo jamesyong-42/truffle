@@ -1,4 +1,8 @@
-# MessageBus
+# MessageBus (Legacy)
+
+::: warning
+This documents the **old Node.js API**. In v2, namespace-based messaging is handled by `Node::send()`, `Node::broadcast()`, and `Node::subscribe()` in Rust. See the [Architecture guide](/guide/architecture#node-api-public-entry-point).
+:::
 
 The message bus provides namespace-based pub/sub messaging across devices.
 

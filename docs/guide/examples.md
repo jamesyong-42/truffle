@@ -46,6 +46,10 @@ truffle proxy server:5432
 
 ## Library Examples
 
+::: warning
+The library examples below use the **old Node.js API** (`createMeshNode`, `@vibecook/truffle-mesh`). The NAPI-RS bindings have not yet been updated to the v2 architecture (RFC 012). Use the CLI for now.
+:::
+
 The `examples/` directory contains working examples demonstrating programmatic usage with the Rust/Node.js library.
 
 ### Device Discovery

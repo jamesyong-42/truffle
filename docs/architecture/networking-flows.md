@@ -1,7 +1,9 @@
-# Truffle Networking Architecture: Complete Flow Analysis
+# Truffle Networking Architecture: Complete Flow Analysis (v1 — Archived)
 
-> Generated from exhaustive source code analysis. All file paths are absolute.
-> Line numbers refer to the state of the codebase at the time of analysis.
+> **This document describes the OLD v1 architecture (pre-RFC 012).** The entire codebase was rebuilt with a clean 7-layer design in RFC 012. For the current architecture, see the [Architecture guide](/guide/architecture).
+
+> Generated from exhaustive source code analysis of the v1 codebase. All file paths are absolute.
+> Line numbers refer to the state of the v1 codebase at the time of analysis.
 
 ---
 

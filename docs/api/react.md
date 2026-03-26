@@ -1,4 +1,8 @@
-# React Hooks
+# React Hooks (Legacy)
+
+::: warning
+This documents the **old Node.js API**. The `@vibecook/truffle-react` package needs updating to work with the v2 architecture (RFC 012).
+:::
 
 ```bash
 npm install @vibecook/truffle-react

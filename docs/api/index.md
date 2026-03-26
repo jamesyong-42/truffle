@@ -1,6 +1,10 @@
 # API Reference
 
-## Core Package
+::: warning
+This section documents the **old Node.js API** (`@vibecook/truffle`). The v2 architecture (RFC 012) replaced the entire networking stack with a Rust-native `Node` API. The NAPI-RS bindings have not yet been updated. For the current Rust API, see the [Architecture guide](/guide/architecture#node-api-public-entry-point).
+:::
+
+## Core Package (Legacy)
 
 Install `@vibecook/truffle` to get all the core exports.
 

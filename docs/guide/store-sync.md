@@ -1,5 +1,9 @@
 # Store Sync
 
+::: warning
+This page documents the **old Node.js API** (`StoreSyncAdapter`, `ISyncableStore`). The v2 architecture (RFC 012) has not yet ported the store sync layer. The NAPI-RS bindings need updating before this API is available again.
+:::
+
 Truffle provides cross-device state synchronization through the `StoreSyncAdapter` and `ISyncableStore` interface.
 
 ## How It Works

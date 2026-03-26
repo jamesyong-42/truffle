@@ -13,11 +13,11 @@ hero:
       link: https://github.com/jamesyong-42/truffle
 features:
   - title: Zero Config
-    details: One command to start. Auto-discovers peers on your Tailscale network.
+    details: One command to start. Auto-discovers peers via Tailscale's WatchIPNBus.
   - title: P2P Mesh
-    details: Direct connections between all nodes. No coordinator, no single point of failure.
+    details: Direct WS/TCP/UDP/QUIC connections between all nodes. No coordinator, no single point of failure.
   - title: Cross-Platform
-    details: macOS, Linux, Windows. CLI + Rust library + Node.js NAPI + Tauri plugin.
+    details: macOS, Linux, Windows. CLI + Rust library. Node.js NAPI + Tauri plugin (pending update).
 ---
 
 <div class="install-block">

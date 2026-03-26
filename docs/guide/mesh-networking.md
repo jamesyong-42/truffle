@@ -1,6 +1,10 @@
 # Mesh Networking
 
-## Creating a MeshNode
+::: warning
+This page documents the **old Node.js API** (`createMeshNode`, `@vibecook/truffle`). The v2 architecture (RFC 012) replaced the entire networking stack with a Rust-native `Node` API. The NAPI-RS bindings have not yet been updated. For the current API, see the [Rust Node API](/guide/architecture#node-api-public-entry-point) and use the CLI.
+:::
+
+## Creating a MeshNode (Legacy Node.js API)
 
 ```typescript
 import { createMeshNode } from '@vibecook/truffle';

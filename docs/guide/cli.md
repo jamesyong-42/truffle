@@ -1,13 +1,13 @@
 # CLI Quick Start
 
-The `truffle` CLI is the primary way to use truffle. It runs as a background daemon -- start it once with `truffle up`, then use commands like `ls`, `send`, `cp`, and `proxy` to interact with your mesh.
+The `truffle` CLI is the primary way to use truffle. It runs as a background daemon -- start it once with `truffle up`, then use commands like `ls`, `send`, `cp`, and `tcp` to interact with your mesh.
 
 ## Commands at a Glance
 
 ```
 $ truffle --help
 
-truffle -- Mesh networking for your devices, built on Tailscale.
+truffle -- Mesh networking for your devices, built on Tailscale. (v2 — Node API)
 
 Usage: truffle [command]
 
@@ -22,12 +22,8 @@ Discovery:
 
 Connectivity:
   tcp <target>    Open a raw TCP connection (like netcat)
-  ws <target>     Open a WebSocket connection
-  proxy           Forward a remote port to your machine
-  expose          Make a local port available on the mesh
 
 Communication:
-  chat <node>     Start a live chat with another node
   send <node>     Send a one-shot message
 
 Files:
@@ -35,11 +31,6 @@ Files:
 
 Diagnostics:
   doctor          Diagnose connectivity issues
-  completion      Generate shell completions
-
-Advanced:
-  http            HTTP serving and proxying commands
-  store           Cross-device store sync commands
 
 Run 'truffle <command> --help' for details on any command.
 ```
@@ -52,17 +43,12 @@ Run 'truffle <command> --help' for details on any command.
 truffle up
 ```
 
-This starts the Go sidecar, joins your Tailscale network, and begins discovering peers. By default it runs in the foreground with a live status dashboard.
+This starts the Go sidecar, joins your Tailscale network via `tsnet`, and begins discovering peers via WatchIPNBus. By default it runs in the foreground with a live status dashboard.
 
 Options:
 ```
 --name <name>         Set this node's display name     [default: hostname]
---type <type>         Device type: desktop, server, mobile  [default: auto]
---hostname <prefix>   Tailscale hostname prefix        [default: "truffle"]
---auth-key <key>      Tailscale auth key (headless setup)
---port <port>         Mesh listen port                 [default: 443]
---background, -b      Run as a background daemon
---ephemeral           Use an ephemeral Tailscale node
+--foreground          Run in foreground (for debugging)
 ```
 
 ### Check status
@@ -73,10 +59,21 @@ truffle status
 
 Running `truffle` with no arguments also shows status.
 
+Options:
+```
+--watch, -w     Continuously update (like top)
+--json          Output as JSON
+```
+
 ### Stop your node
 
 ```sh
 truffle down
+```
+
+Options:
+```
+--force, -f     Force stop even if transfers are in progress
 ```
 
 ## Discovery
@@ -89,14 +86,15 @@ truffle ls
 
 ```
   NAME              IP             OS       STATUS
-  james-macbook     100.64.0.3     macOS    ● online
-  work-desktop      100.64.0.5     Linux    ● online
-  home-server       100.64.0.7     Linux    ● online
+  james-macbook     100.64.0.3     macOS    online
+  work-desktop      100.64.0.5     Linux    online
+  home-server       100.64.0.7     Linux    online
 ```
 
 Options:
 ```
 --all, -a       Show offline nodes too
+--long, -l      Show detailed info (IP, OS, connection type)
 --json          Output as JSON
 ```
 
@@ -108,6 +106,11 @@ truffle ping laptop
 
 Nodes are addressed by name (Tailscale hostname). No need to remember IPs.
 
+Options:
+```
+-c, --count <n>     Number of pings [default: 4]
+```
+
 ## Communication
 
 ### Send a one-shot message
@@ -116,13 +119,11 @@ Nodes are addressed by name (Tailscale hostname). No need to remember IPs.
 truffle send laptop "deploy is done"
 ```
 
-### Live chat
-
-```sh
-truffle chat laptop
+Options:
 ```
-
-Opens a persistent bidirectional chat session. Type messages and see replies in real time. Press `Ctrl+C` to exit.
+--all, -a       Send to all nodes (broadcast)
+--wait, -w      Wait for and print the reply
+```
 
 ## File Transfer
 
@@ -134,29 +135,13 @@ truffle cp ./report.pdf server:/tmp/
 
 # Copy from remote to local
 truffle cp server:/var/log/app.log ./
-
-# Copy between two remote nodes
-truffle cp server1:/data/export.csv server2:/imports/
 ```
 
-The syntax follows `scp` conventions. Progress bar is shown by default.
+The syntax follows `scp` conventions. SHA-256 verification is on by default.
 
-## Port Forwarding
-
-### Expose a local port
-
-```sh
-# Make local port 3000 available on the mesh
-truffle expose 3000
+Options:
 ```
-
-Other nodes can then connect to your port via the mesh.
-
-### Forward a remote port
-
-```sh
-# Forward remote node's port 5432 to local port 5432
-truffle proxy server:5432
+--no-verify     Skip SHA-256 integrity verification after transfer
 ```
 
 ## Connectivity
@@ -169,10 +154,9 @@ truffle tcp server:8080
 
 Works like `netcat` -- stdin is sent, stdout receives. Pipe-friendly.
 
-### WebSocket connection
-
-```sh
-truffle ws server:8080/path
+Options:
+```
+--check         Only test connectivity, don't open interactive session
 ```
 
 ## Diagnostics
@@ -189,21 +173,11 @@ Checks:
 - Network connectivity to peers
 - Configuration file validity
 
-### Shell completions
-
-```sh
-# Generate completions for your shell
-truffle completion bash >> ~/.bashrc
-truffle completion zsh >> ~/.zshrc
-truffle completion fish > ~/.config/fish/completions/truffle.fish
-```
-
 ## Global Flags
 
 Available on every command:
 
 ```
---json           Output as JSON (machine-readable)
 --quiet, -q      Suppress all non-essential output
 --verbose, -v    Show detailed output (debug info, timings)
 --color <when>   Force color: auto, always, never  [default: auto]

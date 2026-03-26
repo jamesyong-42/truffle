@@ -1,73 +1,111 @@
 # Architecture
 
-Truffle is organized as a layered stack. Each layer builds on the one below.
+Truffle uses a clean 7-layer architecture (RFC 012), built bottom-up with trait boundaries at each layer. The old codebase (~40k LOC, 4 crates) was replaced with ~15k LOC across 2 Rust crates + a Go sidecar.
 
 ## Layer Diagram
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Your App                        │
-├─────────────────────────────────────────────────┤
-│  Layer 5: CLI (truffle up/ls/send/cp/proxy)     │
-├─────────────────────────────────────────────────┤
-│  Layer 4: HTTP services, file transfer           │
-├─────────────────────────────────────────────────┤
-│  Layer 3: StoreSyncAdapter                       │
-├─────────────────────────────────────────────────┤
-│  Layer 2: MessageBus (pub/sub)                   │
-├─────────────────────────────────────────────────┤
-│  Layer 1: MeshNode (P2P connections, discovery)  │
-├─────────────────────────────────────────────────┤
-│  Layer 0: WebSocketTransport (connections)       │
-├─────────────────────────────────────────────────┤
-│  BridgeManager (binary IPC to Go sidecar)        │
-├─────────────────────────────────────────────────┤
-│  Go Sidecar (embeds Tailscale tsnet)             │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Layer 7: Applications                               │
+│  CLI commands — up, ls, ping, cp, send, tcp, doctor  │
+├─────────────────────────────────────────────────────┤
+│  Node API — 15-method public entry point             │
+│  (the only import applications need)                 │
+├─────────────────────────────────────────────────────┤
+│  Layer 6: Envelope                                   │
+│  Namespace-routed message framing (EnvelopeCodec)    │
+├─────────────────────────────────────────────────────┤
+│  Layer 5: Session                                    │
+│  PeerRegistry, lazy connections, message fan-out     │
+├─────────────────────────────────────────────────────┤
+│  Layer 4: Transport                                  │
+│  WebSocket, TCP, UDP, QUIC protocols                 │
+├─────────────────────────────────────────────────────┤
+│  Layer 3: Network                                    │
+│  TailscaleProvider, WatchIPNBus peer discovery       │
+├─────────────────────────────────────────────────────┤
+│  Go Sidecar (~1.8k LOC)                              │
+│  tsnet integration, encrypted WireGuard tunnels      │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
-### Go Sidecar
+### Go Sidecar (Layer 3 infrastructure)
 
-A Go binary that embeds Tailscale's `tsnet` library. It handles joining the Tailscale network, listening for connections, and dialing peers. Communicates with the Rust layer via binary-framed IPC (stdin/stdout).
+A Go binary (~1.8k LOC) that embeds Tailscale's `tsnet` library. It handles:
+- Joining the Tailscale network and obtaining a stable node identity
+- WatchIPNBus — streaming peer discovery events (peers known before any transport)
+- TLS listener on port 443 for incoming WebSocket connections
+- TCP listener on port 9417 for direct TCP mesh connections
+- UDP relay via `ListenPacket` for QUIC support
 
-### BridgeManager
+Communicates with Rust via JSON lines on stdin/stdout.
 
-Binary-framed TCP bridge between the Go sidecar and Rust. Infrastructure layer that handles process spawning, health monitoring, and message framing.
+### Layer 3: Network (`TailscaleProvider`)
 
-### WebSocketTransport
+Wraps the Go sidecar process and provides a `NetworkProvider` trait:
+- `start()` / `stop()` lifecycle
+- `local_identity()` — node ID, IP, DNS name
+- `peers()` — current peer list from WatchIPNBus
+- `ping()` — Tailscale-level connectivity check (direct or DERP relay)
+- `health()` — sidecar and Tailscale health diagnostics
 
-Manages WebSocket connections over the Tailscale network. Handles incoming and outgoing connections, heartbeat monitoring, and auto-reconnection with exponential backoff.
+Peer discovery is passive — peers appear via WatchIPNBus events without any transport connections.
 
-### MeshNode
+### Layer 4: Transport
 
-The core coordination layer. Handles:
-- **Device discovery**: Announces local device, tracks remote devices via `device-announce` and `device-goodbye` messages
-- **P2P connections**: Direct WebSocket connections to every discovered peer
-- **Message dispatching**: Routes incoming messages to the right handler
+Four transport implementations behind a common trait interface:
 
-Every node connects directly to every other node. There is no hub, no coordinator, and no single point of failure. This maps naturally onto Tailscale's underlying full-mesh WireGuard topology.
+| Transport | Port | Use Case |
+|-----------|------|----------|
+| **WebSocket** | 443 (TLS) | Primary message transport, namespace routing |
+| **TCP** | 9417 | Raw byte streams (like netcat), file transfer |
+| **UDP** | dynamic | Low-latency datagrams via tsnet relay |
+| **QUIC** | dynamic | Multiplexed streams over UDP (via quinn) |
 
-### MessageBus
+All four transports verified working cross-machine over real Tailscale (macOS <-> EC2 Linux).
 
-High-level pub/sub API. Subscribe to namespaced message types and broadcast or send targeted messages. Used by `StoreSyncAdapter` and directly by apps.
+### Layer 5: Session (`PeerRegistry`)
 
-### StoreSyncAdapter
+Manages the peer lifecycle and message routing:
+- Tracks peer state (discovered, connected, disconnected)
+- Lazy connection establishment — connects on first message send
+- Auto-reconnection with exponential backoff
+- Fan-out broadcast to all connected peers
+- Concurrent send protection (serialized writes per peer)
 
-Synchronizes application state across devices. Each device maintains its own "slice" of data. When a local slice changes, it broadcasts the update; when a remote update arrives, it applies the new slice.
+### Layer 6: Envelope (`EnvelopeCodec`)
 
-### HTTP Layer
+Namespace-based message framing:
+- Messages carry `namespace`, `msg_type`, and JSON `payload`
+- Codec serializes/deserializes envelopes over any Layer 4 transport
+- Enables multiple independent protocols over a single connection
 
-Reverse proxy, static file hosting, and PWA support. Built on the bridge layer for direct peer-to-peer HTTP.
+### Node API (public entry point)
 
-### File Transfer
+The `Node` struct is the **only** public interface. Applications never import from lower layers:
 
-Direct P2P file transfer using HTTP PUT over the mesh. Progress reporting, resume support, and integrity verification.
+```rust
+// Key methods on Node:
+node.peers()                          // List discovered peers
+node.send(peer_id, namespace, data)   // Send namespaced message
+node.broadcast(namespace, data)       // Fan-out to all peers
+node.subscribe(namespace)             // Receive messages on a namespace
+node.open_tcp(peer_id, port)          // Raw TCP stream
+node.listen_tcp(port)                 // Accept TCP connections
+node.ping(peer_id)                    // Tailscale-level ping
+node.health()                         // Diagnostics
+node.local_info()                     // Node identity
+node.stop()                           // Graceful shutdown
+```
 
-### CLI
+### Layer 7: Applications (CLI)
 
-The `truffle` command-line tool. A daemon-based architecture where `truffle up` starts a persistent node and subsequent commands (`ls`, `send`, `cp`, `proxy`) communicate with it via a local Unix socket.
+The `truffle` CLI is a daemon-based architecture:
+1. `truffle up` starts a persistent daemon that owns the `Node`
+2. Subsequent commands (`ls`, `send`, `cp`, `tcp`) connect via Unix socket
+3. Commands are thin wrappers that call Node API methods and format output
 
 ## Topology: P2P Full Mesh
 
@@ -84,19 +122,17 @@ Truffle uses a **P2P full-mesh topology**:
 ```
 
 1. All devices join the Tailscale network via the Go sidecar
-2. Devices discover each other through Tailscale peer lists and `device-announce` messages
-3. Every node establishes a direct WebSocket connection to every other node
+2. Devices discover each other through WatchIPNBus (passive, no announce messages)
+3. Every node establishes WebSocket connections to peers on first message send
 4. Messages are sent directly between peers -- no relay, no routing
 5. If a node goes offline, the remaining nodes continue operating without disruption
 
 This is the simplest possible topology because Tailscale already provides full-mesh encrypted connectivity via WireGuard tunnels. Truffle leverages this directly rather than adding its own routing layer on top.
 
-## Wire Protocol
+## Port Map
 
-Truffle uses a binary wire protocol (v3) with typed dispatch:
-
-- **Binary framing**: Length-prefixed frames for efficient parsing
-- **Three message types**: `device-announce`, `device-goodbye`, `device-list` (mesh management) plus namespace-based application messages
-- **Typed dispatch**: Messages are routed to handlers based on namespace and type
-
-See [RFC 009](https://github.com/jamesyong-42/truffle/blob/main/docs/rfcs/009-wire-protocol-redesign.md) for the full wire protocol specification.
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 443  | TLS/WS   | Incoming WebSocket connections (tsnet HTTPS listener) |
+| 9417 | TCP       | Direct TCP mesh connections |
+| dynamic | UDP   | UDP relay via tsnet ListenPacket |

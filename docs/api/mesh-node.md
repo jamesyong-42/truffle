@@ -1,4 +1,8 @@
-# MeshNode
+# MeshNode (Legacy)
+
+::: warning
+This documents the **old Node.js API**. The v2 `Node` struct in Rust replaces `MeshNode`. See the [Architecture guide](/guide/architecture#node-api-public-entry-point) for the current API.
+:::
 
 The central coordination class for Truffle mesh networking.
 

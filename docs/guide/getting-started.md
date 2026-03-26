@@ -86,10 +86,10 @@ truffle down
 
 ## What's happening under the hood
 
-1. `truffle up` starts the Go sidecar, which joins your Tailscale network
-2. Truffle discovers other truffle nodes on the tailnet automatically
-3. Direct P2P WebSocket connections are established between all nodes -- no coordinator, no hub
-4. You can now send messages, copy files, proxy ports, and sync state across your devices
+1. `truffle up` starts the Go sidecar, which joins your Tailscale network via `tsnet`
+2. Peers are discovered automatically via Tailscale's WatchIPNBus (known before any connections)
+3. WebSocket connections are established lazily on first message send -- no coordinator, no hub
+4. Messages flow through the 7-layer stack: CLI -> Node API -> Envelope -> Session -> Transport -> Network -> Sidecar
 
 ## Next Steps
 

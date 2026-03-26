@@ -1,4 +1,8 @@
-# StoreSyncAdapter
+# StoreSyncAdapter (Legacy)
+
+::: warning
+This documents the **old Node.js API**. The store sync layer has not yet been ported to the v2 architecture (RFC 012).
+:::
 
 Synchronizes `ISyncableStore` instances across devices using the message bus.
 
