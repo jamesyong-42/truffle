@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.3.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.5...truffle-v0.3.0) (2026-03-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* The entire codebase has been rebuilt with a clean 7-layer architecture. Old APIs (BridgeManager, TruffleRuntime, MeshNode, StoreSyncAdapter) are removed. The new Node API is the single public entry point. NAPI-RS and Tauri plugin bindings need updating to the new API.
+
+### Features
+
+* add UDP support to Layer 3 via tsnet ListenPacket relay ([8008f0f](https://github.com/jamesyong-42/truffle/commit/8008f0f5755078915a410b4df86914e5102998c1))
+* complete RFC 012 architecture rewrite (v2) ([7a87386](https://github.com/jamesyong-42/truffle/commit/7a873868589a38d4897b0ae9fb8d76578e7995df))
+* implement QUIC over tsnet via TsnetUdpSocket (quinn AsyncUdpSocket adapter) ([b404452](https://github.com/jamesyong-42/truffle/commit/b404452c753be45657295f70b613595b81d7d3d8))
+* implement real QUIC + UDP transports (RFC 012 Phase 8) ([9362cea](https://github.com/jamesyong-42/truffle/commit/9362ceae77feb8a2356d8ba3365bef1c59bb91f7))
+* implement RFC 012 Phase 1 — Layer 3 Network (truffle-core-v2) ([2f3e0c0](https://github.com/jamesyong-42/truffle/commit/2f3e0c0fb0e9a96cf97eee8da9e3d0b4cfea8b28))
+* implement RFC 012 Phase 2 — Layer 4 Transport (truffle-core-v2) ([5ce6ab1](https://github.com/jamesyong-42/truffle/commit/5ce6ab1ab52c3bf5f594f811ff48efc02adb8e4f))
+* implement RFC 012 Phase 3 — Layer 5 Session (PeerRegistry) ([7d20eac](https://github.com/jamesyong-42/truffle/commit/7d20eac9bb5535c0cd30c56aeefad6abd2340f49))
+* implement RFC 012 Phase 4+5 — Layer 6 Envelope + Node API ([78877ac](https://github.com/jamesyong-42/truffle/commit/78877acd0cf206a959e4609a87427f8e112adce8))
+* implement RFC 012 Phase 6 — CLI v2 on Node API ([220e244](https://github.com/jamesyong-42/truffle/commit/220e244b3aa6ab836a144132f54b7b41550bc723))
+* swap to v2 architecture (RFC 012 Phase 7) ([2f2f310](https://github.com/jamesyong-42/truffle/commit/2f2f3109ad1fad72c8a8440ac4593d6d0b1160a2))
+
+
+### Bug Fixes
+
+* address Phase 1 audit findings (bind_udp stub, local_identity cache, bridge error handling) ([c35978c](https://github.com/jamesyong-42/truffle/commit/c35978c5fb505c037fe52ec6862d4dbfa4b4ae77))
+* auth flow waits for browser approval instead of failing immediately ([c9fe442](https://github.com/jamesyong-42/truffle/commit/c9fe442c270c8a31c826f8d96be782b104ce8505))
+* cross-machine transport test — TCP read loop, UDP via tsnet relay, QUIC skip ([b88f009](https://github.com/jamesyong-42/truffle/commit/b88f009c638db8937875899d9574829f952e8c56))
+* debug and fix hanging QUIC transport tests ([3db235a](https://github.com/jamesyong-42/truffle/commit/3db235ab7f387581127e53aa7169b41f8eafb2d1))
+* Phase 2 audit — split WS stream, fix heartbeat, add Sync bound + tests ([7b36120](https://github.com/jamesyong-42/truffle/commit/7b361201e3b706203a89e919cc709418531967fc))
+* Phase 3 audit — reconnect backoff, Left closes WS, concurrent send protection ([a6adaec](https://github.com/jamesyong-42/truffle/commit/a6adaec88a789c5b4ce42618a0fcaed99e7e3553))
+* resolve 5 bugs found in real Tailscale e2e test (macOS &lt;-&gt; EC2) ([bdc4a19](https://github.com/jamesyong-42/truffle/commit/bdc4a19a3c0cc9ef07513e46dd377d4489f57e1e))
+* UDP relay registration packet so receiver knows Rust peer address ([6b0f998](https://github.com/jamesyong-42/truffle/commit/6b0f998f1dfd1a384c3055e34778c25973482add))
+* UDP relay uses 4-byte IPv4 instead of 16-byte IPv4-mapped IPv6 ([a121d39](https://github.com/jamesyong-42/truffle/commit/a121d397afdaba1544854d6881b0c3808e3a2d78))
+* update CI workflows and release-please for new crate structure ([7964e71](https://github.com/jamesyong-42/truffle/commit/7964e71daa462fba78f811d632a5e6c38f3602af))
+
 ## [0.2.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.4...truffle-v0.2.5) (2026-03-24)
 
 
