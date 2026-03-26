@@ -7,3 +7,4 @@ pub mod send;
 pub mod status;
 pub mod tcp;
 pub mod up;
+pub mod update;

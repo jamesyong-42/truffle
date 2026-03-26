@@ -135,6 +135,9 @@ enum Commands {
 
     /// Diagnose connectivity issues
     Doctor,
+
+    /// Update truffle to the latest release
+    Update,
 }
 
 // ==========================================================================
@@ -213,6 +216,9 @@ async fn main() {
 
         // -- Diagnostics --
         Commands::Doctor => commands::doctor::run(&config).await,
+
+        // -- Self-update --
+        Commands::Update => commands::update::run().await,
     };
 
     if let Err(e) = result {
