@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.0...truffle-v0.3.1) (2026-03-28)
+
+
+### Features
+
+* add truffle update self-update command ([8452a8b](https://github.com/jamesyong-42/truffle/commit/8452a8bb798f64339ec906ab62bb74275a090899))
+
+
+### Bug Fixes
+
+* add --repo flag to gh workflow dispatch in release-please ([a75dd0a](https://github.com/jamesyong-42/truffle/commit/a75dd0aa0a1de4acd1a0c316894c1f26b9c9f46d))
+* remove truffle-napi from pnpm workspace (not in Cargo workspace) ([9a90485](https://github.com/jamesyong-42/truffle/commit/9a9048590741af4a47bdd22b4ab8e8dbd2f25728))
+* sidecar discovery looks for both 'sidecar-slim' and 'truffle-sidecar' ([173db1a](https://github.com/jamesyong-42/truffle/commit/173db1a4939f8cb303596ff4301584ec67099e5c))
+
 ## [0.3.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.2.5...truffle-v0.3.0) (2026-03-26)
 
 
