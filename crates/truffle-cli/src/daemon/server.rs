@@ -323,17 +323,28 @@ fn resolve_sidecar_path(config: &TruffleConfig) -> Result<PathBuf, String> {
         .join("truffle")
         .join("bin");
 
-    let candidates = [
+    let names = if cfg!(windows) {
+        &[
+            "sidecar-slim.exe",
+            "truffle-sidecar.exe",
+            "sidecar-slim",
+            "truffle-sidecar",
+        ][..]
+    } else {
+        &["sidecar-slim", "truffle-sidecar"][..]
+    };
+
+    let mut candidates: Vec<Option<PathBuf>> = Vec::new();
+    for name in names {
         // Same directory as the CLI binary
-        exe_dir.as_ref().map(|d| d.join("sidecar-slim")),
-        exe_dir.as_ref().map(|d| d.join("truffle-sidecar")),
+        candidates.push(exe_dir.as_ref().map(|d| d.join(name)));
         // Config bin directory
-        Some(config_bin.join("sidecar-slim")),
-        Some(config_bin.join("truffle-sidecar")),
-        // /usr/local/bin
-        Some(PathBuf::from("/usr/local/bin/sidecar-slim")),
-        Some(PathBuf::from("/usr/local/bin/truffle-sidecar")),
-    ];
+        candidates.push(Some(config_bin.join(name)));
+    }
+    if !cfg!(windows) {
+        candidates.push(Some(PathBuf::from("/usr/local/bin/sidecar-slim")));
+        candidates.push(Some(PathBuf::from("/usr/local/bin/truffle-sidecar")));
+    }
 
     for candidate in candidates.into_iter().flatten() {
         if candidate.exists() {
