@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.2...truffle-v0.3.3) (2026-03-28)
+
+
+### Bug Fixes
+
+* add .exe extension to sidecar binary lookup on Windows ([557498b](https://github.com/jamesyong-42/truffle/commit/557498b0f21fc5d013c79aa3a7b01511d1f21a7a))
+* bump Cargo.toml versions to 0.3.2 and fix release-please config ([057e017](https://github.com/jamesyong-42/truffle/commit/057e0171b23d9511b087c72edbd18a426fd22731))
+* revert release-please extra-files to generic type (cargo-workspace unsupported) ([4b6c669](https://github.com/jamesyong-42/truffle/commit/4b6c6695f8a0129fbe3e43a24010c5b007875a18))
+
 ## [0.3.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.1...truffle-v0.3.2) (2026-03-28)
 
 
