@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod apps;
+mod auto_update;
 mod commands;
 pub mod config;
 pub mod daemon;

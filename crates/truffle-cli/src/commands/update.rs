@@ -1,4 +1,8 @@
 //! `truffle update` -- self-update by downloading the latest GitHub release.
+//!
+//! Core update logic (version checking, downloading, extraction, binary
+//! replacement) is exposed as public helpers so that the background
+//! auto-updater can reuse them.
 
 use crate::output;
 use futures_util::StreamExt;
@@ -10,17 +14,24 @@ use std::path::{Path, PathBuf};
 // ==========================================================================
 
 #[derive(serde::Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    assets: Vec<GitHubAsset>,
+pub struct GitHubRelease {
+    pub tag_name: String,
+    pub assets: Vec<GitHubAsset>,
 }
 
 #[derive(serde::Deserialize)]
-struct GitHubAsset {
-    name: String,
-    browser_download_url: String,
-    size: u64,
+pub struct GitHubAsset {
+    pub name: String,
+    pub browser_download_url: String,
+    pub size: u64,
 }
+
+// ==========================================================================
+// Constants
+// ==========================================================================
+
+pub const GITHUB_RELEASES_URL: &str =
+    "https://api.github.com/repos/jamesyong-42/truffle/releases/latest";
 
 // ==========================================================================
 // Platform detection
@@ -80,6 +91,117 @@ pub fn is_newer(current: &str, latest: &str) -> bool {
     }
 }
 
+/// Strip version prefixes to get the bare version string (e.g. "0.3.1").
+pub fn strip_version_prefix(tag: &str) -> &str {
+    tag.strip_prefix("truffle-v")
+        .or_else(|| tag.strip_prefix("v"))
+        .unwrap_or(tag)
+}
+
+// ==========================================================================
+// HTTP client
+// ==========================================================================
+
+/// Build a reusable reqwest client with proper user-agent.
+pub fn build_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .user_agent("truffle-cli")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))
+}
+
+// ==========================================================================
+// GitHub API
+// ==========================================================================
+
+/// Fetch the latest release metadata from GitHub.
+pub async fn check_latest_version(client: &reqwest::Client) -> Result<GitHubRelease, String> {
+    client
+        .get(GITHUB_RELEASES_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch latest release: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub API error: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse release info: {e}"))
+}
+
+// ==========================================================================
+// Download
+// ==========================================================================
+
+/// Download a release asset to `dest_path`. Shows a progress bar.
+pub async fn download_asset_with_progress(
+    client: &reqwest::Client,
+    asset: &GitHubAsset,
+    dest_path: &Path,
+) -> Result<(), String> {
+    let response = client
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download release: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    let total_size = response.content_length().unwrap_or(asset.size);
+    let mut stream = response.bytes_stream();
+
+    let mut file = std::fs::File::create(dest_path)
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+
+    let mut downloaded: u64 = 0;
+    let start = std::time::Instant::now();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Download error: {e}"))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Write error: {e}"))?;
+        downloaded += chunk.len() as u64;
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 {
+            downloaded as f64 / elapsed
+        } else {
+            0.0
+        };
+        output::print_progress(downloaded, total_size, speed);
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    output::print_progress_complete(downloaded, elapsed);
+    drop(file);
+
+    Ok(())
+}
+
+/// Download a release asset silently (no progress bar). For background use.
+pub async fn download_asset_silent(
+    client: &reqwest::Client,
+    asset: &GitHubAsset,
+    dest_path: &Path,
+) -> Result<(), String> {
+    let response = client
+        .get(&asset.browser_download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download release: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
+
+    std::fs::write(dest_path, &bytes)
+        .map_err(|e| format!("Failed to write archive: {e}"))?;
+
+    Ok(())
+}
+
 // ==========================================================================
 // Extraction
 // ==========================================================================
@@ -107,7 +229,7 @@ fn extract_zip(archive_path: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
+pub fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
     let name = archive_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -133,7 +255,7 @@ fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
 // Binary replacement
 // ==========================================================================
 
-fn find_install_dir() -> Result<PathBuf, String> {
+pub fn find_install_dir() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("Cannot find current executable: {e}"))?;
     exe.parent()
         .map(|p| p.to_path_buf())
@@ -141,7 +263,7 @@ fn find_install_dir() -> Result<PathBuf, String> {
 }
 
 /// Find a file by name recursively in a directory (one level deep).
-fn find_file_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+pub fn find_file_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     // Check top level
     let top = dir.join(name);
     if top.exists() {
@@ -161,7 +283,7 @@ fn find_file_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-fn replace_binary(
+pub fn replace_binary(
     new_binary: &Path,
     install_dir: &Path,
     binary_name: &str,
@@ -195,6 +317,22 @@ fn replace_binary(
     Ok(())
 }
 
+/// Find and replace truffle + sidecar binaries from an extracted archive directory.
+pub fn replace_binaries(extract_dir: &Path, install_dir: &Path) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    let (truffle_bin, sidecar_bin) = ("truffle", "sidecar-slim");
+    #[cfg(target_os = "windows")]
+    let (truffle_bin, sidecar_bin) = ("truffle.exe", "sidecar-slim.exe");
+
+    if let Some(new_truffle) = find_file_in_dir(extract_dir, truffle_bin) {
+        replace_binary(&new_truffle, install_dir, truffle_bin)?;
+    }
+    if let Some(new_sidecar) = find_file_in_dir(extract_dir, sidecar_bin) {
+        replace_binary(&new_sidecar, install_dir, sidecar_bin)?;
+    }
+    Ok(())
+}
+
 // ==========================================================================
 // Main command
 // ==========================================================================
@@ -214,27 +352,11 @@ pub async fn run() -> Result<(), String> {
     println!("  Checking for updates...");
 
     // 1. Query GitHub releases API for latest
-    let client = reqwest::Client::builder()
-        .user_agent("truffle-cli")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-
-    let release: GitHubRelease = client
-        .get("https://api.github.com/repos/jamesyong-42/truffle/releases/latest")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch latest release: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("GitHub API error: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse release info: {e}"))?;
+    let client = build_http_client()?;
+    let release = check_latest_version(&client).await?;
 
     let latest_tag = &release.tag_name;
-    let latest_version = latest_tag
-        .strip_prefix("truffle-v")
-        .or_else(|| latest_tag.strip_prefix("v"))
-        .unwrap_or(latest_tag);
+    let latest_version = strip_version_prefix(latest_tag);
 
     // 2. Compare versions
     if !is_newer(current_version, latest_tag) {
@@ -278,44 +400,10 @@ pub async fn run() -> Result<(), String> {
     );
 
     // 4. Download the asset with progress
-    let response = client
-        .get(&asset.browser_download_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download release: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Download failed: {e}"))?;
-
-    let total_size = response.content_length().unwrap_or(asset.size);
-    let mut stream = response.bytes_stream();
-
     let tmp_dir =
         tempfile::tempdir().map_err(|e| format!("Failed to create temp directory: {e}"))?;
     let archive_path = tmp_dir.path().join(asset_name);
-    let mut file = std::fs::File::create(&archive_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
-
-    let mut downloaded: u64 = 0;
-    let start = std::time::Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("Download error: {e}"))?;
-        file.write_all(&chunk)
-            .map_err(|e| format!("Write error: {e}"))?;
-        downloaded += chunk.len() as u64;
-
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            downloaded as f64 / elapsed
-        } else {
-            0.0
-        };
-        output::print_progress(downloaded, total_size, speed);
-    }
-
-    let elapsed = start.elapsed().as_secs_f64();
-    output::print_progress_complete(downloaded, elapsed);
-    drop(file);
+    download_asset_with_progress(&client, asset, &archive_path).await?;
 
     // 5. Extract to a temp directory
     println!("  Extracting...");
@@ -427,5 +515,12 @@ mod tests {
         assert_eq!(parse_version("invalid"), None);
         assert_eq!(parse_version("1.2"), None);
         assert_eq!(parse_version("1.2.3.4"), None);
+    }
+
+    #[test]
+    fn test_strip_version_prefix() {
+        assert_eq!(strip_version_prefix("truffle-v0.3.0"), "0.3.0");
+        assert_eq!(strip_version_prefix("v1.2.3"), "1.2.3");
+        assert_eq!(strip_version_prefix("0.3.0"), "0.3.0");
     }
 }

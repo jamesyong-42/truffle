@@ -1,6 +1,7 @@
 //! `truffle up` -- start the truffle daemon.
 
 use crate::apps::file_transfer::receive;
+use crate::auto_update;
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
@@ -215,11 +216,18 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
+    // Fire-and-forget background update (after daemon is up, never blocks).
+    auto_update::spawn_background_update(config.updates.clone());
+
     // Show status
     println!();
     println!("  {}", output::bold("truffle v2"));
     println!("  {}", output::dim(&"\u{2500}".repeat(39)));
     println!();
+
+    // Show update notification from a previous background download.
+    auto_update::show_update_notification();
+
     println!("  {:<12}{}", "Node", output::bold(&config.node.name));
 
     // Poll for status

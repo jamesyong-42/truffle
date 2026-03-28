@@ -28,6 +28,9 @@ pub struct TruffleConfig {
     /// Daemon process settings.
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// Auto-update settings.
+    #[serde(default)]
+    pub updates: UpdateConfig,
 }
 
 /// Node identity and behavior configuration.
@@ -102,6 +105,26 @@ impl Default for DaemonConfig {
     }
 }
 
+/// Auto-update configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct UpdateConfig {
+    /// Whether to automatically check for and install updates.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// Interval between update checks, in seconds (default: 86400 = 24 hours).
+    #[serde(default = "default_check_interval")]
+    pub check_interval: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: true,
+            check_interval: default_check_interval(),
+        }
+    }
+}
+
 // ==========================================================================
 // Default value functions (for serde)
 // ==========================================================================
@@ -127,6 +150,10 @@ fn default_auto() -> String {
 
 fn default_info() -> String {
     "info".to_string()
+}
+
+fn default_check_interval() -> u64 {
+    86400 // 24 hours
 }
 
 // ==========================================================================
