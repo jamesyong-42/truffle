@@ -8,11 +8,11 @@
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
         {
-          "type": "cargo-workspace",
+          "type": "generic",
           "path": "crates/truffle-cli/Cargo.toml"
         },
         {
-          "type": "cargo-workspace",
+          "type": "generic",
           "path": "crates/truffle-core/Cargo.toml"
         },
         {
