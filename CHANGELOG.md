@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.1...truffle-v0.3.2) (2026-03-28)
+
+
+### Features
+
+* add silent background auto-update on truffle up ([0fc532f](https://github.com/jamesyong-42/truffle/commit/0fc532f9fd89a8015b48c953a7514b0105d2d62c))
+
 ## [0.3.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.0...truffle-v0.3.1) (2026-03-28)
 
 
