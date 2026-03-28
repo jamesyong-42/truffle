@@ -314,20 +314,24 @@ fn resolve_sidecar_path(config: &TruffleConfig) -> Result<PathBuf, String> {
     }
 
     // Auto-discover: check common locations
+    // The sidecar binary may be named "sidecar-slim" (original) or "truffle-sidecar"
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let config_bin = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("truffle")
+        .join("bin");
+
     let candidates = [
         // Same directory as the CLI binary
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("truffle-sidecar"))),
+        exe_dir.as_ref().map(|d| d.join("sidecar-slim")),
+        exe_dir.as_ref().map(|d| d.join("truffle-sidecar")),
         // Config bin directory
-        Some(
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("truffle")
-                .join("bin")
-                .join("truffle-sidecar"),
-        ),
+        Some(config_bin.join("sidecar-slim")),
+        Some(config_bin.join("truffle-sidecar")),
         // /usr/local/bin
+        Some(PathBuf::from("/usr/local/bin/sidecar-slim")),
         Some(PathBuf::from("/usr/local/bin/truffle-sidecar")),
     ];
 
