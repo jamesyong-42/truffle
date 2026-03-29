@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.3...truffle-v0.3.4) (2026-03-29)
+
+
+### Features
+
+* add interactive TUI mode and agent-friendly CLI enhancements (RFC 013) ([dc43b22](https://github.com/jamesyong-42/truffle/commit/dc43b22ee475c87ac967ded5ddf722fc8577abc1))
+* add truffle and truffle-sidecar crates for crates.io publishing ([8836ad6](https://github.com/jamesyong-42/truffle/commit/8836ad6161c1db9ff4114f99ab6e7b37c8c15b82))
+
 ## [0.3.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.2...truffle-v0.3.3) (2026-03-28)
 
 
