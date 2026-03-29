@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.4...truffle-v0.3.5) (2026-03-29)
+
+
+### Features
+
+* Claude Code-inspired TUI visual redesign ([1f3a18b](https://github.com/jamesyong-42/truffle/commit/1f3a18bbc0fa11eef6c248af3e03482c9409e58d))
+
+
+### Bug Fixes
+
+* add top margin to logo and vertical divider in welcome box ([86cd3ef](https://github.com/jamesyong-42/truffle/commit/86cd3ef4a0b8cbe1481b2eb4e66a4c3987392ec7))
+* auto-stop background daemon when TUI launches ([5973065](https://github.com/jamesyong-42/truffle/commit/597306520d369be3352dde89ee931ae9d7117473))
+* bump crate versions to 0.3.4 and add crates.io publish workflow ([ecd1b58](https://github.com/jamesyong-42/truffle/commit/ecd1b5864a5a7db91f88c49ba0a3331a48d4258b))
+* fix pre-existing CI failures (doc-test type annotation + prettier) ([7e44530](https://github.com/jamesyong-42/truffle/commit/7e4453090f6fa5a1b8a67b600b826885b4a04133))
+* redirect stderr to log file in TUI mode ([c975166](https://github.com/jamesyong-42/truffle/commit/c97516613512fc57df0e487e082f8f956e4b2b34))
+* use OIDC trusted publishing for crates.io (no API token needed) ([2a0ee74](https://github.com/jamesyong-42/truffle/commit/2a0ee74a3aac041a75f9d1f312856327717a2450))
+
 ## [0.3.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.3...truffle-v0.3.4) (2026-03-29)
 
 
