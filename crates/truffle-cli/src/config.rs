@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ==========================================================================
 // Config types
 // ==========================================================================
 
 /// Top-level configuration, deserialized from `config.toml`.
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct TruffleConfig {
     /// Node identity and behavior settings.
     #[serde(default)]
@@ -34,7 +34,7 @@ pub struct TruffleConfig {
 }
 
 /// Node identity and behavior configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NodeConfig {
     /// Display name for this node (defaults to hostname).
     #[serde(default = "default_node_name")]
@@ -66,7 +66,7 @@ impl Default for NodeConfig {
 }
 
 /// Output format configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OutputConfig {
     /// Output format: "pretty" or "json".
     #[serde(default = "default_pretty")]
@@ -86,7 +86,7 @@ impl Default for OutputConfig {
 }
 
 /// Daemon process configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DaemonConfig {
     /// Log level: "trace", "debug", "info", "warn", "error".
     #[serde(default = "default_info")]
@@ -106,7 +106,7 @@ impl Default for DaemonConfig {
 }
 
 /// Auto-update configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UpdateConfig {
     /// Whether to automatically check for and install updates.
     #[serde(default = "default_true")]
@@ -130,10 +130,116 @@ impl Default for UpdateConfig {
 // ==========================================================================
 
 fn default_node_name() -> String {
-    hostname::get()
+    smart_node_name()
+}
+
+/// Generate a clean, compact device name from the OS hostname.
+///
+/// Rules:
+/// 1. Strip domain suffixes (.local, .ts.net, .lan, etc.)
+/// 2. Lowercase
+/// 3. Strip trailing number patterns (-6, -01)
+/// 4. Truncate to 15 chars
+/// 5. Generic hostnames (localhost, ip-*, DESKTOP-*) → {os}-{hash4}
+pub fn smart_node_name() -> String {
+    let raw = hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "truffle-node".to_string())
+        .unwrap_or_else(|| "truffle-node".to_string());
+
+    compact_name(&raw)
+}
+
+fn compact_name(raw: &str) -> String {
+    // Strip domain suffixes (longest first)
+    const SUFFIXES: &[&str] = &[
+        ".ec2.internal",
+        ".compute.internal",
+        ".ts.net lan",
+        ".ts.net",
+        ".local",
+        ".lan",
+        ".home",
+        ".internal",
+        ".localdomain",
+    ];
+
+    let mut name = raw.to_string();
+    for suffix in SUFFIXES {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            name = stripped.to_string();
+            break;
+        }
+        // Case-insensitive check
+        let lower = name.to_lowercase();
+        if let Some(pos) = lower.rfind(&suffix.to_lowercase()) {
+            if pos + suffix.len() == name.len() {
+                name = name[..pos].to_string();
+                break;
+            }
+        }
+    }
+
+    // Lowercase
+    name = name.to_lowercase();
+
+    // Strip trailing number/hyphen patterns: -6, -01, -123
+    while name.len() > 1 {
+        if let Some(stripped) = name.strip_suffix(|c: char| c.is_ascii_digit()) {
+            name = stripped.to_string();
+        } else if name.ends_with('-') && name.len() > 1 {
+            name = name[..name.len() - 1].to_string();
+        } else {
+            break;
+        }
+    }
+
+    // Clean up any remaining trailing hyphens
+    name = name.trim_end_matches('-').to_string();
+
+    // Check for generic hostnames
+    let is_generic = name.is_empty()
+        || name == "localhost"
+        || name == "truffle-node"
+        || name.starts_with("ip-")
+        || name.starts_with("desktop-")
+        || name.starts_with("win-")
+        || name.len() <= 2;
+
+    if is_generic {
+        // Use {os}-{hash4}
+        let os = std::env::consts::OS;
+        let hash = simple_hash(raw);
+        name = format!("{os}-{hash}");
+    }
+
+    // Truncate to 15 chars at a word boundary if possible
+    if name.len() > 15 {
+        if let Some(pos) = name[..15].rfind('-') {
+            if pos > 3 {
+                name = name[..pos].to_string();
+            } else {
+                name = name[..15].to_string();
+            }
+        } else {
+            name = name[..15].to_string();
+        }
+    }
+
+    if name.is_empty() {
+        "truffle-node".to_string()
+    } else {
+        name
+    }
+}
+
+/// Simple 4-char hex hash of a string.
+fn simple_hash(s: &str) -> String {
+    let mut h: u32 = 5381;
+    for b in s.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    format!("{:04x}", h & 0xFFFF)
 }
 
 fn default_true() -> bool {
@@ -167,6 +273,8 @@ pub enum ConfigError {
     ReadError(std::io::Error),
     /// Failed to parse the TOML content.
     ParseError(toml::de::Error),
+    /// Failed to write the config file.
+    WriteError(std::io::Error),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -174,6 +282,7 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::ReadError(e) => write!(f, "Failed to read config file: {e}"),
             ConfigError::ParseError(e) => write!(f, "Failed to parse config file: {e}"),
+            ConfigError::WriteError(e) => write!(f, "Failed to write config file: {e}"),
         }
     }
 }
@@ -224,6 +333,26 @@ impl TruffleConfig {
     /// The PID file path: `~/.config/truffle/truffle.pid`.
     pub fn pid_path() -> PathBuf {
         config_dir().join("truffle.pid")
+    }
+
+    /// Check if a config file exists at the default path.
+    pub fn config_exists() -> bool {
+        Self::default_path().exists()
+    }
+
+    /// Save configuration to a file.
+    pub fn save(&self, path: Option<&Path>) -> Result<(), ConfigError> {
+        let path = path
+            .map(PathBuf::from)
+            .unwrap_or_else(Self::default_path);
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::WriteError)?;
+        }
+
+        let toml_str = toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::WriteError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        std::fs::write(&path, toml_str).map_err(ConfigError::WriteError)
     }
 
     /// Resolve an alias from the config, returning the resolved target string
@@ -292,5 +421,52 @@ log_file = "/tmp/truffle.log"
 
         assert_eq!(config.output.format, "json");
         assert_eq!(config.daemon.log_level, "debug");
+    }
+
+    #[test]
+    fn test_compact_name_strips_tsnet() {
+        assert_eq!(compact_name("Jamess-MBP-6.ts.net lan"), "jamess-mbp");
+    }
+
+    #[test]
+    fn test_compact_name_strips_local() {
+        assert_eq!(compact_name("Jamess-MBP-6.local"), "jamess-mbp");
+    }
+
+    #[test]
+    fn test_compact_name_strips_trailing_numbers() {
+        assert_eq!(compact_name("my-server-01"), "my-server");
+        assert_eq!(compact_name("workstation4090"), "workstation");
+    }
+
+    #[test]
+    fn test_compact_name_generic_ip() {
+        let name = compact_name("ip-172-31-75-21.ec2.internal");
+        assert!(name.starts_with("linux-") || name.starts_with("macos-") || name.starts_with("windows-"));
+        assert!(name.len() <= 15);
+    }
+
+    #[test]
+    fn test_compact_name_generic_localhost() {
+        let name = compact_name("localhost");
+        assert!(!name.is_empty());
+        assert!(name.contains('-')); // os-hash format
+    }
+
+    #[test]
+    fn test_compact_name_already_clean() {
+        assert_eq!(compact_name("myserver"), "myserver");
+    }
+
+    #[test]
+    fn test_compact_name_truncation() {
+        let name = compact_name("very-long-hostname-that-exceeds-limit");
+        assert!(name.len() <= 15);
+    }
+
+    #[test]
+    fn test_compact_name_desktop_pattern() {
+        let name = compact_name("DESKTOP-A1B2C3D");
+        assert!(name.contains('-')); // os-hash format (generic)
     }
 }

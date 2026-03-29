@@ -294,6 +294,12 @@ async fn main() {
     let result = match command {
         // -- Node lifecycle --
         Commands::Up { name, foreground } => {
+            // CLI fallback: if no config exists and no explicit name, use smart name
+            let mut config = config.clone();
+            if !crate::config::TruffleConfig::config_exists() && name.is_none() {
+                config.node.name = crate::config::smart_node_name();
+                let _ = config.save(None);
+            }
             commands::up::run(&config, name.as_deref(), foreground, global_json).await
         }
 

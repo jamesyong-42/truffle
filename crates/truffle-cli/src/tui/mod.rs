@@ -20,6 +20,7 @@ use crate::daemon::server::DaemonServer;
 pub mod app;
 pub mod commands;
 pub mod event;
+pub mod onboarding;
 pub mod ui;
 
 use app::AppState;
@@ -28,27 +29,21 @@ use event::AppEvent;
 /// Run the TUI. This is the main entry point for `truffle` (bare command).
 pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     // Redirect stderr to a log file BEFORE starting the daemon or TUI.
-    // Without this, tracing output and sidecar stderr corrupt the ratatui display.
     redirect_stderr_to_log();
 
-    // If a background daemon is already running, stop it first.
-    // The TUI needs to own the daemon in-process for direct Node access.
-    {
-        let client = crate::daemon::client::DaemonClient::new();
-        if client.is_daemon_running() {
-            let _ = client
-                .request(
-                    crate::daemon::protocol::method::SHUTDOWN,
-                    serde_json::json!({}),
-                )
-                .await;
-            // Wait briefly for the old daemon to release the socket
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-    }
+    // Check for first-run (no config file exists)
+    let is_first_run = !crate::config::TruffleConfig::config_exists();
 
-    // Start the daemon server in-process
-    let server = DaemonServer::start(config).await?;
+    let (server, config) = if is_first_run {
+        // Run the onboarding wizard — returns started server + updated config
+        onboarding::run(config).await?
+    } else {
+        // Normal startup: kill existing daemon, start in-process
+        kill_existing_daemon().await;
+        let server = DaemonServer::start(config).await?;
+        (server, config.clone())
+    };
+
     let node = server.node().clone();
 
     // Spawn file transfer receive handler
@@ -602,6 +597,20 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 });
             }
         }
+    }
+}
+
+/// Kill an existing background daemon so the TUI can take over.
+async fn kill_existing_daemon() {
+    let client = crate::daemon::client::DaemonClient::new();
+    if client.is_daemon_running() {
+        let _ = client
+            .request(
+                crate::daemon::protocol::method::SHUTDOWN,
+                serde_json::json!({}),
+            )
+            .await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 }
 
