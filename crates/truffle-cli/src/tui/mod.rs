@@ -136,27 +136,21 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
 
         match event_rx.recv().await {
             Some(AppEvent::Key(key)) => {
-                // Handle Enter specially — command dispatch is async
-                if key.code == KeyCode::Enter {
-                    // If autocomplete is open, Enter fills the selected item
-                    // instead of submitting the input.
-                    if app.autocomplete.is_some() {
-                        app.accept_autocomplete();
-                        app.update_autocomplete();
-                        // Auto-open file picker when /cp is selected
-                        if app.input.starts_with("/cp ") || app.input == "/cp" {
-                            app.open_file_picker();
-                        }
-                    } else {
-                        let input = app.input.trim().to_string();
-                        if !input.is_empty() {
-                            app.history.push(input.clone());
-                            app.save_history_entry(&input);
-                            app.history_index = None;
-                            app.input.clear();
-                            app.cursor_pos = 0;
-                            handle_input_async(&mut app, &input, event_tx.clone()).await;
-                        }
+                // File picker and autocomplete handle Enter themselves,
+                // so route to handle_key first when they're active.
+                if key.code == KeyCode::Enter
+                    && app.file_picker.is_none()
+                    && app.autocomplete.is_none()
+                {
+                    // Normal submit — no overlay is open
+                    let input = app.input.trim().to_string();
+                    if !input.is_empty() {
+                        app.history.push(input.clone());
+                        app.save_history_entry(&input);
+                        app.history_index = None;
+                        app.input.clear();
+                        app.cursor_pos = 0;
+                        handle_input_async(&mut app, &input, event_tx.clone()).await;
                     }
                 } else {
                     handle_key(&mut app, key);
@@ -359,12 +353,16 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // If autocomplete is visible, intercept Tab/Esc/Up/Down
+    // If autocomplete is visible, intercept Enter/Tab/Esc/Up/Down
     if app.autocomplete.is_some() {
         match key.code {
-            KeyCode::Tab => {
+            KeyCode::Enter | KeyCode::Tab => {
                 app.accept_autocomplete();
                 app.update_autocomplete();
+                // Auto-open file picker when /cp is selected
+                if app.input.starts_with("/cp ") || app.input == "/cp" {
+                    app.open_file_picker();
+                }
                 return;
             }
             KeyCode::Esc => {
