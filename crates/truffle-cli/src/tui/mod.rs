@@ -68,6 +68,27 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     let mut app = AppState::new(node.clone());
     app.load_history();
 
+    // Populate initial peer list from current Node state.
+    // subscribe_peer_events() only delivers NEW events — peers already
+    // discovered before the subscription won't trigger a Joined event.
+    {
+        let current_peers = node.peers().await;
+        for peer in current_peers {
+            let name = peer.name.trim_start_matches("truffle-").to_string();
+            app.peers.push(app::PeerInfo {
+                id: peer.id.clone(),
+                name,
+                ip: peer.ip.to_string(),
+                online: peer.online,
+                connection: if peer.connection_type.is_empty() {
+                    None
+                } else {
+                    Some(peer.connection_type.clone())
+                },
+            });
+        }
+    }
+
     // Spawn event collectors — also get the sender for /cp to push transfer progress
     let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx);
 
