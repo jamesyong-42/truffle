@@ -1,0 +1,66 @@
+name: Publish to crates.io
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: packages/sidecar-slim/go.sum
+
+      - name: Build Go sidecar (needed for truffle-core compilation)
+        working-directory: packages/sidecar-slim
+        run: |
+          go build -o sidecar-slim .
+
+      - name: Verify crate versions match
+        run: |
+          CORE_VER=$(grep '^version' crates/truffle-core/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          SIDECAR_VER=$(grep '^version' crates/truffle-sidecar/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TRUFFLE_VER=$(grep '^version' crates/truffle/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "truffle-core: $CORE_VER"
+          echo "truffle-sidecar: $SIDECAR_VER"
+          echo "truffle: $TRUFFLE_VER"
+          if [ "$CORE_VER" != "$SIDECAR_VER" ] || [ "$CORE_VER" != "$TRUFFLE_VER" ]; then
+            echo "Version mismatch! All publishable crates must have the same version."
+            exit 1
+          fi
+
+      # Publish in dependency order: truffle-core first, then truffle-sidecar, then truffle
+      - name: Publish truffle-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --package truffle-core --allow-dirty || echo "truffle-core already published or failed"
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish truffle-sidecar
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --package truffle-sidecar --allow-dirty || echo "truffle-sidecar already published or failed"
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish truffle
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --package truffle --allow-dirty || echo "truffle already published or failed"
