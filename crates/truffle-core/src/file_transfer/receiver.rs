@@ -85,18 +85,34 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                         )
                         .await
                         {
-                            error!(
-                                from = from.as_str(),
-                                file = file_name.as_str(),
-                                "Failed to receive file: {e}"
-                            );
-                            // Emit failed event
-                            let _ = event_tx.send(FileTransferEvent::Failed {
-                                token,
-                                direction: TransferDirection::Receive,
-                                file_name,
-                                reason: e.to_string(),
-                            });
+                            // Distinguish rejection from actual failures
+                            match &e {
+                                TransferError::Rejected(reason) => {
+                                    info!(
+                                        from = from.as_str(),
+                                        file = file_name.as_str(),
+                                        "File offer rejected: {reason}"
+                                    );
+                                    let _ = event_tx.send(FileTransferEvent::Rejected {
+                                        token,
+                                        file_name,
+                                        reason: reason.clone(),
+                                    });
+                                }
+                                _ => {
+                                    error!(
+                                        from = from.as_str(),
+                                        file = file_name.as_str(),
+                                        "Failed to receive file: {e}"
+                                    );
+                                    let _ = event_tx.send(FileTransferEvent::Failed {
+                                        token,
+                                        direction: TransferDirection::Receive,
+                                        file_name,
+                                        reason: e.to_string(),
+                                    });
+                                }
+                            }
                         }
                     });
                 }

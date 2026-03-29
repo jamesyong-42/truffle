@@ -241,7 +241,14 @@ pub enum FileTransferEvent {
         elapsed_secs: f64,
     },
 
-    /// A transfer failed.
+    /// A transfer was rejected by the receiver.
+    Rejected {
+        token: String,
+        file_name: String,
+        reason: String,
+    },
+
+    /// A transfer failed due to an error.
     Failed {
         token: String,
         direction: TransferDirection,

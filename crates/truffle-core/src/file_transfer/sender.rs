@@ -1,12 +1,13 @@
 //! Send (push) — send a local file to a remote peer.
 //!
-//! 1. SHA-256 hash the file
+//! 1. Stream-hash the file (constant memory)
 //! 2. Send OFFER via WS
-//! 3. Wait for ACCEPT
-//! 4. Open raw TCP stream
-//! 5. Stream [size][sha256][file_bytes]
+//! 3. Wait for ACCEPT (with tcp_port)
+//! 4. Open raw TCP stream to the port advertised in ACCEPT
+//! 5. Stream [size][sha256][file_bytes] in 64KB chunks
 //! 6. Read ACK
 
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -24,6 +25,9 @@ use super::types::{
 
 /// Send a local file to a remote peer.
 ///
+/// Uses constant memory — the file is streamed in 64KB chunks for both
+/// hashing and TCP transfer. Never loads the entire file into memory.
+///
 /// Emits [`FileTransferEvent::Progress`], [`FileTransferEvent::Completed`],
 /// or [`FileTransferEvent::Failed`] on the provided `event_tx` channel.
 pub async fn send_file<N: NetworkProvider + 'static>(
@@ -31,27 +35,48 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     peer_id: &str,
     local_path: &str,
     remote_path: &str,
+    max_transfer_size: u64,
     event_tx: &broadcast::Sender<FileTransferEvent>,
 ) -> Result<TransferResult, TransferError> {
     let start = Instant::now();
 
-    // 0. Resolve peer_id to the canonical Tailscale node ID.
+    // 0. Resolve peer_id to the canonical node ID.
     let peer_id = node
         .resolve_peer_id(peer_id)
         .await
         .map_err(|e| TransferError::Node(e.to_string()))?;
     let peer_id = peer_id.as_str();
 
-    // 1. Read and hash the file
-    info!(path = local_path, "Hashing file");
-    let file_data = tokio::fs::read(local_path)
+    // 1. Get file metadata and check size limit
+    let metadata = tokio::fs::metadata(local_path)
         .await
         .map_err(TransferError::Io)?;
-    let file_size = file_data.len() as u64;
+    let file_size = metadata.len();
 
-    let mut hasher = Sha256::new();
-    hasher.update(&file_data);
-    let sha256 = hex::encode(hasher.finalize());
+    if file_size > max_transfer_size {
+        return Err(TransferError::Protocol(format!(
+            "File size ({} bytes) exceeds max transfer size ({} bytes)",
+            file_size, max_transfer_size
+        )));
+    }
+
+    // 2. Stream-hash the file in chunks (constant memory)
+    info!(path = local_path, size = file_size, "Hashing file (streaming)");
+    let sha256 = {
+        let mut hasher = Sha256::new();
+        let mut file = tokio::fs::File::open(local_path)
+            .await
+            .map_err(TransferError::Io)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hex::encode(hasher.finalize())
+    };
 
     let file_name = std::path::Path::new(local_path)
         .file_name()
@@ -61,7 +86,7 @@ pub async fn send_file<N: NetworkProvider + 'static>(
 
     let token = uuid::Uuid::new_v4().to_string();
 
-    // 2. Send OFFER via WS
+    // 3. Send OFFER via WS
     let offer = FtMessage::Offer {
         file_name: file_name.clone(),
         size: file_size,
@@ -80,9 +105,10 @@ pub async fn send_file<N: NetworkProvider + 'static>(
 
     info!(peer = peer_id, file = file_name.as_str(), size = file_size, "Sent OFFER");
 
-    // 3. Wait for ACCEPT
+    // 4. Wait for ACCEPT (extract tcp_port)
     let mut rx = node.subscribe("ft");
-    let accept_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let accept_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+    let accept_port;
 
     loop {
         let msg = tokio::time::timeout(
@@ -103,9 +129,10 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         match ft_msg {
             FtMessage::Accept {
                 token: accept_token,
-                tcp_port: _,
+                tcp_port,
             } if accept_token == token => {
-                info!("Received ACCEPT from peer");
+                accept_port = tcp_port;
+                info!(tcp_port = tcp_port, "Received ACCEPT from peer");
                 break;
             }
             FtMessage::Reject {
@@ -114,36 +141,38 @@ pub async fn send_file<N: NetworkProvider + 'static>(
             } if reject_token == token => {
                 return Err(TransferError::Rejected(reason));
             }
-            _ => {
-                // Not for us, keep waiting
-                continue;
-            }
+            _ => continue,
         }
     }
 
-    // 4. Open raw TCP stream to peer
+    // 5. Open raw TCP stream to the port advertised in ACCEPT
     let mut stream = node
-        .open_tcp(peer_id, 0)
+        .open_tcp(peer_id, accept_port)
         .await
-        .map_err(|e| TransferError::Node(format!("Failed to open TCP: {e}")))?;
+        .map_err(|e| TransferError::Node(format!("Failed to open TCP to port {accept_port}: {e}")))?;
 
-    info!("TCP stream opened to peer");
+    info!(port = accept_port, "TCP stream opened to peer");
 
-    // 5. Write [8-byte size][32-byte sha256_hex][file_bytes]
+    // 6. Write header: [8-byte size][64-byte sha256_hex]
     stream.write_all(&file_size.to_be_bytes()).await?;
-    stream.write_all(sha256.as_bytes()).await?; // 64 hex chars
+    stream.write_all(sha256.as_bytes()).await?;
 
-    // Stream the file in 64KB chunks with progress reporting
+    // 7. Stream the file in 64KB chunks (constant memory)
+    let mut file = tokio::fs::File::open(local_path)
+        .await
+        .map_err(TransferError::Io)?;
     let chunk_size = 64 * 1024;
+    let mut buf = vec![0u8; chunk_size];
     let mut bytes_sent: u64 = 0;
-    let mut offset = 0;
     let progress_start = Instant::now();
 
-    while offset < file_data.len() {
-        let end = (offset + chunk_size).min(file_data.len());
-        stream.write_all(&file_data[offset..end]).await?;
-        bytes_sent += (end - offset) as u64;
-        offset = end;
+    loop {
+        let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&buf[..n]).await?;
+        bytes_sent += n as u64;
 
         let elapsed = progress_start.elapsed().as_secs_f64();
         let speed = if elapsed > 0.0 {
@@ -152,7 +181,6 @@ pub async fn send_file<N: NetworkProvider + 'static>(
             0.0
         };
 
-        // Emit progress event (best-effort)
         let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
             token: token.clone(),
             direction: TransferDirection::Send,
@@ -165,7 +193,7 @@ pub async fn send_file<N: NetworkProvider + 'static>(
 
     stream.flush().await?;
 
-    // 6. Read ACK (1 byte: 0x01 = OK, 0x00 = error)
+    // 8. Read ACK (1 byte: 0x01 = OK, 0x00 = error)
     let mut ack = [0u8; 1];
     stream.read_exact(&mut ack).await?;
 
@@ -183,7 +211,6 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         "Upload complete"
     );
 
-    // Emit completed event
     let _ = event_tx.send(FileTransferEvent::Completed {
         token,
         direction: TransferDirection::Send,

@@ -159,13 +159,13 @@ pub fn spawn_event_collectors(
                 match ft_rx.recv().await {
                     Ok(event) => {
                         match event {
-                            FileTransferEvent::OfferReceived(offer) => {
-                                let _ = tx.send(AppEvent::IncomingFileOffer {
-                                    from_id: offer.from_peer.clone(),
-                                    from_name: offer.from_name.clone(),
-                                    file_name: offer.file_name,
-                                    size: offer.size,
-                                });
+                            FileTransferEvent::OfferReceived(_) => {
+                                // Offers are handled via the modal dialog channel,
+                                // not through the event system. Skip to avoid
+                                // duplicate notifications.
+                            }
+                            FileTransferEvent::Rejected { .. } => {
+                                // Rejections are handled by the dialog flow.
                             }
                             FileTransferEvent::Progress(p) => {
                                 let percent = if p.total_bytes > 0 {

@@ -274,29 +274,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 }
             }
         }
-        AppEvent::IncomingFileOffer {
-            from_id,
-            from_name: _,
-            file_name,
-            size,
-        } => {
-            let display_name = app
-                .peers
-                .iter()
-                .find(|p| p.id == from_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| from_id.clone());
-
-            app.push_item(app::DisplayItem::System {
-                time: chrono::Local::now(),
-                text: format!(
-                    "  \u{2b07} {} wants to send {} ({})",
-                    display_name,
-                    file_name,
-                    crate::output::format_bytes(size),
-                ),
-                level: app::SystemLevel::Info,
-            });
+        AppEvent::IncomingFileOffer { .. } => {
+            // Offers are now handled exclusively via the modal dialog
+            // (FileOfferReceived event from the offer channel).
         }
         AppEvent::FileOfferReceived { offer, responder } => {
             handle_file_offer_received(app, offer, responder);
@@ -316,7 +296,7 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             if let Some(dialog) = &app.transfer_dialog {
                 if dialog.created_at.elapsed() > std::time::Duration::from_secs(60) {
                     // Auto-reject and close
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("timed out (60s)");
                     }
@@ -362,9 +342,16 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                     .unwrap_or(false);
 
                 if is_file {
-                    // Select the file and insert its path into the input
                     if let Some(path) = app.close_file_picker_with_selection() {
-                        // Ensure input has "/cp " prefix, then add the path
+                        // Check if we're in a transfer dialog SaveAs mode
+                        if let Some(ref mut dialog) = app.transfer_dialog {
+                            if dialog.phase == app::TransferDialogPhase::SaveAs {
+                                dialog.save_path_input = path;
+                                dialog.save_path_cursor = dialog.save_path_input.chars().count();
+                                return;
+                            }
+                        }
+                        // Normal /cp mode — insert path into input
                         if !app.input.starts_with("/cp ") {
                             app.input = "/cp ".to_string();
                             app.cursor_pos = 4;
@@ -374,7 +361,19 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                         app.cursor_pos += path.chars().count();
                     }
                 } else {
-                    // Directory — let explorer navigate into it
+                    // Directory — in SaveAs mode, use as save directory; otherwise navigate
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        if dialog.phase == app::TransferDialogPhase::SaveAs {
+                            if let Some(ref explorer) = app.file_picker {
+                                let dir_path = explorer.current().path.to_string_lossy().to_string();
+                                dialog.save_path_input = format!("{}/{}", dir_path, dialog.offer.file_name);
+                                dialog.save_path_cursor = dialog.save_path_input.chars().count();
+                            }
+                            app.file_picker = None;
+                            return;
+                        }
+                    }
+                    // Normal mode — let explorer navigate into it
                     let event = crossterm::event::Event::Key(key);
                     if let Some(ref mut explorer) = app.file_picker {
                         let _ = explorer.handle(&event);
@@ -797,7 +796,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
             match key.code {
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     // Accept with current save path
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     let save_path = dialog.save_path_input.clone();
                     if let Some(responder) = dialog.responder.take() {
                         responder.accept(&save_path);
@@ -820,7 +819,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     // Reject
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("rejected by user");
                     }
@@ -836,7 +835,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     // Accept and add peer to auto-accept list
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     let save_path = dialog.save_path_input.clone();
                     let peer_id = dialog.offer.from_peer.clone();
                     let peer_name = app
@@ -878,7 +877,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Esc => {
                     // Esc in prompt phase rejects (same as 'r')
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("dismissed");
                     }
@@ -901,7 +900,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
             match key.code {
                 KeyCode::Enter => {
                     // Accept with edited save path
-                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
                     let save_path = dialog.save_path_input.clone();
                     if let Some(responder) = dialog.responder.take() {
                         responder.accept(&save_path);
@@ -978,6 +977,10 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                         dialog.save_path_cursor =
                             dialog.save_path_input.chars().count();
                     }
+                }
+                KeyCode::Tab => {
+                    // Open file picker for directory selection
+                    app.open_file_picker();
                 }
                 _ => {}
             }

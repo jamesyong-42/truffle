@@ -400,6 +400,20 @@ fn ft_event_to_notification(
                 "time": chrono::Utc::now().to_rfc3339(),
             }),
         ),
+        FileTransferEvent::Rejected {
+            token,
+            file_name,
+            reason,
+        } => (
+            "transfer.rejected",
+            serde_json::json!({
+                "type": "transfer.rejected",
+                "token": token,
+                "file_name": file_name,
+                "reason": reason,
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
         FileTransferEvent::Failed {
             token,
             direction,

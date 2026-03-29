@@ -207,11 +207,13 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
         local_path: &str,
         remote_path: &str,
     ) -> Result<TransferResult, TransferError> {
+        let max_size = self.state().max_transfer_size.load(Ordering::Relaxed);
         sender::send_file(
             self.node,
             peer_id,
             local_path,
             remote_path,
+            max_size,
             &self.state().event_tx,
         )
         .await
