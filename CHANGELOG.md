@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.8](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.7...truffle-v0.3.8) (2026-03-29)
+
+
+### Features
+
+* add interactive file picker for /cp command ([e74e3e2](https://github.com/jamesyong-42/truffle/commit/e74e3e2e78f0f0c02737d528de14376c53b0292f))
+* first-run onboarding TUI with smart compact naming ([53560a5](https://github.com/jamesyong-42/truffle/commit/53560a5951d529f2162129e155dc37b3649f0408))
+* propagate auth events through session layer to TUI ([a8e7bcb](https://github.com/jamesyong-42/truffle/commit/a8e7bcb8c76d6f70b7622a6092387f057b90fafa))
+
+
+### Bug Fixes
+
+* bump Cargo.toml versions to 0.3.8 ([bdbcc73](https://github.com/jamesyong-42/truffle/commit/bdbcc7394b17445d2d6e4cbb703dd18b5768f630))
+* delayed peer re-poll to catch peers missed during TUI startup ([fb45c90](https://github.com/jamesyong-42/truffle/commit/fb45c900d080a29740e3deb29bf71369ca363c7d))
+
 ## [0.3.7](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.6...truffle-v0.3.7) (2026-03-29)
 
 
