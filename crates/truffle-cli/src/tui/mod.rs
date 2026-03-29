@@ -357,10 +357,14 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
     if app.autocomplete.is_some() {
         match key.code {
             KeyCode::Enter | KeyCode::Tab => {
+                let was_command = matches!(
+                    app.autocomplete.as_ref().map(|a| &a.kind),
+                    Some(app::AutocompleteKind::Command)
+                );
                 app.accept_autocomplete();
                 app.update_autocomplete();
-                // Auto-open file picker when /cp is selected
-                if app.input.starts_with("/cp ") || app.input == "/cp" {
+                // Auto-open file picker only when /cp command was just completed
+                if was_command && (app.input.starts_with("/cp ") || app.input == "/cp") {
                     app.open_file_picker();
                 }
                 return;
