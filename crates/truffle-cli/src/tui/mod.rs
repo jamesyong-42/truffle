@@ -143,6 +143,10 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                     if app.autocomplete.is_some() {
                         app.accept_autocomplete();
                         app.update_autocomplete();
+                        // Auto-open file picker when /cp is selected
+                        if app.input.starts_with("/cp ") || app.input == "/cp" {
+                            app.open_file_picker();
+                        }
                     } else {
                         let input = app.input.trim().to_string();
                         if !input.is_empty() {
@@ -396,6 +400,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             let byte_pos = char_to_byte_pos(&app.input, app.cursor_pos);
             app.input.insert(byte_pos, c);
             app.cursor_pos += 1;
+            // Auto-open file picker when user types "/cp "
+            if app.input == "/cp " {
+                app.open_file_picker();
+            }
         }
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
