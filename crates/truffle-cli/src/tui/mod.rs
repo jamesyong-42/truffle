@@ -27,6 +27,22 @@ use event::AppEvent;
 
 /// Run the TUI. This is the main entry point for `truffle` (bare command).
 pub async fn run(config: &TruffleConfig) -> Result<(), String> {
+    // If a background daemon is already running, stop it first.
+    // The TUI needs to own the daemon in-process for direct Node access.
+    {
+        let client = crate::daemon::client::DaemonClient::new();
+        if client.is_daemon_running() {
+            let _ = client
+                .request(
+                    crate::daemon::protocol::method::SHUTDOWN,
+                    serde_json::json!({}),
+                )
+                .await;
+            // Wait briefly for the old daemon to release the socket
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+    }
+
     // Start the daemon server in-process
     let server = DaemonServer::start(config).await?;
     let node = server.node().clone();
