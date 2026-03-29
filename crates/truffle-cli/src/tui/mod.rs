@@ -402,10 +402,6 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             let byte_pos = char_to_byte_pos(&app.input, app.cursor_pos);
             app.input.insert(byte_pos, c);
             app.cursor_pos += 1;
-            // Auto-open file picker when user types "/cp "
-            if app.input == "/cp " {
-                app.open_file_picker();
-            }
         }
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
@@ -442,15 +438,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             // Enter is handled in the main loop (async command dispatch)
         }
         KeyCode::Tab => {
-            // If input starts with "/cp ", open file picker
-            if app.input.starts_with("/cp ") || app.input == "/cp" {
-                app.open_file_picker();
-            } else {
-                // Tab without autocomplete visible — try to trigger it
-                app.update_autocomplete();
-                if app.autocomplete.is_some() {
-                    app.accept_autocomplete();
-                }
+            // Tab without autocomplete visible — try to trigger it
+            app.update_autocomplete();
+            if app.autocomplete.is_some() {
+                app.accept_autocomplete();
             }
         }
         KeyCode::Up => {
@@ -500,6 +491,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
     match key.code {
         KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete => {
             app.update_autocomplete();
+            // Auto-open file picker when input is exactly "/cp "
+            if app.input == "/cp " && app.file_picker.is_none() {
+                app.open_file_picker();
+            }
         }
         _ => {}
     }
