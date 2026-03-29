@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.6](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.5...truffle-v0.3.6) (2026-03-29)
+
+
+### Bug Fixes
+
+* bump Cargo.toml versions to 0.3.6 ([86a298f](https://github.com/jamesyong-42/truffle/commit/86a298f1d257fae80e97a2f0b6ee75510ec3a8cd))
+* suppress tracing and sidecar logs in TUI mode ([ed88ee3](https://github.com/jamesyong-42/truffle/commit/ed88ee3a03fb09fa5be4bbb5c9bb63940cfb5dcf))
+
 ## [0.3.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.4...truffle-v0.3.5) (2026-03-29)
 
 
