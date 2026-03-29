@@ -7,6 +7,8 @@
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::{method, notification, DaemonNotification};
+use crate::exit_codes;
+use crate::json_output;
 use crate::output;
 
 /// Parse a location string into (node, path) or (None, local_path).
@@ -28,7 +30,8 @@ pub async fn run(
     source: &str,
     dest: &str,
     verify: bool,
-) -> Result<(), String> {
+    json: bool,
+) -> Result<(), (i32, String)> {
     let _ = verify; // SHA-256 is always on in v2
 
     let (src_node, src_path) = parse_location(source);
@@ -38,45 +41,54 @@ pub async fn run(
     client
         .ensure_running(config)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::NOT_ONLINE, e.to_string()))?;
 
     match (src_node, dst_node) {
         (None, Some(remote_node)) => {
             // Upload: local -> remote
-            upload(&client, src_path, remote_node, dst_path).await
+            upload(&client, config, src_path, remote_node, dst_path, json).await
         }
         (Some(remote_node), None) => {
             // Download: remote -> local
-            download(&client, remote_node, src_path, dst_path).await
+            download(&client, config, remote_node, src_path, dst_path, json).await
         }
-        (None, None) => {
-            Err("Both source and destination are local. Use 'cp' instead.".to_string())
-        }
-        (Some(_), Some(_)) => {
-            Err("Direct node-to-node copy is not yet supported. Copy to local first.".to_string())
-        }
+        (None, None) => Err((
+            exit_codes::USAGE,
+            "Both source and destination are local. Use 'cp' instead.".to_string(),
+        )),
+        (Some(_), Some(_)) => Err((
+            exit_codes::USAGE,
+            "Direct node-to-node copy is not yet supported. Copy to local first.".to_string(),
+        )),
     }
 }
 
 async fn upload(
     client: &DaemonClient,
+    config: &TruffleConfig,
     local_path: &str,
     remote_node: &str,
     remote_path: &str,
-) -> Result<(), String> {
+    json: bool,
+) -> Result<(), (i32, String)> {
     // Verify local file exists
     if !std::path::Path::new(local_path).exists() {
-        return Err(format!("File not found: {local_path}"));
+        return Err((
+            exit_codes::NOT_FOUND,
+            format!("File not found: {local_path}"),
+        ));
     }
 
-    println!();
-    println!(
-        "  Copying {} -> {}:{}",
-        output::bold(local_path),
-        output::bold(remote_node),
-        remote_path,
-    );
-    println!();
+    if !json {
+        println!();
+        println!(
+            "  Copying {} -> {}:{}",
+            output::bold(local_path),
+            output::bold(remote_node),
+            remote_path,
+        );
+        println!();
+    }
 
     let start = std::time::Instant::now();
 
@@ -89,7 +101,7 @@ async fn upload(
                 "remote_path": remote_path,
             }),
             |notif: &DaemonNotification| {
-                if notif.method == notification::CP_PROGRESS {
+                if !json && notif.method == notification::CP_PROGRESS {
                     let current = notif.params["bytes_sent"].as_u64().unwrap_or(0);
                     let total = notif.params["total_bytes"].as_u64().unwrap_or(0);
                     let speed = notif.params["bytes_per_second"].as_f64().unwrap_or(0.0);
@@ -98,34 +110,55 @@ async fn upload(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::TRANSFER_FAILED, e.to_string()))?;
 
     let bytes = result["bytes_transferred"].as_u64().unwrap_or(0);
-    let elapsed = start.elapsed().as_secs_f64();
-    output::print_progress_complete(bytes, elapsed);
+    let sha256 = result["sha256"].as_str().unwrap_or("").to_string();
 
-    if let Some(sha) = result["sha256"].as_str() {
-        output::print_success(&format!("SHA-256 verified: {}...{}", &sha[..8], &sha[sha.len()-8..]));
+    if json {
+        let mut map = json_output::envelope(&config.node.name);
+        map.insert("file".to_string(), serde_json::json!(local_path));
+        map.insert("bytes".to_string(), serde_json::json!(bytes));
+        if !sha256.is_empty() {
+            map.insert("sha256".to_string(), serde_json::json!(sha256));
+        }
+        json_output::print_json(&serde_json::Value::Object(map));
+    } else {
+        let elapsed = start.elapsed().as_secs_f64();
+        output::print_progress_complete(bytes, elapsed);
+
+        if !sha256.is_empty() {
+            output::print_success(&format!(
+                "SHA-256 verified: {}...{}",
+                &sha256[..8],
+                &sha256[sha256.len() - 8..]
+            ));
+        }
+
+        println!();
     }
 
-    println!();
     Ok(())
 }
 
 async fn download(
     client: &DaemonClient,
+    config: &TruffleConfig,
     remote_node: &str,
     remote_path: &str,
     local_path: &str,
-) -> Result<(), String> {
-    println!();
-    println!(
-        "  Copying {}:{} -> {}",
-        output::bold(remote_node),
-        remote_path,
-        output::bold(local_path),
-    );
-    println!();
+    json: bool,
+) -> Result<(), (i32, String)> {
+    if !json {
+        println!();
+        println!(
+            "  Copying {}:{} -> {}",
+            output::bold(remote_node),
+            remote_path,
+            output::bold(local_path),
+        );
+        println!();
+    }
 
     let start = std::time::Instant::now();
 
@@ -138,7 +171,7 @@ async fn download(
                 "local_path": local_path,
             }),
             |notif: &DaemonNotification| {
-                if notif.method == notification::CP_PROGRESS {
+                if !json && notif.method == notification::CP_PROGRESS {
                     let current = notif.params["bytes_received"].as_u64().unwrap_or(0);
                     let total = notif.params["total_bytes"].as_u64().unwrap_or(0);
                     let speed = notif.params["bytes_per_second"].as_f64().unwrap_or(0.0);
@@ -147,17 +180,34 @@ async fn download(
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::TRANSFER_FAILED, e.to_string()))?;
 
     let bytes = result["bytes_transferred"].as_u64().unwrap_or(0);
-    let elapsed = start.elapsed().as_secs_f64();
-    output::print_progress_complete(bytes, elapsed);
+    let sha256 = result["sha256"].as_str().unwrap_or("").to_string();
 
-    if let Some(sha) = result["sha256"].as_str() {
-        output::print_success(&format!("SHA-256 verified: {}...{}", &sha[..8], &sha[sha.len()-8..]));
+    if json {
+        let mut map = json_output::envelope(&config.node.name);
+        map.insert("file".to_string(), serde_json::json!(remote_path));
+        map.insert("bytes".to_string(), serde_json::json!(bytes));
+        if !sha256.is_empty() {
+            map.insert("sha256".to_string(), serde_json::json!(sha256));
+        }
+        json_output::print_json(&serde_json::Value::Object(map));
+    } else {
+        let elapsed = start.elapsed().as_secs_f64();
+        output::print_progress_complete(bytes, elapsed);
+
+        if !sha256.is_empty() {
+            output::print_success(&format!(
+                "SHA-256 verified: {}...{}",
+                &sha256[..8],
+                &sha256[sha256.len() - 8..]
+            ));
+        }
+
+        println!();
     }
 
-    println!();
     Ok(())
 }
 

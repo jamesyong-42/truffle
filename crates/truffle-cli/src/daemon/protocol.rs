@@ -100,10 +100,17 @@ pub mod method {
     pub const GET_FILE: &str = "get_file";
     pub const TCP_CONNECT: &str = "tcp_connect";
     pub const DOCTOR: &str = "doctor";
+    pub const SUBSCRIBE: &str = "subscribe";
 }
 
 pub mod notification {
     pub const CP_PROGRESS: &str = "cp.progress";
+    pub const PEER_JOINED: &str = "peer.joined";
+    pub const PEER_LEFT: &str = "peer.left";
+    pub const PEER_UPDATED: &str = "peer.updated";
+    pub const PEER_CONNECTED: &str = "peer.connected";
+    pub const PEER_DISCONNECTED: &str = "peer.disconnected";
+    pub const MESSAGE_RECEIVED: &str = "message.received";
 }
 
 pub mod error_code {

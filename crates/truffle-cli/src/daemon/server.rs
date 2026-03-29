@@ -16,7 +16,7 @@ use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::session::PeerEvent;
 
-use super::handler::DaemonContext;
+use super::handler::{DaemonContext, DispatchResult};
 use super::ipc;
 use super::pid;
 use super::protocol::DaemonRequest;
@@ -215,10 +215,14 @@ impl DaemonServer {
                 tokio::sync::mpsc::unbounded_channel::<super::protocol::DaemonNotification>();
 
             let ctx_clone = Arc::clone(ctx);
+            let notif_tx_clone = notif_tx.clone();
             let mut dispatch_handle = tokio::spawn(async move {
-                super::handler::dispatch(&request, &ctx_clone, notif_tx).await
+                super::handler::dispatch(&request, &ctx_clone, notif_tx_clone).await
             });
 
+            // For normal requests: stream notifications while waiting for the
+            // response (same as original behavior). For subscribe: enter
+            // streaming mode where the connection stays open indefinitely.
             loop {
                 tokio::select! {
                     biased;
@@ -233,16 +237,17 @@ impl DaemonServer {
                     }
 
                     result = &mut dispatch_handle => {
-                        while let Ok(notif) = notif_rx.try_recv() {
-                            if let Ok(notif_json) = serde_json::to_string(&notif) {
-                                if writer.write_line(&notif_json).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-
                         match result {
-                            Ok(response) => {
+                            Ok(DispatchResult::Response(response)) => {
+                                // Drain remaining notifications
+                                while let Ok(notif) = notif_rx.try_recv() {
+                                    if let Ok(notif_json) = serde_json::to_string(&notif) {
+                                        if writer.write_line(&notif_json).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+
                                 let resp_json = match serde_json::to_string(&response) {
                                     Ok(j) => j,
                                     Err(e) => {
@@ -254,6 +259,49 @@ impl DaemonServer {
                                     return;
                                 }
                             }
+
+                            Ok(DispatchResult::Subscribe(params)) => {
+                                // Enter streaming mode.
+                                let ctx_for_sub = Arc::clone(ctx);
+
+                                let subscribe_handle = tokio::spawn(async move {
+                                    super::handler::run_subscribe(
+                                        &params,
+                                        &ctx_for_sub,
+                                        notif_tx,
+                                    )
+                                    .await;
+                                });
+
+                                // Forward notifications until client disconnects.
+                                loop {
+                                    tokio::select! {
+                                        biased;
+
+                                        Some(notif) = notif_rx.recv() => {
+                                            if let Ok(notif_json) = serde_json::to_string(&notif) {
+                                                if writer.write_line(&notif_json).await.is_err() {
+                                                    subscribe_handle.abort();
+                                                    return;
+                                                }
+                                            }
+                                        }
+
+                                        client_line = reader.next_line() => {
+                                            match client_line {
+                                                Ok(None) | Err(_) => {
+                                                    subscribe_handle.abort();
+                                                    return;
+                                                }
+                                                Ok(Some(_)) => {
+                                                    // Ignore further requests during subscribe.
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             Err(e) => {
                                 error!("Handler task failed: {e}");
                             }

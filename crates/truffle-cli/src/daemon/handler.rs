@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{debug, info};
 use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::session::PeerEvent;
 
-use super::protocol::{error_code, method, DaemonNotification, DaemonRequest, DaemonResponse};
+use super::protocol::{error_code, method, notification, DaemonNotification, DaemonRequest, DaemonResponse};
 use crate::apps;
 
 /// Context bundling all daemon-owned resources needed by request handlers.
@@ -21,17 +22,42 @@ pub struct DaemonContext {
     pub started_at: Instant,
 }
 
+/// Result of dispatching a request: either a single response or a streaming subscription.
+pub enum DispatchResult {
+    /// A normal one-shot response.
+    Response(DaemonResponse),
+    /// A streaming subscription — the handler will push notifications until cancelled.
+    /// Contains the parsed subscription parameters.
+    Subscribe(SubscribeParams),
+}
+
+/// Parsed parameters for a subscribe request.
+pub struct SubscribeParams {
+    /// Which event types to subscribe to.
+    pub events: Vec<SubscribeEventType>,
+    /// Optional peer name filter (case-insensitive).
+    pub peer_filter: Option<String>,
+}
+
+/// Event types that can be subscribed to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeEventType {
+    Peer,
+    Message,
+    Transfer,
+}
+
 /// Dispatch a JSON-RPC request to the appropriate handler.
 pub async fn dispatch(
     request: &DaemonRequest,
     ctx: &DaemonContext,
     notification_tx: tokio::sync::mpsc::UnboundedSender<DaemonNotification>,
-) -> DaemonResponse {
+) -> DispatchResult {
     let node = &ctx.node;
     let started_at = ctx.started_at;
     let shutdown_signal = &ctx.shutdown_signal;
 
-    match request.method.as_str() {
+    let response = match request.method.as_str() {
         method::STATUS => handle_status(request.id, node, started_at).await,
         method::PEERS => handle_peers(request.id, node).await,
         method::PING => handle_ping(request.id, &request.params, node).await,
@@ -45,11 +71,306 @@ pub async fn dispatch(
             handle_get_file(request.id, &request.params, node, notification_tx).await
         }
         method::DOCTOR => handle_doctor(request.id, node).await,
+        method::SUBSCRIBE => {
+            return match parse_subscribe_params(&request.params) {
+                Ok(params) => DispatchResult::Subscribe(params),
+                Err(resp) => DispatchResult::Response(resp),
+            };
+        }
         _ => DaemonResponse::error(
             request.id,
             error_code::METHOD_NOT_FOUND,
             format!("Method '{}' not found", request.method),
         ),
+    };
+
+    DispatchResult::Response(response)
+}
+
+/// Parse subscribe request params, returning `SubscribeParams` or an error response.
+fn parse_subscribe_params(params: &serde_json::Value) -> Result<SubscribeParams, DaemonResponse> {
+    let events_arr = params["events"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut events = Vec::new();
+    for v in &events_arr {
+        match v.as_str() {
+            Some("peer") => events.push(SubscribeEventType::Peer),
+            Some("message") => events.push(SubscribeEventType::Message),
+            Some("transfer") => events.push(SubscribeEventType::Transfer),
+            Some(other) => {
+                return Err(DaemonResponse::error(
+                    0,
+                    error_code::INVALID_PARAMS,
+                    format!("Unknown event type: '{other}'. Valid types: peer, message, transfer"),
+                ));
+            }
+            None => {}
+        }
+    }
+
+    // Default to all events if none specified
+    if events.is_empty() {
+        events = vec![
+            SubscribeEventType::Peer,
+            SubscribeEventType::Message,
+            SubscribeEventType::Transfer,
+        ];
+    }
+
+    let peer_filter = params["filter"]["peer"]
+        .as_str()
+        .map(|s| s.to_lowercase());
+
+    Ok(SubscribeParams {
+        events,
+        peer_filter,
+    })
+}
+
+/// Run the streaming subscribe loop. Subscribes to node channels and forwards
+/// matching events as notifications until the sender is closed (client disconnected).
+pub async fn run_subscribe(
+    params: &SubscribeParams,
+    ctx: &DaemonContext,
+    notification_tx: tokio::sync::mpsc::UnboundedSender<DaemonNotification>,
+) {
+    let node = &ctx.node;
+
+    // Subscribe to the channels we need.
+    let mut peer_rx = if params.events.contains(&SubscribeEventType::Peer) {
+        Some(node.on_peer_change())
+    } else {
+        None
+    };
+
+    let mut message_rx = if params.events.contains(&SubscribeEventType::Message) {
+        Some(node.subscribe("chat"))
+    } else {
+        None
+    };
+
+    let mut transfer_rx = if params.events.contains(&SubscribeEventType::Transfer) {
+        Some(node.subscribe("ft"))
+    } else {
+        None
+    };
+
+    debug!(
+        events = ?params.events,
+        peer_filter = ?params.peer_filter,
+        "Subscribe loop started"
+    );
+
+    loop {
+        tokio::select! {
+            // Peer events
+            peer_event = async {
+                match peer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match peer_event {
+                    Ok(event) => {
+                        if let Some(notif) = peer_event_to_notification(&event, &params.peer_filter) {
+                            if notification_tx.send(notif).is_err() {
+                                break; // Client disconnected
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("Peer event subscriber lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+
+            // Chat messages
+            msg_event = async {
+                match message_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match msg_event {
+                    Ok(msg) => {
+                        if let Some(notif) = message_to_notification(&msg, &params.peer_filter) {
+                            if notification_tx.send(notif).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("Message subscriber lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+
+            // File transfer messages
+            ft_event = async {
+                match transfer_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match ft_event {
+                    Ok(msg) => {
+                        if let Some(notif) = transfer_to_notification(&msg, &params.peer_filter) {
+                            if notification_tx.send(notif).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("Transfer subscriber lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    debug!("Subscribe loop ended");
+}
+
+/// Convert a PeerEvent into a DaemonNotification, applying the optional peer filter.
+fn peer_event_to_notification(
+    event: &PeerEvent,
+    peer_filter: &Option<String>,
+) -> Option<DaemonNotification> {
+    let (method_name, params) = match event {
+        PeerEvent::Joined(state) => {
+            if !matches_peer_filter(&state.name, peer_filter) {
+                return None;
+            }
+            (
+                notification::PEER_JOINED,
+                serde_json::json!({
+                    "type": notification::PEER_JOINED,
+                    "peer": state.name,
+                    "ip": state.ip.to_string(),
+                    "os": state.os,
+                    "time": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+        }
+        PeerEvent::Left(id) => {
+            if !matches_peer_filter(id, peer_filter) {
+                return None;
+            }
+            (
+                notification::PEER_LEFT,
+                serde_json::json!({
+                    "type": notification::PEER_LEFT,
+                    "peer": id,
+                    "time": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+        }
+        PeerEvent::Updated(state) => {
+            if !matches_peer_filter(&state.name, peer_filter) {
+                return None;
+            }
+            (
+                notification::PEER_UPDATED,
+                serde_json::json!({
+                    "type": notification::PEER_UPDATED,
+                    "peer": state.name,
+                    "ip": state.ip.to_string(),
+                    "online": state.online,
+                    "connected": state.connected,
+                    "time": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+        }
+        PeerEvent::Connected(id) => {
+            if !matches_peer_filter(id, peer_filter) {
+                return None;
+            }
+            (
+                notification::PEER_CONNECTED,
+                serde_json::json!({
+                    "type": notification::PEER_CONNECTED,
+                    "peer": id,
+                    "time": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+        }
+        PeerEvent::Disconnected(id) => {
+            if !matches_peer_filter(id, peer_filter) {
+                return None;
+            }
+            (
+                notification::PEER_DISCONNECTED,
+                serde_json::json!({
+                    "type": notification::PEER_DISCONNECTED,
+                    "peer": id,
+                    "time": chrono::Utc::now().to_rfc3339(),
+                }),
+            )
+        }
+    };
+
+    Some(DaemonNotification::new(method_name, params))
+}
+
+/// Convert a NamespacedMessage from the "chat" namespace into a notification.
+fn message_to_notification(
+    msg: &truffle_core::node::NamespacedMessage,
+    peer_filter: &Option<String>,
+) -> Option<DaemonNotification> {
+    if !matches_peer_filter(&msg.from, peer_filter) {
+        return None;
+    }
+    Some(DaemonNotification::new(
+        notification::MESSAGE_RECEIVED,
+        serde_json::json!({
+            "type": notification::MESSAGE_RECEIVED,
+            "from": msg.from,
+            "namespace": msg.namespace,
+            "msg_type": msg.msg_type,
+            "payload": msg.payload,
+            "time": chrono::Utc::now().to_rfc3339(),
+        }),
+    ))
+}
+
+/// Convert a NamespacedMessage from the "ft" namespace into a notification.
+fn transfer_to_notification(
+    msg: &truffle_core::node::NamespacedMessage,
+    peer_filter: &Option<String>,
+) -> Option<DaemonNotification> {
+    if !matches_peer_filter(&msg.from, peer_filter) {
+        return None;
+    }
+    Some(DaemonNotification::new(
+        "transfer.event",
+        serde_json::json!({
+            "type": "transfer.event",
+            "from": msg.from,
+            "namespace": msg.namespace,
+            "msg_type": msg.msg_type,
+            "payload": msg.payload,
+            "time": chrono::Utc::now().to_rfc3339(),
+        }),
+    ))
+}
+
+/// Check if a peer name/id matches the optional filter (case-insensitive).
+fn matches_peer_filter(name: &str, filter: &Option<String>) -> bool {
+    match filter {
+        Some(f) => name.to_lowercase().contains(f),
+        None => true,
     }
 }
 

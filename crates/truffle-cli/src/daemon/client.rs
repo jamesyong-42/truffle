@@ -176,6 +176,92 @@ impl DaemonClient {
         }
     }
 
+    /// Send a subscribe request and stream notifications indefinitely.
+    ///
+    /// The callback is called for each notification. If it returns `true`, the
+    /// subscription ends and the function returns `Ok(())`. This allows
+    /// commands like `wait` and `recv` to exit after the first matching event.
+    ///
+    /// If `timeout` is `Some`, the subscription will end after the given
+    /// duration with `Err(ClientError::DaemonError { code: 3, .. })`.
+    pub async fn subscribe(
+        &self,
+        params: serde_json::Value,
+        timeout: Option<std::time::Duration>,
+        mut on_notification: impl FnMut(&DaemonNotification) -> bool,
+    ) -> Result<(), ClientError> {
+        let stream = self.connect().await?;
+        let (mut reader, mut writer) = stream.into_split();
+
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request = DaemonRequest::new(id, super::protocol::method::SUBSCRIBE, params);
+
+        let request_json =
+            serde_json::to_string(&request).map_err(|e| ClientError::IoError(e.to_string()))?;
+
+        debug!(id = id, "Sending subscribe request to daemon");
+
+        writer
+            .write_line(&request_json)
+            .await
+            .map_err(|e| ClientError::IoError(e.to_string()))?;
+
+        let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
+
+        loop {
+            let read_future = reader.next_line();
+
+            let line = if let Some(dl) = deadline {
+                match tokio::time::timeout_at(dl, read_future).await {
+                    Ok(result) => result
+                        .map_err(|e| ClientError::IoError(e.to_string()))?
+                        .ok_or_else(|| {
+                            ClientError::IoError("Daemon closed connection".into())
+                        })?,
+                    Err(_) => {
+                        return Err(ClientError::DaemonError {
+                            code: super::protocol::error_code::TIMEOUT,
+                            message: "Subscription timed out".into(),
+                        });
+                    }
+                }
+            } else {
+                read_future
+                    .await
+                    .map_err(|e| ClientError::IoError(e.to_string()))?
+                    .ok_or_else(|| {
+                        ClientError::IoError("Daemon closed connection".into())
+                    })?
+            };
+
+            let raw: serde_json::Value = serde_json::from_str(&line)
+                .map_err(|e| ClientError::ParseError(e.to_string()))?;
+
+            // If it has an "id" field, it's an error response (subscribe shouldn't
+            // normally produce a response, but errors are possible).
+            if raw.get("id").is_some() {
+                let response: DaemonResponse = serde_json::from_value(raw)
+                    .map_err(|e| ClientError::ParseError(e.to_string()))?;
+
+                if let Some(err) = response.error {
+                    return Err(ClientError::DaemonError {
+                        code: err.code,
+                        message: err.message,
+                    });
+                }
+
+                // Unexpected response — ignore and continue
+                continue;
+            }
+
+            if let Ok(notif) = serde_json::from_value::<DaemonNotification>(raw) {
+                if on_notification(&notif) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     /// Ensure the daemon is running, starting it if necessary.
     pub async fn ensure_running(&self, config: &TruffleConfig) -> Result<(), ClientError> {
         if self.is_daemon_running() {

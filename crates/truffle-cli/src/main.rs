@@ -6,8 +6,11 @@ mod auto_update;
 mod commands;
 pub mod config;
 pub mod daemon;
+pub mod exit_codes;
+pub mod json_output;
 pub mod output;
 pub mod resolve;
+mod tui;
 
 // ==========================================================================
 // CLI structure
@@ -43,6 +46,10 @@ pub struct Cli {
     /// Force color: auto, always, never
     #[arg(long, global = true, default_value = "auto")]
     color: String,
+
+    /// Output as JSON
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -134,6 +141,44 @@ enum Commands {
         no_verify: bool,
     },
 
+    /// Stream mesh events in real time
+    Watch {
+        /// Output as JSON lines (JSONL)
+        #[arg(long)]
+        json: bool,
+        /// Filter by event type: peer, message, transfer
+        #[arg(long = "filter", short)]
+        filters: Vec<String>,
+        /// Stop after N seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+
+    /// Block until a peer comes online
+    Wait {
+        /// Target node name
+        node: String,
+        /// Timeout in seconds (exit code 5 on timeout)
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Block for the next incoming message
+    Recv {
+        /// Only accept messages from this node
+        #[arg(long)]
+        from: Option<String>,
+        /// Timeout in seconds (exit code 5 on timeout)
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Diagnose connectivity issues
     Doctor,
 
@@ -155,50 +200,97 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+    let global_json = cli.json;
 
-    // Initialize color output mode
-    output::init_color(&cli.color);
+    // Initialize color output mode; force disable colors when --json is active
+    if global_json {
+        output::init_color("never");
+    } else {
+        output::init_color(&cli.color);
+    }
 
     // Load configuration
     let config_path = cli.config.as_deref().map(std::path::Path::new);
     let config = match config::TruffleConfig::load(config_path) {
         Ok(c) => c,
         Err(e) => {
-            output::print_error(
-                "Can't load configuration",
-                &e.to_string(),
-                &format!(
-                    "Check your config file at {}",
-                    config::TruffleConfig::default_path().display()
-                ),
-            );
-            std::process::exit(1);
+            if global_json {
+                json_output::print_json(&json_output::error_envelope(
+                    exit_codes::ERROR,
+                    "config_error",
+                    &format!("Can't load configuration: {e}"),
+                    &format!(
+                        "Check your config file at {}",
+                        config::TruffleConfig::default_path().display()
+                    ),
+                ));
+            } else {
+                output::print_error(
+                    "Can't load configuration",
+                    &e.to_string(),
+                    &format!(
+                        "Check your config file at {}",
+                        config::TruffleConfig::default_path().display()
+                    ),
+                );
+            }
+            std::process::exit(exit_codes::ERROR);
         }
     };
 
-    // If no subcommand given, behave like `truffle status`
-    let command = cli.command.unwrap_or(Commands::Status {
-        watch: false,
-        json: false,
-    });
+    // If no subcommand given: TUI on TTY (non-json), status otherwise
+    if cli.command.is_none() {
+        if !global_json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            // Bare `truffle` on a TTY → launch TUI
+            if let Err(e) = tui::run(&config).await {
+                output::print_error(&e, "", "");
+                std::process::exit(exit_codes::ERROR);
+            }
+        } else {
+            // Bare `truffle` piped or with --json → show status
+            if let Err((code, msg)) = commands::status::run(&config, global_json, false).await {
+                handle_error(global_json, code, &msg);
+            }
+        }
+        return;
+    }
+
+    let command = cli.command.unwrap();
 
     let result = match command {
         // -- Node lifecycle --
         Commands::Up { name, foreground } => {
-            commands::up::run(&config, name.as_deref(), foreground).await
+            commands::up::run(&config, name.as_deref(), foreground, global_json).await
         }
 
-        Commands::Down { force } => commands::down::run(force).await,
+        Commands::Down { force } => commands::down::run(&config, force, global_json).await,
 
-        Commands::Status { watch, json } => commands::status::run(&config, json, watch).await,
+        Commands::Status {
+            watch,
+            json: local_json,
+        } => {
+            let json = global_json || local_json;
+            commands::status::run(&config, json, watch).await
+        }
 
         // -- Discovery --
-        Commands::Ls { all, long, json } => commands::ls::run(&config, all, long, json).await,
+        Commands::Ls {
+            all,
+            long,
+            json: local_json,
+        } => {
+            let json = global_json || local_json;
+            commands::ls::run(&config, all, long, json).await
+        }
 
-        Commands::Ping { node, count } => commands::ping::run(&config, &node, count).await,
+        Commands::Ping { node, count } => {
+            commands::ping::run(&config, &node, count, global_json).await
+        }
 
         // -- Connectivity --
-        Commands::Tcp { target, check } => commands::tcp::run(&config, &target, check).await,
+        Commands::Tcp { target, check } => {
+            commands::tcp::run(&config, &target, check, global_json).await
+        }
 
         // -- Communication --
         Commands::Send {
@@ -206,26 +298,67 @@ async fn main() {
             message,
             all,
             wait,
-        } => commands::send::run(&config, &node, &message, all, wait).await,
+        } => commands::send::run(&config, &node, &message, all, wait, global_json).await,
 
         // -- Files --
         Commands::Cp {
             source,
             dest,
             no_verify,
-        } => commands::cp::run(&config, &source, &dest, !no_verify).await,
+        } => commands::cp::run(&config, &source, &dest, !no_verify, global_json).await,
+
+        // -- Streaming --
+        Commands::Watch {
+            json: local_json,
+            filters,
+            timeout,
+        } => {
+            let json = global_json || local_json;
+            commands::watch::run(&config, json, &filters, timeout).await
+        }
+
+        Commands::Wait {
+            node,
+            timeout,
+            json: local_json,
+        } => {
+            let json = global_json || local_json;
+            commands::wait::run(&config, &node, timeout, json).await
+        }
+
+        Commands::Recv {
+            from,
+            timeout,
+            json: local_json,
+        } => {
+            let json = global_json || local_json;
+            commands::recv::run(&config, from.as_deref(), timeout, json).await
+        }
 
         // -- Diagnostics --
-        Commands::Doctor => commands::doctor::run(&config).await,
+        Commands::Doctor => commands::doctor::run(&config, global_json).await,
 
         // -- Self-update --
-        Commands::Update => commands::update::run().await,
+        Commands::Update => commands::update::run(global_json).await,
     };
 
-    if let Err(e) = result {
-        if !e.contains('\u{2717}') {
-            output::print_error(&e, "", "");
-        }
-        std::process::exit(1);
+    if let Err((code, msg)) = result {
+        handle_error(global_json, code, &msg);
     }
+}
+
+fn handle_error(json: bool, code: i32, msg: &str) {
+    if json {
+        if !msg.is_empty() {
+            json_output::print_json(&json_output::error_envelope(
+                code,
+                "command_error",
+                msg,
+                "",
+            ));
+        }
+    } else if !msg.is_empty() && !msg.contains('\u{2717}') {
+        output::print_error(msg, "", "");
+    }
+    std::process::exit(code);
 }

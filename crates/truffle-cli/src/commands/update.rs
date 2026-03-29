@@ -4,6 +4,8 @@
 //! replacement) is exposed as public helpers so that the background
 //! auto-updater can reuse them.
 
+use crate::exit_codes;
+use crate::json_output;
 use crate::output;
 use futures_util::StreamExt;
 use std::io::Write;
@@ -337,42 +339,62 @@ pub fn replace_binaries(extract_dir: &Path, install_dir: &Path) -> Result<(), St
 // Main command
 // ==========================================================================
 
-pub async fn run() -> Result<(), String> {
+pub async fn run(json: bool) -> Result<(), (i32, String)> {
     let current_version = env!("CARGO_PKG_VERSION");
 
-    println!();
-    println!("  {}", output::bold("truffle update"));
-    println!("  {}", output::dim(&"\u{2500}".repeat(39)));
-    println!();
+    if !json {
+        println!();
+        println!("  {}", output::bold("truffle update"));
+        println!("  {}", output::dim(&"\u{2500}".repeat(39)));
+        println!();
 
-    println!(
-        "  Current version: {}",
-        output::cyan(&format!("v{current_version}"))
-    );
-    println!("  Checking for updates...");
+        println!(
+            "  Current version: {}",
+            output::cyan(&format!("v{current_version}"))
+        );
+        println!("  Checking for updates...");
+    }
 
     // 1. Query GitHub releases API for latest
-    let client = build_http_client()?;
-    let release = check_latest_version(&client).await?;
+    let client = build_http_client().map_err(|e| (exit_codes::ERROR, e))?;
+    let release = check_latest_version(&client)
+        .await
+        .map_err(|e| (exit_codes::ERROR, e))?;
 
     let latest_tag = &release.tag_name;
     let latest_version = strip_version_prefix(latest_tag);
 
     // 2. Compare versions
     if !is_newer(current_version, latest_tag) {
-        println!();
-        output::print_success(&format!(
-            "Already up to date (v{current_version})"
-        ));
-        println!();
+        if json {
+            let mut map = json_output::envelope("");
+            map.insert("updated".to_string(), serde_json::json!(false));
+            map.insert(
+                "from".to_string(),
+                serde_json::json!(current_version),
+            );
+            map.insert(
+                "to".to_string(),
+                serde_json::json!(current_version),
+            );
+            json_output::print_json(&serde_json::Value::Object(map));
+        } else {
+            println!();
+            output::print_success(&format!(
+                "Already up to date (v{current_version})"
+            ));
+            println!();
+        }
         return Ok(());
     }
 
-    println!(
-        "  Latest version:  {}",
-        output::green(&format!("v{latest_version}"))
-    );
-    println!();
+    if !json {
+        println!(
+            "  Latest version:  {}",
+            output::green(&format!("v{latest_version}"))
+        );
+        println!();
+    }
 
     // 3. Find the platform-specific asset
     let asset_name = platform_asset();
@@ -381,44 +403,62 @@ pub async fn run() -> Result<(), String> {
         .iter()
         .find(|a| a.name == asset_name)
         .ok_or_else(|| {
-            format!(
-                "No release asset found for this platform ({asset_name}). \
-                 Available assets: {}",
-                release
-                    .assets
-                    .iter()
-                    .map(|a| a.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            (
+                exit_codes::NOT_FOUND,
+                format!(
+                    "No release asset found for this platform ({asset_name}). \
+                     Available assets: {}",
+                    release
+                        .assets
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             )
         })?;
 
-    println!(
-        "  Downloading {} ({})",
-        output::bold(asset_name),
-        output::format_bytes(asset.size)
-    );
+    if !json {
+        println!(
+            "  Downloading {} ({})",
+            output::bold(asset_name),
+            output::format_bytes(asset.size)
+        );
+    }
 
     // 4. Download the asset with progress
-    let tmp_dir =
-        tempfile::tempdir().map_err(|e| format!("Failed to create temp directory: {e}"))?;
+    let tmp_dir = tempfile::tempdir()
+        .map_err(|e| (exit_codes::ERROR, format!("Failed to create temp directory: {e}")))?;
     let archive_path = tmp_dir.path().join(asset_name);
-    download_asset_with_progress(&client, asset, &archive_path).await?;
+
+    if json {
+        download_asset_silent(&client, asset, &archive_path)
+            .await
+            .map_err(|e| (exit_codes::ERROR, e))?;
+    } else {
+        download_asset_with_progress(&client, asset, &archive_path)
+            .await
+            .map_err(|e| (exit_codes::ERROR, e))?;
+    }
 
     // 5. Extract to a temp directory
-    println!("  Extracting...");
+    if !json {
+        println!("  Extracting...");
+    }
     let extract_dir = tmp_dir.path().join("extracted");
     std::fs::create_dir_all(&extract_dir)
-        .map_err(|e| format!("Failed to create extraction dir: {e}"))?;
+        .map_err(|e| (exit_codes::ERROR, format!("Failed to create extraction dir: {e}")))?;
 
-    extract_archive(&archive_path, &extract_dir)?;
+    extract_archive(&archive_path, &extract_dir).map_err(|e| (exit_codes::ERROR, e))?;
 
     // 6. Replace current binaries
-    let install_dir = find_install_dir()?;
-    println!(
-        "  Installing to {}",
-        output::dim(&install_dir.display().to_string())
-    );
+    let install_dir = find_install_dir().map_err(|e| (exit_codes::ERROR, e))?;
+    if !json {
+        println!(
+            "  Installing to {}",
+            output::dim(&install_dir.display().to_string())
+        );
+    }
 
     // Determine binary names
     #[cfg(not(target_os = "windows"))]
@@ -428,9 +468,12 @@ pub async fn run() -> Result<(), String> {
 
     // Find and replace truffle binary
     if let Some(new_truffle) = find_file_in_dir(&extract_dir, truffle_bin) {
-        replace_binary(&new_truffle, &install_dir, truffle_bin)?;
-        output::print_check(output::Indicator::Pass, "Updated truffle binary", "");
-    } else {
+        replace_binary(&new_truffle, &install_dir, truffle_bin)
+            .map_err(|e| (exit_codes::ERROR, e))?;
+        if !json {
+            output::print_check(output::Indicator::Pass, "Updated truffle binary", "");
+        }
+    } else if !json {
         output::print_check(
             output::Indicator::Warn,
             "truffle binary",
@@ -440,9 +483,12 @@ pub async fn run() -> Result<(), String> {
 
     // Find and replace sidecar binary
     if let Some(new_sidecar) = find_file_in_dir(&extract_dir, sidecar_bin) {
-        replace_binary(&new_sidecar, &install_dir, sidecar_bin)?;
-        output::print_check(output::Indicator::Pass, "Updated sidecar", "");
-    } else {
+        replace_binary(&new_sidecar, &install_dir, sidecar_bin)
+            .map_err(|e| (exit_codes::ERROR, e))?;
+        if !json {
+            output::print_check(output::Indicator::Pass, "Updated sidecar", "");
+        }
+    } else if !json {
         output::print_check(
             output::Indicator::Warn,
             "sidecar binary",
@@ -450,12 +496,23 @@ pub async fn run() -> Result<(), String> {
         );
     }
 
-    // 7. Verify
-    println!();
-    output::print_success(&format!(
-        "Updated truffle v{current_version} -> v{latest_version}"
-    ));
-    println!();
+    // 7. Output result
+    if json {
+        let mut map = json_output::envelope("");
+        map.insert("updated".to_string(), serde_json::json!(true));
+        map.insert(
+            "from".to_string(),
+            serde_json::json!(current_version),
+        );
+        map.insert("to".to_string(), serde_json::json!(latest_version));
+        json_output::print_json(&serde_json::Value::Object(map));
+    } else {
+        println!();
+        output::print_success(&format!(
+            "Updated truffle v{current_version} -> v{latest_version}"
+        ));
+        println!();
+    }
 
     Ok(())
 }

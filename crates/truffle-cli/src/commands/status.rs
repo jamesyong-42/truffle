@@ -3,22 +3,38 @@
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
+use crate::exit_codes;
+use crate::json_output;
 use crate::output;
 
-pub async fn run(config: &TruffleConfig, json: bool, _watch: bool) -> Result<(), String> {
+pub async fn run(config: &TruffleConfig, json: bool, _watch: bool) -> Result<(), (i32, String)> {
     let client = DaemonClient::new();
     client
         .ensure_running(config)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::NOT_ONLINE, e.to_string()))?;
 
     let result = client
         .request(method::STATUS, serde_json::json!({}))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::ERROR, e.to_string()))?;
 
     if json {
-        output::print_json(&result);
+        let node_name = result["name"]
+            .as_str()
+            .unwrap_or(&config.node.name);
+        let mut map = json_output::envelope(node_name);
+
+        // Merge daemon response fields into the envelope
+        if let Some(obj) = result.as_object() {
+            for (k, v) in obj {
+                if k != "name" {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
+        json_output::print_json(&serde_json::Value::Object(map));
         return Ok(());
     }
 

@@ -6,6 +6,8 @@ use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
 use crate::daemon::server::DaemonServer;
+use crate::exit_codes;
+use crate::json_output;
 use crate::output;
 
 /// Start the daemon.
@@ -13,7 +15,8 @@ pub async fn run(
     config: &TruffleConfig,
     name: Option<&str>,
     foreground: bool,
-) -> Result<(), String> {
+    json: bool,
+) -> Result<(), (i32, String)> {
     let mut config = config.clone();
     if let Some(name) = name {
         config.node.name = name.to_string();
@@ -21,7 +24,19 @@ pub async fn run(
 
     let client = DaemonClient::new();
     if client.is_daemon_running() {
-        if let Ok(result) = client
+        if json {
+            let mut map = json_output::envelope(&config.node.name);
+            map.insert("status".to_string(), serde_json::json!("already_running"));
+            if let Ok(result) = client
+                .request(method::STATUS, serde_json::json!({}))
+                .await
+            {
+                if let Some(pid) = result["pid"].as_u64() {
+                    map.insert("pid".to_string(), serde_json::json!(pid));
+                }
+            }
+            json_output::print_json(&serde_json::Value::Object(map));
+        } else if let Ok(result) = client
             .request(method::STATUS, serde_json::json!({}))
             .await
         {
@@ -44,11 +59,11 @@ pub async fn run(
     if foreground {
         run_foreground(&config).await
     } else {
-        run_background(&config, name).await
+        run_background(&config, name, json).await
     }
 }
 
-async fn run_foreground(config: &TruffleConfig) -> Result<(), String> {
+async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
     println!();
     println!("  {}", output::bold("truffle v2"));
     println!("  {}", output::dim(&"\u{2500}".repeat(39)));
@@ -66,7 +81,9 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), String> {
         std::process::id()
     );
 
-    let server = DaemonServer::start(config).await?;
+    let server = DaemonServer::start(config)
+        .await
+        .map_err(|e| (exit_codes::ERROR, e))?;
 
     // Spawn the file transfer receive handler
     let node = server.node().clone();
@@ -160,13 +177,17 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), String> {
         }
     });
 
-    server.run().await?;
+    server.run().await.map_err(|e| (exit_codes::ERROR, e))?;
     Ok(())
 }
 
-async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<(), String> {
+async fn run_background(
+    config: &TruffleConfig,
+    name: Option<&str>,
+    json: bool,
+) -> Result<(), (i32, String)> {
     let exe = std::env::current_exe()
-        .map_err(|e| format!("Failed to get current executable: {e}"))?;
+        .map_err(|e| (exit_codes::ERROR, format!("Failed to get current executable: {e}")))?;
 
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("up").arg("--foreground");
@@ -198,13 +219,16 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
     }
 
     cmd.spawn()
-        .map_err(|e| format!("Failed to start background daemon: {e}"))?;
+        .map_err(|e| (exit_codes::ERROR, format!("Failed to start background daemon: {e}")))?;
 
     let client = DaemonClient::new();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
     loop {
         if tokio::time::Instant::now() > deadline {
-            return Err("Timed out waiting for daemon to start".to_string());
+            return Err((
+                exit_codes::TIMEOUT,
+                "Timed out waiting for daemon to start".to_string(),
+            ));
         }
 
         if client.is_daemon_running() {
@@ -218,6 +242,24 @@ async fn run_background(config: &TruffleConfig, name: Option<&str>) -> Result<()
 
     // Fire-and-forget background update (after daemon is up, never blocks).
     auto_update::spawn_background_update(config.updates.clone());
+
+    if json {
+        // JSON output: query the daemon for PID and status
+        let mut map = json_output::envelope(&config.node.name);
+        map.insert("status".to_string(), serde_json::json!("started"));
+
+        if let Ok(result) = client
+            .request(method::STATUS, serde_json::json!({}))
+            .await
+        {
+            if let Some(pid) = result["pid"].as_u64() {
+                map.insert("pid".to_string(), serde_json::json!(pid));
+            }
+        }
+
+        json_output::print_json(&serde_json::Value::Object(map));
+        return Ok(());
+    }
 
     // Show status
     println!();

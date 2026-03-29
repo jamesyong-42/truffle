@@ -3,6 +3,8 @@
 use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::daemon::protocol::method;
+use crate::exit_codes;
+use crate::json_output;
 use crate::output;
 
 pub async fn run(
@@ -10,17 +12,17 @@ pub async fn run(
     all: bool,
     long: bool,
     json: bool,
-) -> Result<(), String> {
+) -> Result<(), (i32, String)> {
     let client = DaemonClient::new();
     client
         .ensure_running(config)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::NOT_ONLINE, e.to_string()))?;
 
     let result = client
         .request(method::PEERS, serde_json::json!({}))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| (exit_codes::ERROR, e.to_string()))?;
 
     let peers = result["peers"]
         .as_array()
@@ -28,7 +30,9 @@ pub async fn run(
         .unwrap_or_default();
 
     if json {
-        output::print_json(&serde_json::json!({ "peers": peers }));
+        let mut map = json_output::envelope(&config.node.name);
+        map.insert("peers".to_string(), serde_json::json!(peers));
+        json_output::print_json(&serde_json::Value::Object(map));
         return Ok(());
     }
 

@@ -21,7 +21,7 @@ pub fn init_color(mode: &str) {
     let enabled = match mode {
         "never" => false,
         "always" => true,
-        _ => is_tty(),
+        _ => is_tty() && std::env::var("NO_COLOR").is_err(),
     };
     COLOR_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
