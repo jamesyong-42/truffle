@@ -305,6 +305,49 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
 
 /// Handle a key press.
 fn handle_key(app: &mut AppState, key: KeyEvent) {
+    // If file picker is open, route all keys to it
+    if app.file_picker.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.file_picker = None;
+            }
+            KeyCode::Enter => {
+                // Check if current selection is a file or directory
+                let is_file = app.file_picker.as_ref()
+                    .map(|e| !e.current().is_dir)
+                    .unwrap_or(false);
+
+                if is_file {
+                    // Select the file and insert its path into the input
+                    if let Some(path) = app.close_file_picker_with_selection() {
+                        // Ensure input has "/cp " prefix, then add the path
+                        if !app.input.starts_with("/cp ") {
+                            app.input = "/cp ".to_string();
+                            app.cursor_pos = 4;
+                        }
+                        let byte_pos = char_to_byte_pos(&app.input, app.cursor_pos);
+                        app.input.insert_str(byte_pos, &path);
+                        app.cursor_pos += path.chars().count();
+                    }
+                } else {
+                    // Directory — let explorer navigate into it
+                    let event = crossterm::event::Event::Key(key);
+                    if let Some(ref mut explorer) = app.file_picker {
+                        let _ = explorer.handle(&event);
+                    }
+                }
+            }
+            _ => {
+                // Forward the event to ratatui-explorer
+                let event = crossterm::event::Event::Key(key);
+                if let Some(ref mut explorer) = app.file_picker {
+                    let _ = explorer.handle(&event);
+                }
+            }
+        }
+        return;
+    }
+
     // If autocomplete is visible, intercept Tab/Esc/Up/Down
     if app.autocomplete.is_some() {
         match key.code {
@@ -382,10 +425,15 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             // Enter is handled in the main loop (async command dispatch)
         }
         KeyCode::Tab => {
-            // Tab without autocomplete visible — try to trigger it
-            app.update_autocomplete();
-            if app.autocomplete.is_some() {
-                app.accept_autocomplete();
+            // If input starts with "/cp ", open file picker
+            if app.input.starts_with("/cp ") || app.input == "/cp" {
+                app.open_file_picker();
+            } else {
+                // Tab without autocomplete visible — try to trigger it
+                app.update_autocomplete();
+                if app.autocomplete.is_some() {
+                    app.accept_autocomplete();
+                }
             }
         }
         KeyCode::Up => {

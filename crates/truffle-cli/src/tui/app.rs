@@ -8,6 +8,8 @@ use chrono::{DateTime, Local};
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::node::Node;
 
+use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
+
 use crate::output;
 
 /// Peer info cached for the device panel.
@@ -166,6 +168,9 @@ pub struct AppState {
     /// Autocomplete overlay state.
     pub autocomplete: Option<AutocompleteState>,
 
+    /// File picker overlay (for /cp command).
+    pub file_picker: Option<FileExplorer>,
+
     /// Unread count (items added while scrolled up).
     pub unread_count: usize,
 
@@ -190,6 +195,7 @@ impl AppState {
             peers: Vec::new(),
             notifications: VecDeque::new(),
             autocomplete: None,
+            file_picker: None,
             unread_count: 0,
             started_at: Instant::now(),
             should_quit: false,
@@ -425,6 +431,26 @@ impl AppState {
     /// Get the formatted uptime string.
     pub fn uptime_str(&self) -> String {
         output::format_uptime(self.uptime_secs())
+    }
+
+    /// Open the file picker overlay.
+    pub fn open_file_picker(&mut self) {
+        let theme = Theme::default()
+            .add_default_title();
+        if let Ok(explorer) = FileExplorerBuilder::build_with_theme(theme) {
+            self.file_picker = Some(explorer);
+        }
+    }
+
+    /// Close the file picker and return the selected file path (if any).
+    pub fn close_file_picker_with_selection(&mut self) -> Option<String> {
+        let explorer = self.file_picker.take()?;
+        let file = explorer.current();
+        if file.is_dir {
+            None // Don't select directories
+        } else {
+            Some(file.path.to_string_lossy().to_string())
+        }
     }
 
     /// Count online peers.

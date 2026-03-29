@@ -17,6 +17,7 @@ use crate::tui::app::AppState;
 pub mod activity_feed;
 pub mod autocomplete;
 pub mod device_panel;
+pub mod file_picker;
 pub mod input_bar;
 pub mod status_bar;
 pub mod toast;
@@ -49,6 +50,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     status_bar::render(frame, status_area, app);
 
     // Overlays — rendered LAST so they appear on top
+    file_picker::render(frame, feed_area, app);
     autocomplete::render(frame, input_area, app);
     toast::render_toast(frame, feed_area, app);
 }
