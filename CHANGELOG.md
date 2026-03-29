@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.7](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.6...truffle-v0.3.7) (2026-03-29)
+
+
+### Bug Fixes
+
+* bump Cargo.toml versions to 0.3.7 ([33e2f96](https://github.com/jamesyong-42/truffle/commit/33e2f967e502b92826c282e3c7e4809b4a341876))
+* fast peer offline detection via WantRunning=false on shutdown ([4e54043](https://github.com/jamesyong-42/truffle/commit/4e5404385341036ce4a741b30ce66a39b0cba0ff))
+* handle PeerEvent::Updated to track online/offline status changes ([799be7c](https://github.com/jamesyong-42/truffle/commit/799be7cbf051be0b9581c32c58a357cdfb61b1a2))
+* populate initial peer list on TUI startup ([6c5d175](https://github.com/jamesyong-42/truffle/commit/6c5d1759955d13136a98376d3129cd62172cc63f))
+
 ## [0.3.6](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.5...truffle-v0.3.6) (2026-03-29)
 
 
