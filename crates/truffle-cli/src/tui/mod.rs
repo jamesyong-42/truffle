@@ -315,6 +315,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 app.file_picker = None;
+                // Reset input to "/" so the command list shows again
+                app.input = "/".to_string();
+                app.cursor_pos = 1;
+                app.update_autocomplete();
             }
             KeyCode::Enter => {
                 // Check if current selection is a file or directory
