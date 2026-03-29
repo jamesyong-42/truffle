@@ -167,12 +167,38 @@ pub fn spawn_event_collectors(
                                     size: offer.size,
                                 });
                             }
-                            // Progress, Completed, and Failed are handled by the
-                            // /cp command's own event forwarder. We don't need to
-                            // duplicate them here (they'd conflict with the /cp task's
-                            // events). The core events here are for receive-side
-                            // observability — Phase 3 will add TUI display for those.
-                            _ => {}
+                            FileTransferEvent::Progress(p) => {
+                                let percent = if p.total_bytes > 0 {
+                                    p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0
+                                } else {
+                                    0.0
+                                };
+                                let _ = tx.send(AppEvent::TransferProgress {
+                                    file_name: p.file_name,
+                                    percent,
+                                    speed_bps: p.speed_bps,
+                                });
+                            }
+                            FileTransferEvent::Completed {
+                                file_name,
+                                bytes_transferred,
+                                sha256,
+                                ..
+                            } => {
+                                let _ = tx.send(AppEvent::TransferComplete {
+                                    file_name,
+                                    size: bytes_transferred,
+                                    sha256,
+                                });
+                            }
+                            FileTransferEvent::Failed {
+                                file_name, reason, ..
+                            } => {
+                                let _ = tx.send(AppEvent::TransferFailed {
+                                    file_name,
+                                    reason,
+                                });
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

@@ -166,20 +166,48 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
                 crate::tui::app::TransferDirection::Receive => "\u{2b07}",
             };
             let size_str = crate::output::format_bytes(*size);
-            let status_str = match status {
-                crate::tui::app::TransferStatus::InProgress { percent, .. } => {
-                    format!(" {percent:.0}%")
-                }
-                crate::tui::app::TransferStatus::Complete { .. } => " \u{2713}".to_string(),
-                crate::tui::app::TransferStatus::Failed { reason } => {
-                    format!(" \u{2717} {reason}")
-                }
-            };
 
-            Line::from(vec![
-                Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{arrow} {file_name} ({size_str}){status_str}")),
-            ])
+            match status {
+                crate::tui::app::TransferStatus::InProgress { percent, speed_bps } => {
+                    // Progress bar: ████████████░░░░░░░░ 45%  1.2 MB/s
+                    let bar_width: usize = 24;
+                    let filled = (*percent / 100.0 * bar_width as f64) as usize;
+                    let empty = bar_width.saturating_sub(filled);
+                    let bar_filled = "\u{2588}".repeat(filled);
+                    let bar_empty = "\u{2591}".repeat(empty);
+                    let speed_str = crate::output::format_speed(*speed_bps);
+
+                    Line::from(vec![
+                        Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{arrow} {file_name} ")),
+                        Span::styled(bar_filled, Style::default().fg(Color::Cyan)),
+                        Span::styled(bar_empty, Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!(" {percent:.0}%")),
+                        Span::styled(format!("  {speed_str}"), Style::default().fg(Color::DarkGray)),
+                    ])
+                }
+                crate::tui::app::TransferStatus::Complete { sha256 } => {
+                    let sha_short = if sha256.len() >= 8 {
+                        format!("{}..{}", &sha256[..4], &sha256[sha256.len() - 4..])
+                    } else {
+                        sha256.clone()
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{arrow} {file_name} ")),
+                        Span::styled("\u{2713}", Style::default().fg(Color::Green)),
+                        Span::styled(format!("  {size_str}  sha:{sha_short}"), Style::default().fg(Color::DarkGray)),
+                    ])
+                }
+                crate::tui::app::TransferStatus::Failed { reason } => {
+                    Line::from(vec![
+                        Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{arrow} {file_name} ")),
+                        Span::styled("\u{2717}", Style::default().fg(Color::Red)),
+                        Span::styled(format!("  {reason}"), Style::default().fg(Color::Red)),
+                    ])
+                }
+            }
         }
     }
 }
