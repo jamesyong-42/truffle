@@ -138,14 +138,21 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
             Some(AppEvent::Key(key)) => {
                 // Handle Enter specially — command dispatch is async
                 if key.code == KeyCode::Enter {
-                    let input = app.input.trim().to_string();
-                    if !input.is_empty() {
-                        app.history.push(input.clone());
-                        app.save_history_entry(&input);
-                        app.history_index = None;
-                        app.input.clear();
-                        app.cursor_pos = 0;
-                        handle_input_async(&mut app, &input, event_tx.clone()).await;
+                    // If autocomplete is open, Enter fills the selected item
+                    // instead of submitting the input.
+                    if app.autocomplete.is_some() {
+                        app.accept_autocomplete();
+                        app.update_autocomplete();
+                    } else {
+                        let input = app.input.trim().to_string();
+                        if !input.is_empty() {
+                            app.history.push(input.clone());
+                            app.save_history_entry(&input);
+                            app.history_index = None;
+                            app.input.clear();
+                            app.cursor_pos = 0;
+                            handle_input_async(&mut app, &input, event_tx.clone()).await;
+                        }
                     }
                 } else {
                     handle_key(&mut app, key);
