@@ -523,54 +523,44 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
     }
 }
 
-/// Redirect stderr to a log file so tracing and sidecar output don't corrupt the TUI.
+/// Redirect stderr to a log file so sidecar output doesn't corrupt the TUI.
 ///
-/// Log goes to `~/.config/truffle/tui.log`. If the file can't be opened,
-/// stderr is redirected to /dev/null.
+/// Log goes to `~/.config/truffle/tui.log`. The file handle is leaked
+/// intentionally so the fd/handle stays valid for the process lifetime.
 fn redirect_stderr_to_log() {
+    let log_path = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("truffle")
+        .join("tui.log");
+
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
     #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let log_path = dirs::config_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("truffle")
-            .join("tui.log");
-
-        // Ensure parent dir exists
-        if let Some(parent) = log_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        // Open the log file (or /dev/null as fallback)
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .or_else(|_| std::fs::File::open("/dev/null"))
-            .ok();
-
-        if let Some(f) = file {
-            unsafe {
-                libc::dup2(f.as_raw_fd(), libc::STDERR_FILENO);
-            }
+    if let Ok(f) = file {
+        use std::os::unix::io::IntoRawFd;
+        let fd = f.into_raw_fd(); // Leak the fd so it stays valid
+        unsafe {
+            libc::dup2(fd, libc::STDERR_FILENO);
         }
     }
 
     #[cfg(windows)]
-    {
-        // On Windows, redirect stderr to NUL
-        let _ = std::fs::OpenOptions::new()
-            .write(true)
-            .open("NUL")
-            .map(|f| {
-                use std::os::windows::io::AsRawHandle;
-                unsafe {
-                    windows_sys::Win32::System::Console::SetStdHandle(
-                        windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
-                        f.as_raw_handle() as _,
-                    );
-                }
-            });
+    if let Ok(f) = file {
+        use std::os::windows::io::IntoRawHandle;
+        let handle = f.into_raw_handle(); // Leak the handle so it stays valid
+        unsafe {
+            windows_sys::Win32::System::Console::SetStdHandle(
+                windows_sys::Win32::System::Console::STD_ERROR_HANDLE,
+                handle as _,
+            );
+        }
     }
 }
 

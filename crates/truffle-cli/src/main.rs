@@ -192,15 +192,49 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
     let global_json = cli.json;
+
+    // Determine if we're launching the TUI (bare command on a TTY)
+    let is_tui_mode =
+        cli.command.is_none() && !global_json && std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    // Initialize tracing — suppress in TUI mode to prevent log corruption,
+    // write to a log file instead.
+    if is_tui_mode {
+        // In TUI mode: write tracing to ~/.config/truffle/tui.log
+        let log_path = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("truffle")
+            .join("tui.log");
+        let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")));
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                )
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .init();
+        } else {
+            // Fallback: suppress all tracing
+            tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new("off"))
+                .init();
+        }
+    } else {
+        // Normal mode: write tracing to stderr
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .init();
+    }
 
     // Initialize color output mode; force disable colors when --json is active
     if global_json {
