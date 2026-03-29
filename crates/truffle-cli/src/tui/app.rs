@@ -195,8 +195,6 @@ impl AppState {
             should_quit: false,
         };
 
-        // Add the startup banner as the first items in the feed
-        state.push_banner();
         state
     }
 
