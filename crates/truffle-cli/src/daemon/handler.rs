@@ -319,6 +319,7 @@ fn peer_event_to_notification(
                 }),
             )
         }
+        PeerEvent::AuthRequired { .. } => return None,
     };
 
     Some(DaemonNotification::new(method_name, params))

@@ -167,6 +167,7 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
                             );
                         }
                         PeerEvent::Updated(_) => {}
+                        PeerEvent::AuthRequired { .. } => {}
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

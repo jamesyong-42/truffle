@@ -78,6 +78,8 @@ pub enum PeerEvent {
     Connected(String),
     /// A WebSocket connection was lost to a peer (Layer 5).
     Disconnected(String),
+    /// Authentication is required — the URL should be shown to the user.
+    AuthRequired { url: String },
 }
 
 /// An incoming message received from a peer via WebSocket.
@@ -324,8 +326,8 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                             "session: peer updated"
                         );
                     }
-                    Ok(NetworkPeerEvent::AuthRequired { .. }) => {
-                        // Auth events are handled by the caller, not the session
+                    Ok(NetworkPeerEvent::AuthRequired { url }) => {
+                        let _ = event_tx.send(PeerEvent::AuthRequired { url });
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(

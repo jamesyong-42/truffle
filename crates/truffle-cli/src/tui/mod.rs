@@ -597,6 +597,11 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 });
             }
         }
+        PeerEvent::AuthRequired { url } => {
+            // During normal TUI operation, auth shouldn't be needed.
+            // Log it in case it happens (e.g., key rotation).
+            tracing::info!("auth required during TUI session: {url}");
+        }
     }
 }
 

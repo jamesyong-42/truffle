@@ -670,6 +670,92 @@ impl NodeBuilder {
         tracing::info!("node: started successfully");
         Ok(node)
     }
+
+    /// Build and start the node, calling `on_auth` if authentication is needed.
+    ///
+    /// This is identical to [`build()`](Self::build) except it subscribes to
+    /// provider events *before* `provider.start()` blocks, forwarding
+    /// `AuthRequired` events to the callback while waiting for authentication
+    /// to complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NodeError::BuildError`] if required configuration is missing,
+    /// or propagates errors from the network provider startup.
+    pub async fn build_with_auth_handler(
+        self,
+        on_auth: impl Fn(String) + Send + 'static,
+    ) -> Result<Node<TailscaleProvider>, NodeError> {
+        let binary_path = self
+            .sidecar_path
+            .ok_or_else(|| NodeError::BuildError("sidecar_path is required".into()))?;
+
+        let hostname = self
+            .name
+            .ok_or_else(|| NodeError::BuildError("name is required".into()))?;
+
+        let state_dir = self
+            .state_dir
+            .unwrap_or_else(|| format!("/tmp/truffle-{hostname}"));
+
+        // 1. Create the TailscaleProvider (not started yet).
+        let config = TailscaleConfig {
+            binary_path,
+            hostname,
+            state_dir,
+            auth_key: self.auth_key,
+            ephemeral: if self.ephemeral { Some(true) } else { None },
+            tags: None,
+        };
+
+        let mut provider = TailscaleProvider::new(config);
+
+        // 2. Subscribe to peer events BEFORE start() so we capture auth URLs.
+        let mut auth_rx = provider.peer_events();
+
+        // 3. Spawn a task that forwards AuthRequired events to the callback.
+        let auth_task = tokio::spawn(async move {
+            use crate::network::NetworkPeerEvent;
+            loop {
+                match auth_rx.recv().await {
+                    Ok(NetworkPeerEvent::AuthRequired { url }) => {
+                        on_auth(url);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    _ => {} // Ignore other events
+                }
+            }
+        });
+
+        // 4. Start the provider (blocks until auth completes).
+        let start_result = provider.start().await.map_err(NodeError::Network);
+
+        // 5. Cancel the auth forwarding task — auth is done.
+        auth_task.abort();
+
+        start_result?;
+
+        let network = Arc::new(provider);
+
+        // 6. Create WebSocket transport.
+        let ws_config = WsConfig {
+            port: self.ws_port,
+            ..Default::default()
+        };
+        let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config));
+
+        // 7. Create PeerRegistry and start session.
+        let session = Arc::new(PeerRegistry::new(network.clone(), ws_transport));
+        session.start().await;
+
+        // 8. Create the node with the envelope router.
+        let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
+        let node = Node::from_parts(network, session, codec);
+
+        tracing::info!("node: started successfully (with auth handler)");
+        Ok(node)
+    }
 }
 
 // ---------------------------------------------------------------------------
