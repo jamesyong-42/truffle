@@ -549,6 +549,22 @@ func (s *shim) handleStop() {
 	s.udpRelayMu.Unlock()
 
 	if s.server != nil {
+		// Explicitly disconnect from the control plane before closing.
+		// This makes the control server detect the disconnect immediately
+		// and push Online=false to other peers within seconds.
+		// We use EditPrefs to set WantRunning=false which tells the control
+		// server we're intentionally going offline (vs a crash/network issue).
+		lc, lcErr := s.server.LocalClient()
+		if lcErr == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, _ = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
+				Prefs: ipn.Prefs{
+					WantRunning: false,
+				},
+				WantRunningSet: true,
+			})
+		}
 		if err := s.server.Close(); err != nil {
 			log.Printf("server close error: %v", err)
 		}
