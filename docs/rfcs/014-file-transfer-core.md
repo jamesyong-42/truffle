@@ -333,22 +333,24 @@ crates/truffle-core/src/file_transfer/
 - Update daemon handler to call `node.file_transfer()` methods
 - Update TUI `/cp` command to use core API
 
-### Phase 3: TUI accept/reject prompt
-- Use `set_offer_handler_async` with oneshot channels
-- Display `[a]ccept [s]ave as... [r]eject [d]on't ask again` in feed
-- Handle single-keypress responses
-- Implement `don't ask again` via config
+### Phase 3: TUI accept/reject modal dialog
+- Subscribe to core's offer channel for `(FileOffer, OfferResponder)` pairs
+- Display modal dialog overlay with `[a]ccept [s]ave as... [r]eject [d]on't ask again`
+- Implement "save as..." with inline path editor + Tab file picker
+- Implement "don't ask again" via config auto_accept_peers
+- Queue multiple offers — one dialog at a time, 60s timeout per offer
 
 ### Phase 4: Progress events in TUI feed
 - Subscribe to `ft.subscribe()` for FileTransferEvent
 - Replace the current manual progress forwarding with core events
-- Show proper progress bars in the activity feed
+- Show proper progress bars inline in the activity feed
+- Completion with SHA-256, failure with reason
 
 ## 9. What Stays in CLI
 
 - The `/cp` slash command parsing (TUI-specific)
 - The `truffle cp` one-shot command (CLI-specific)
-- The interactive accept/reject TUI prompt (TUI-specific)
+- The interactive accept/reject TUI modal (TUI-specific)
 - Config for auto-accept peers (CLI-specific)
 
 ## 10. What Moves to Core
@@ -357,13 +359,102 @@ crates/truffle-core/src/file_transfer/
 - `TransferResult`, `TransferError` types
 - Upload/send logic (hash → offer → wait accept → TCP stream)
 - Download/pull logic (pull request → wait offer → accept → TCP receive)
-- Receive handler with pluggable accept/reject
-- Progress event system
+- Receive handler with pluggable accept/reject (channel-based)
+- Progress event system (broadcast)
 - SHA-256 verification
+- Streaming to temp file + rename on verification
 
-## 11. Open Questions
+## 11. Decided Questions
 
-- Should `FileTransfer` start automatically with the Node, or require explicit `node.file_transfer().start()`?
-- Should the offer handler be sync (`Fn → OfferDecision`) or async (`Fn → Future<OfferDecision>`)?
-- Should the receiver support streaming to disk (for large files) or buffer in memory (current approach)?
-- Should there be a transfer size limit that can be configured?
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Auto-start vs explicit | **Lazy start** — activates on first `set_offer_handler()` or `auto_accept()` | No wasted resources, sending always works |
+| Handler type | **Channel-based** — `(FileOffer, OfferResponder)` pairs | Cleanest for TUI/GUI/JS event loops, timeout-safe |
+| Disk vs memory | **Stream to disk** — temp file + incremental SHA-256 + rename | Constant memory, handles any file size |
+| Size limit | **Default 1GB, overridable** via `set_max_transfer_size()` | Safe by default |
+
+## 12. TUI Accept/Reject UX Design
+
+### Modal Dialog (Option B)
+
+When a file offer arrives, a centered modal overlay appears on top of the activity feed:
+
+```
+╭─── incoming file ────────────────────────────────────╮
+│                                                      │
+│  server wants to send you a file:                    │
+│                                                      │
+│  📄 report.pdf  (2.1 MB)                            │
+│  Save to: ~/Downloads/truffle/report.pdf             │
+│                                                      │
+│  [a] Accept    [s] Save as...    [r] Reject          │
+│                           [d] Don't ask from server  │
+│                                                      │
+╰──────────────────────────────────────────────────────╯
+```
+
+The dialog captures all keypresses until dismissed. The user cannot interact with the input bar or feed while the dialog is open.
+
+### Responses
+
+**[a] Accept** — accept with default save path. Dialog closes, transfer begins:
+```
+  ⬇ report.pdf from server                            14:05
+    ████████████████████████████████ 100%  3.4 MB/s
+    ✓ 2.1 MB in 0.6s  sha256: 3a8f...d2c1
+```
+
+**[s] Save as...** — dialog transforms to path editor:
+```
+╭─── incoming file ────────────────────────────────────╮
+│                                                      │
+│  Save report.pdf to:                                 │
+│  ❯ ~/Downloads/truffle/report.pdf_                   │
+│                                                      │
+│  [Enter] Confirm    [Tab] Browse    [Esc] Back       │
+│                                                      │
+╰──────────────────────────────────────────────────────╯
+```
+
+Tab opens the file picker (ratatui-explorer) for directory selection. Enter confirms the path. Esc goes back to the main prompt.
+
+**[r] Reject** — reject the transfer. Dialog closes:
+```
+  ⬇ report.pdf from server  ✗ rejected                14:05
+```
+
+**[d] Don't ask again** — accept this transfer AND add the peer to `auto_accept_peers` in config.toml. Future offers from this peer skip the dialog:
+```
+  ⬇ report.pdf from server  ✓ auto-accepted           14:05
+    (Future files from server accepted automatically)
+```
+
+### Timeout
+
+If the user doesn't respond within 60 seconds, the offer is auto-rejected:
+```
+  ⬇ report.pdf from server  ✗ timed out               14:05
+```
+
+### Multiple simultaneous offers
+
+Offers queue. Only one dialog shows at a time. When the user responds, the next queued offer's dialog appears. Queued offers have their own 60s timeout running independently.
+
+### Send progress display
+
+Outgoing transfers (`/cp`) show inline in the feed:
+```
+  ⬆ report.pdf → server                               14:05
+    ████████████████████░░░░░░░░░░░░ 45%  1.2 MB/s  eta 3s
+```
+
+On completion:
+```
+  ⬆ report.pdf → server  ✓  2.1 MB in 1.8s            14:05
+```
+
+On failure:
+```
+  ⬆ report.pdf → server  ✗                             14:05
+    Connection closed after 1.2 MB
+```
