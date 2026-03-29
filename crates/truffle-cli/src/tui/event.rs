@@ -6,10 +6,9 @@
 use crossterm::event::{Event as CtEvent, EventStream, KeyEvent};
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use truffle_core::file_transfer::types::FileTransferEvent;
 use truffle_core::node::NamespacedMessage;
 use truffle_core::session::PeerEvent;
-
-use crate::apps::file_transfer::types::FtMessage;
 
 /// All events the TUI can receive.
 #[derive(Debug)]
@@ -60,7 +59,7 @@ pub enum AppEvent {
 pub fn spawn_event_collectors(
     peer_rx: tokio::sync::broadcast::Receiver<PeerEvent>,
     chat_rx: tokio::sync::broadcast::Receiver<NamespacedMessage>,
-    ft_rx: tokio::sync::broadcast::Receiver<NamespacedMessage>,
+    ft_rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
 ) -> (mpsc::UnboundedSender<AppEvent>, mpsc::UnboundedReceiver<AppEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -145,27 +144,29 @@ pub fn spawn_event_collectors(
         });
     }
 
-    // 4. File transfer events from the mesh ("ft" namespace)
+    // 4. File transfer events from the core (typed FileTransferEvent)
     {
         let tx = tx.clone();
         let mut ft_rx = ft_rx;
         tokio::spawn(async move {
             loop {
                 match ft_rx.recv().await {
-                    Ok(msg) => {
-                        if let Ok(ft_msg) = serde_json::from_value::<FtMessage>(msg.payload.clone()) {
-                            match ft_msg {
-                                FtMessage::Offer { file_name, size, .. } => {
-                                    let from_name = msg.from.clone();
-                                    let _ = tx.send(AppEvent::IncomingFileOffer {
-                                        from_id: msg.from,
-                                        from_name,
-                                        file_name,
-                                        size,
-                                    });
-                                }
-                                _ => {}
+                    Ok(event) => {
+                        match event {
+                            FileTransferEvent::OfferReceived(offer) => {
+                                let _ = tx.send(AppEvent::IncomingFileOffer {
+                                    from_id: offer.from_peer.clone(),
+                                    from_name: offer.from_name.clone(),
+                                    file_name: offer.file_name,
+                                    size: offer.size,
+                                });
                             }
+                            // Progress, Completed, and Failed are handled by the
+                            // /cp command's own event forwarder. We don't need to
+                            // duplicate them here (they'd conflict with the /cp task's
+                            // events). The core events here are for receive-side
+                            // observability — Phase 3 will add TUI display for those.
+                            _ => {}
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

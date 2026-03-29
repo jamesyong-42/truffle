@@ -8,12 +8,12 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tracing::{debug, info};
+use truffle_core::file_transfer::types::FileTransferEvent;
 use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::session::PeerEvent;
 
 use super::protocol::{error_code, method, notification, DaemonNotification, DaemonRequest, DaemonResponse};
-use crate::apps;
 
 /// Context bundling all daemon-owned resources needed by request handlers.
 pub struct DaemonContext {
@@ -153,7 +153,7 @@ pub async fn run_subscribe(
     };
 
     let mut transfer_rx = if params.events.contains(&SubscribeEventType::Transfer) {
-        Some(node.subscribe("ft"))
+        Some(node.file_transfer().subscribe())
     } else {
         None
     };
@@ -214,7 +214,7 @@ pub async fn run_subscribe(
                 }
             }
 
-            // File transfer messages
+            // File transfer events (from core's FileTransfer::subscribe)
             ft_event = async {
                 match transfer_rx.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -222,8 +222,8 @@ pub async fn run_subscribe(
                 }
             } => {
                 match ft_event {
-                    Ok(msg) => {
-                        if let Some(notif) = transfer_to_notification(&msg, &params.peer_filter) {
+                    Ok(event) => {
+                        if let Some(notif) = ft_event_to_notification(&event) {
                             if notification_tx.send(notif).is_err() {
                                 break;
                             }
@@ -346,25 +346,79 @@ fn message_to_notification(
     ))
 }
 
-/// Convert a NamespacedMessage from the "ft" namespace into a notification.
-fn transfer_to_notification(
-    msg: &truffle_core::node::NamespacedMessage,
-    peer_filter: &Option<String>,
+/// Convert a core `FileTransferEvent` into a daemon notification.
+fn ft_event_to_notification(
+    event: &FileTransferEvent,
 ) -> Option<DaemonNotification> {
-    if !matches_peer_filter(&msg.from, peer_filter) {
-        return None;
-    }
-    Some(DaemonNotification::new(
-        "transfer.event",
-        serde_json::json!({
-            "type": "transfer.event",
-            "from": msg.from,
-            "namespace": msg.namespace,
-            "msg_type": msg.msg_type,
-            "payload": msg.payload,
-            "time": chrono::Utc::now().to_rfc3339(),
-        }),
-    ))
+    let (event_type, params) = match event {
+        FileTransferEvent::OfferReceived(offer) => (
+            "transfer.offer_received",
+            serde_json::json!({
+                "type": "transfer.offer_received",
+                "from": offer.from_peer,
+                "from_name": offer.from_name,
+                "file_name": offer.file_name,
+                "size": offer.size,
+                "sha256": offer.sha256,
+                "token": offer.token,
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
+        FileTransferEvent::Progress(p) => (
+            "transfer.progress",
+            serde_json::json!({
+                "type": "transfer.progress",
+                "token": p.token,
+                "direction": format!("{:?}", p.direction),
+                "file_name": p.file_name,
+                "bytes_transferred": p.bytes_transferred,
+                "total_bytes": p.total_bytes,
+                "speed_bps": p.speed_bps,
+                "percent": if p.total_bytes > 0 {
+                    p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0
+                } else { 0.0 },
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
+        FileTransferEvent::Completed {
+            token,
+            direction,
+            file_name,
+            bytes_transferred,
+            sha256,
+            elapsed_secs,
+        } => (
+            "transfer.completed",
+            serde_json::json!({
+                "type": "transfer.completed",
+                "token": token,
+                "direction": format!("{:?}", direction),
+                "file_name": file_name,
+                "bytes_transferred": bytes_transferred,
+                "sha256": sha256,
+                "elapsed_secs": elapsed_secs,
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
+        FileTransferEvent::Failed {
+            token,
+            direction,
+            file_name,
+            reason,
+        } => (
+            "transfer.failed",
+            serde_json::json!({
+                "type": "transfer.failed",
+                "token": token,
+                "direction": format!("{:?}", direction),
+                "file_name": file_name,
+                "reason": reason,
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
+    };
+
+    Some(DaemonNotification::new(event_type, params))
 }
 
 /// Check if a peer name/id matches the optional filter (case-insensitive).
@@ -605,20 +659,38 @@ async fn handle_push_file(
         }
     };
 
-    let progress_cb = move |current: u64, total: u64, speed: f64| {
-        let notif = DaemonNotification::new(
-            super::protocol::notification::CP_PROGRESS,
-            serde_json::json!({
-                "bytes_sent": current,
-                "total_bytes": total,
-                "bytes_per_second": speed,
-                "percent": if total > 0 { current as f64 / total as f64 * 100.0 } else { 0.0 },
-            }),
-        );
-        let _ = notification_tx.send(notif);
-    };
+    // Subscribe to core file transfer events and forward progress as daemon notifications
+    let ft = node.file_transfer();
+    let mut rx = ft.subscribe();
 
-    match apps::file_transfer::upload(node, peer_id, local_path, remote_path, progress_cb).await {
+    let progress_handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(FileTransferEvent::Progress(p)) => {
+                    let notif = DaemonNotification::new(
+                        super::protocol::notification::CP_PROGRESS,
+                        serde_json::json!({
+                            "bytes_sent": p.bytes_transferred,
+                            "total_bytes": p.total_bytes,
+                            "bytes_per_second": p.speed_bps,
+                            "percent": if p.total_bytes > 0 {
+                                p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0
+                            } else { 0.0 },
+                        }),
+                    );
+                    let _ = notification_tx.send(notif);
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let result = ft.send_file(peer_id, local_path, remote_path).await;
+    progress_handle.abort();
+
+    match result {
         Ok(result) => DaemonResponse::success(
             id,
             serde_json::json!({
@@ -675,21 +747,38 @@ async fn handle_get_file(
         }
     };
 
-    let progress_cb = move |current: u64, total: u64, speed: f64| {
-        let notif = DaemonNotification::new(
-            super::protocol::notification::CP_PROGRESS,
-            serde_json::json!({
-                "bytes_received": current,
-                "total_bytes": total,
-                "bytes_per_second": speed,
-                "percent": if total > 0 { current as f64 / total as f64 * 100.0 } else { 0.0 },
-            }),
-        );
-        let _ = notification_tx.send(notif);
-    };
+    // Subscribe to core file transfer events and forward progress as daemon notifications
+    let ft = node.file_transfer();
+    let mut rx = ft.subscribe();
 
-    match apps::file_transfer::download(node, peer_id, remote_path, local_path, progress_cb).await
-    {
+    let progress_handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(FileTransferEvent::Progress(p)) => {
+                    let notif = DaemonNotification::new(
+                        super::protocol::notification::CP_PROGRESS,
+                        serde_json::json!({
+                            "bytes_received": p.bytes_transferred,
+                            "total_bytes": p.total_bytes,
+                            "bytes_per_second": p.speed_bps,
+                            "percent": if p.total_bytes > 0 {
+                                p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0
+                            } else { 0.0 },
+                        }),
+                    );
+                    let _ = notification_tx.send(notif);
+                }
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let result = ft.pull_file(peer_id, remote_path, local_path).await;
+    progress_handle.abort();
+
+    match result {
         Ok(result) => DaemonResponse::success(
             id,
             serde_json::json!({

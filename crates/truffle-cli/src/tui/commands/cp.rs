@@ -5,11 +5,10 @@
 //! The @device is the last @token. Everything before it is the file path.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use truffle_core::file_transfer::types::FileTransferEvent;
 
-use crate::apps::file_transfer::upload;
 use crate::tui::app::{
     AppState, DisplayItem, SystemLevel, TransferDirection, TransferStatus,
 };
@@ -61,7 +60,6 @@ pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSe
     let file_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
 
     // Add initial transfer item to the feed
-    let transfer_idx = app.items.len();
     app.push_item(DisplayItem::FileTransfer {
         time: chrono::Local::now(),
         direction: TransferDirection::Send,
@@ -73,8 +71,7 @@ pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSe
         },
     });
 
-    // Spawn the upload in a background task.
-    // Progress callback sends events back to the main loop via mpsc.
+    // Spawn the upload in a background task using the core file transfer API.
     let node = app.node.clone();
     let peer_id = peer.id.clone();
     let local = local_path.clone();
@@ -84,33 +81,37 @@ pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSe
     let fsize = file_size;
 
     tokio::spawn(async move {
-        // Create a sync-to-async bridge for the progress callback
-        let (prog_tx, mut prog_rx) = mpsc::unbounded_channel::<(u64, u64, f64)>();
+        // Subscribe to core file transfer events for progress
+        let ft = node.file_transfer();
+        let mut rx = ft.subscribe();
 
-        // Spawn a forwarder that converts progress tuples into AppEvents
-        let tx2 = tx.clone();
-        let fname2 = fname.clone();
+        let fname_progress = fname.clone();
+        let tx_progress = tx.clone();
+
+        // Spawn a forwarder that converts FileTransferEvent::Progress into AppEvents
         let forwarder = tokio::spawn(async move {
-            while let Some((sent, total, speed)) = prog_rx.recv().await {
-                let percent = if total > 0 { sent as f64 / total as f64 * 100.0 } else { 0.0 };
-                let _ = tx2.send(AppEvent::TransferProgress {
-                    file_name: fname2.clone(),
-                    percent,
-                    speed_bps: speed,
-                });
+            loop {
+                match rx.recv().await {
+                    Ok(FileTransferEvent::Progress(p)) => {
+                        let percent = if p.total_bytes > 0 {
+                            p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        let _ = tx_progress.send(AppEvent::TransferProgress {
+                            file_name: fname_progress.clone(),
+                            percent,
+                            speed_bps: p.speed_bps,
+                        });
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
         });
 
-        let result = upload::upload(
-            &*node,
-            &peer_id,
-            &local,
-            &remote,
-            move |sent, total, speed| {
-                let _ = prog_tx.send((sent, total, speed));
-            },
-        )
-        .await;
+        let result = ft.send_file(&peer_id, &local, &remote).await;
 
         // Cancel the forwarder task
         forwarder.abort();

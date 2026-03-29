@@ -57,7 +57,7 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     // Subscribe to peer events, chat messages, and file transfer events
     let peer_rx = server.subscribe_peer_events();
     let chat_rx = node.subscribe("chat");
-    let ft_rx = node.subscribe("ft");
+    let ft_rx = node.file_transfer().subscribe();
 
     // Create app state and load command history
     let mut app = AppState::new(node.clone());

@@ -28,6 +28,3 @@ pub mod types;
 pub mod upload;
 pub mod download;
 pub mod receive;
-
-pub use upload::upload;
-pub use download::download;
