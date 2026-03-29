@@ -105,10 +105,7 @@ export function createMeshNode(options: CreateMeshNodeOptions): NapiMeshNode {
     if (_err) return;
 
     if (event.eventType === 'authRequired' && event.payload) {
-      const url =
-        typeof event.payload === 'string'
-          ? event.payload
-          : String(event.payload);
+      const url = typeof event.payload === 'string' ? event.payload : String(event.payload);
 
       if (autoAuth) {
         const opener = customOpenUrl ?? defaultOpenUrl;

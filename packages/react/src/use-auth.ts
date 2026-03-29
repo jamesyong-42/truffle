@@ -30,10 +30,7 @@ export function useAuth(node: MeshNode | null): UseAuthResult {
 
     const fetchAuth = async () => {
       try {
-        const [s, url] = await Promise.all([
-          node.authStatus(),
-          node.authUrl(),
-        ]);
+        const [s, url] = await Promise.all([node.authStatus(), node.authUrl()]);
         if (cancelled) return;
         setStatus(s as AuthStatus);
         setAuthUrl(url);

@@ -15,9 +15,10 @@
 //!
 //! ```rust,no_run
 //! use truffle::{Node, sidecar_path};
+//! use truffle::network::tailscale::TailscaleProvider;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let node = Node::builder()
+//! let node = Node::<TailscaleProvider>::builder()
 //!     .name("my-app")
 //!     .sidecar_path(sidecar_path())
 //!     .build()
