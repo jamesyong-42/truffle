@@ -4,7 +4,7 @@
 //! Rendered on top of the activity feed using the full feed area.
 
 use ratatui::prelude::*;
-use ratatui::widgets::FrameExt as _;
+use ratatui::widgets::{Clear, FrameExt as _};
 
 use crate::tui::app::AppState;
 
@@ -15,6 +15,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         None => return,
     };
 
-    // Render the file explorer widget over the activity feed area
+    // Clear the area first so the activity feed doesn't bleed through
+    frame.render_widget(Clear, area);
     frame.render_widget_ref(explorer.widget(), area);
 }
