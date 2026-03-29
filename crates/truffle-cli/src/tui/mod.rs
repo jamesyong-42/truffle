@@ -819,10 +819,11 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     }
                 }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
-                    // Switch to save-as mode
+                    // Switch to save-as mode and open file picker immediately
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         dialog.phase = app::TransferDialogPhase::SaveAs;
                     }
+                    app.open_file_picker();
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     // Reject
