@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, BorderType, Paragraph};
 use crate::tui::app::AppState;
 
 /// Height of the welcome box (including borders).
-pub const WELCOME_BOX_HEIGHT: u16 = 10;
+pub const WELCOME_BOX_HEIGHT: u16 = 11;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     // Outer box with rounded corners and title
@@ -42,11 +42,40 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let left = halves[0];
     let right = halves[1];
 
+    // Leave 1 column gap between left content and divider, and 1 after
+    let left_content = Rect {
+        x: left.x,
+        y: left.y,
+        width: left.width.saturating_sub(1),
+        height: left.height,
+    };
+    let right_content = Rect {
+        x: right.x + 1,
+        y: right.y,
+        width: right.width.saturating_sub(1),
+        height: right.height,
+    };
+
     // -- Left half: logo + node info --
-    render_left(frame, left, app);
+    render_left(frame, left_content, app);
+
+    // -- Vertical divider --
+    let divider_x = left.x + left.width;
+    for row in 0..inner.height {
+        let cell_rect = Rect {
+            x: divider_x,
+            y: inner.y + row,
+            width: 1,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled("\u{2502}", Style::default().fg(Color::DarkGray))),
+            cell_rect,
+        );
+    }
 
     // -- Right half: device list --
-    render_right(frame, right, app);
+    render_right(frame, right_content, app);
 }
 
 fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
@@ -60,6 +89,9 @@ fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
     let uptime = app.uptime_str();
 
     let mut lines: Vec<Line> = Vec::new();
+
+    // Top margin
+    lines.push(Line::raw(""));
 
     // Logo (3 lines)
     lines.push(Line::from(Span::styled(
@@ -124,6 +156,9 @@ fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn render_right(frame: &mut Frame, area: Rect, app: &AppState) {
     let mut lines: Vec<Line> = Vec::new();
+
+    // Top margin (align with left half)
+    lines.push(Line::raw(""));
 
     // Section header
     lines.push(Line::from(Span::styled(
