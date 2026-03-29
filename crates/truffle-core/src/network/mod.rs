@@ -30,7 +30,10 @@ use tokio::sync::broadcast;
 /// - Layer 3 does NOT know about envelopes, namespaces, or messages
 /// - Layer 3 provides raw `TcpStream` — not framed connections
 /// - `peer_events()` is the ONLY source of peer events — no polling, no announce
-#[allow(async_fn_in_trait)]
+///
+/// All async methods return `Send` futures so that `Node<N>` can be used
+/// inside `tokio::spawn` tasks (required by the file transfer subsystem
+/// and any other code that needs to spawn tasks with node access).
 pub trait NetworkProvider: Send + Sync {
     /// Start the network provider.
     ///
@@ -44,10 +47,10 @@ pub trait NetworkProvider: Send + Sync {
     ///
     /// Returns `Ok(())` when the provider is fully online, or `Err` if auth
     /// times out or a fatal error occurs.
-    async fn start(&mut self) -> Result<(), NetworkError>;
+    fn start(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Stop the network provider and clean up all resources.
-    async fn stop(&mut self) -> Result<(), NetworkError>;
+    fn stop(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Local node's identity (stable ID, hostname, display name).
     ///
@@ -71,7 +74,7 @@ pub trait NetworkProvider: Send + Sync {
     fn peer_events(&self) -> broadcast::Receiver<NetworkPeerEvent>;
 
     /// Snapshot of all currently known peers.
-    async fn peers(&self) -> Vec<NetworkPeer>;
+    fn peers(&self) -> impl std::future::Future<Output = Vec<NetworkPeer>> + Send;
 
     // ── Connectivity primitives for Layer 4 ──
 
@@ -79,18 +82,18 @@ pub trait NetworkProvider: Send + Sync {
     ///
     /// Returns a plain `TcpStream` — all bridge internals (pending_dials,
     /// session token, binary headers) are hidden inside the provider.
-    async fn dial_tcp(&self, addr: &str, port: u16) -> Result<TcpStream, NetworkError>;
+    fn dial_tcp(&self, addr: &str, port: u16) -> impl std::future::Future<Output = Result<TcpStream, NetworkError>> + Send;
 
     /// Listen for incoming TCP connections on a port via the Tailscale tunnel.
     ///
     /// The returned receiver yields `TcpStream`s for each accepted connection.
-    async fn listen_tcp(
+    fn listen_tcp(
         &self,
         port: u16,
-    ) -> Result<NetworkTcpListener, NetworkError>;
+    ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send;
 
     /// Stop listening on a previously opened port.
-    async fn unlisten_tcp(&self, port: u16) -> Result<(), NetworkError>;
+    fn unlisten_tcp(&self, port: u16) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Bind a UDP socket on a port via the network tunnel.
     ///
@@ -100,15 +103,15 @@ pub trait NetworkProvider: Send + Sync {
     ///
     /// Not all providers support UDP. Returns [`NetworkError::Internal`] if
     /// the provider has not implemented UDP transport yet.
-    async fn bind_udp(&self, port: u16) -> Result<NetworkUdpSocket, NetworkError>;
+    fn bind_udp(&self, port: u16) -> impl std::future::Future<Output = Result<NetworkUdpSocket, NetworkError>> + Send;
 
     // ── Diagnostics ──
 
     /// Ping a peer via the network layer (Tailscale TSMP).
-    async fn ping(&self, addr: &str) -> Result<PingResult, NetworkError>;
+    fn ping(&self, addr: &str) -> impl std::future::Future<Output = Result<PingResult, NetworkError>> + Send;
 
     /// Node health info (key expiry, connection quality, warnings).
-    async fn health(&self) -> HealthInfo;
+    fn health(&self) -> impl std::future::Future<Output = HealthInfo> + Send;
 }
 
 // ---------------------------------------------------------------------------

@@ -60,7 +60,13 @@ pub mod transport;
 pub mod session;
 pub mod envelope;
 pub mod node;
+pub mod file_transfer;
 
 // Re-export the main public types for convenience.
 pub use node::{Node, NodeBuilder, Peer, NamespacedMessage, NodeError};
 pub use envelope::Envelope;
+pub use file_transfer::{
+    FileTransfer, FileTransferEvent, FileOffer, OfferResponder, OfferDecision,
+    TransferResult, TransferError, TransferProgress, TransferDirection,
+    FtMessage,
+};

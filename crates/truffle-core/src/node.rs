@@ -39,6 +39,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::envelope::codec::{EnvelopeCodec, JsonCodec};
 use crate::envelope::{Envelope, EnvelopeError};
+use crate::file_transfer::{self, FileTransferState};
 use crate::network::tailscale::{TailscaleConfig, TailscaleProvider};
 use crate::network::{
     HealthInfo, NetworkProvider, NetworkUdpSocket, NodeIdentity, PingResult,
@@ -189,6 +190,8 @@ pub struct Node<N: NetworkProvider + 'static> {
     incoming_tx: broadcast::Sender<NamespacedMessage>,
     /// Per-namespace subscription channels.
     namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
+    /// File transfer subsystem state.
+    pub(crate) file_transfer_state: FileTransferState,
 }
 
 impl<N: NetworkProvider + 'static> Node<N> {
@@ -212,6 +215,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             codec: codec.clone(),
             incoming_tx: incoming_tx.clone(),
             namespace_filters: namespace_filters.clone(),
+            file_transfer_state: FileTransferState::new(),
         };
 
         // Spawn the envelope router task.
@@ -282,6 +286,16 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Create a new [`NodeBuilder`] for configuring and constructing a node.
     pub fn builder() -> NodeBuilder {
         NodeBuilder::default()
+    }
+
+    // ── File Transfer ────────────────────────────────────────────────────
+
+    /// Access the file transfer subsystem.
+    ///
+    /// Returns a [`FileTransfer`](file_transfer::FileTransfer) handle
+    /// that provides methods for sending, receiving, and pulling files.
+    pub fn file_transfer(&self) -> file_transfer::FileTransfer<'_, N> {
+        file_transfer::FileTransfer::new(self)
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────
