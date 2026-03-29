@@ -400,10 +400,16 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                     Some(app::AutocompleteKind::Command)
                 );
                 app.accept_autocomplete();
-                app.update_autocomplete();
-                // Auto-open file picker only when /cp command was just completed
-                if was_command && (app.input.starts_with("/cp ") || app.input == "/cp") {
-                    app.open_file_picker();
+                if was_command {
+                    // Re-evaluate — command completion may lead to further input
+                    app.update_autocomplete();
+                    // Auto-open file picker when /cp is selected
+                    if app.input.starts_with("/cp ") || app.input == "/cp" {
+                        app.open_file_picker();
+                    }
+                } else {
+                    // Device completion — dismiss the list
+                    app.autocomplete = None;
                 }
                 return;
             }
