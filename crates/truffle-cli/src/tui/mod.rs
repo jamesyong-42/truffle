@@ -69,28 +69,44 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     app.load_history();
 
     // Populate initial peer list from current Node state.
-    // subscribe_peer_events() only delivers NEW events — peers already
-    // discovered before the subscription won't trigger a Joined event.
-    {
-        let current_peers = node.peers().await;
-        for peer in current_peers {
-            let name = peer.name.trim_start_matches("truffle-").to_string();
-            app.peers.push(app::PeerInfo {
-                id: peer.id.clone(),
-                name,
-                ip: peer.ip.to_string(),
-                online: peer.online,
-                connection: if peer.connection_type.is_empty() {
-                    None
-                } else {
-                    Some(peer.connection_type.clone())
-                },
-            });
-        }
-    }
+    populate_peers(&node, &mut app).await;
 
     // Spawn event collectors — also get the sender for /cp to push transfer progress
     let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx);
+
+    // Schedule a delayed re-poll of peers. The sidecar's WatchIPNBus may not
+    // have delivered its first PeersReceived event yet at startup, and the
+    // broadcast subscription may have missed early Joined events (race between
+    // DaemonServer::start and subscribe_peer_events). Re-polling after a few
+    // seconds catches peers discovered during this window.
+    {
+        let node_clone = node.clone();
+        let tx = event_tx.clone();
+        tokio::spawn(async move {
+            for delay_secs in [3, 8, 15] {
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+                let peers = node_clone.peers().await;
+                for peer in peers {
+                    if peer.online {
+                        // Re-emit as a synthetic Joined event so the TUI updates
+                        let state = truffle_core::session::PeerState {
+                            id: peer.id.clone(),
+                            name: peer.name.clone(),
+                            ip: peer.ip,
+                            online: peer.online,
+                            connected: peer.connected,
+                            connection_type: peer.connection_type.clone(),
+                            os: peer.os.clone(),
+                            last_seen: peer.last_seen.clone(),
+                        };
+                        let _ = tx.send(event::AppEvent::PeerEvent(
+                            truffle_core::session::PeerEvent::Updated(state),
+                        ));
+                    }
+                }
+            }
+        });
+    }
 
     // Initialize terminal
     let mut terminal = init_terminal().map_err(|e| format!("Failed to init terminal: {e}"))?;
@@ -585,6 +601,39 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                     detail: state.ip.to_string(),
                 });
             }
+        }
+    }
+}
+
+/// Populate app.peers from the current Node peer list.
+async fn populate_peers(
+    node: &std::sync::Arc<truffle_core::node::Node<truffle_core::network::tailscale::TailscaleProvider>>,
+    app: &mut AppState,
+) {
+    let current_peers = node.peers().await;
+    for peer in current_peers {
+        let name = peer.name.trim_start_matches("truffle-").to_string();
+        let id = peer.id.clone();
+        // Update existing or insert new
+        if let Some(existing) = app.peers.iter_mut().find(|p| p.id == id) {
+            existing.online = peer.online;
+            existing.ip = peer.ip.to_string();
+            existing.name = name;
+            if !peer.connection_type.is_empty() {
+                existing.connection = Some(peer.connection_type.clone());
+            }
+        } else {
+            app.peers.push(app::PeerInfo {
+                id,
+                name,
+                ip: peer.ip.to_string(),
+                online: peer.online,
+                connection: if peer.connection_type.is_empty() {
+                    None
+                } else {
+                    Some(peer.connection_type.clone())
+                },
+            });
         }
     }
 }
