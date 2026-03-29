@@ -538,8 +538,53 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 detail: String::new(),
             });
         }
-        PeerEvent::Updated(_) => {
-            // Silently update — no feed entry
+        PeerEvent::Updated(state) => {
+            // Update peer cache with new state (online/offline, IP, connection type)
+            let name = state.name.trim_start_matches("truffle-").to_string();
+            let was_online = app
+                .peers
+                .iter()
+                .find(|p| p.id == state.id)
+                .map(|p| p.online)
+                .unwrap_or(false);
+
+            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == state.id) {
+                peer.online = state.online;
+                peer.ip = state.ip.to_string();
+                peer.name = name.clone();
+                if !state.connection_type.is_empty() {
+                    peer.connection = Some(state.connection_type.clone());
+                }
+            } else {
+                app.peers.push(app::PeerInfo {
+                    id: state.id.clone(),
+                    name: name.clone(),
+                    ip: state.ip.to_string(),
+                    online: state.online,
+                    connection: if state.connection_type.is_empty() {
+                        None
+                    } else {
+                        Some(state.connection_type.clone())
+                    },
+                });
+            }
+
+            // Show a feed event if online status changed
+            if was_online && !state.online {
+                app.push_item(app::DisplayItem::PeerEvent {
+                    time: chrono::Local::now(),
+                    kind: app::PeerEventKind::Disconnected,
+                    peer_name: name,
+                    detail: String::new(),
+                });
+            } else if !was_online && state.online {
+                app.push_item(app::DisplayItem::PeerEvent {
+                    time: chrono::Local::now(),
+                    kind: app::PeerEventKind::Connected,
+                    peer_name: name,
+                    detail: state.ip.to_string(),
+                });
+            }
         }
     }
 }
