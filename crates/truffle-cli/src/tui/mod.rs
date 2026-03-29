@@ -801,21 +801,22 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
         app::TransferDialogPhase::Prompt => {
             match key.code {
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    // Accept with current save path
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
-                    let save_path = dialog.save_path_input.clone();
-                    if let Some(responder) = dialog.responder.take() {
-                        responder.accept(&save_path);
+                    // Check if file already exists
+                    let path_exists = app
+                        .transfer_dialog
+                        .as_ref()
+                        .map(|d| std::path::Path::new(&d.save_path_input).exists())
+                        .unwrap_or(false);
+
+                    if path_exists {
+                        // Ask for overwrite confirmation
+                        if let Some(ref mut dialog) = app.transfer_dialog {
+                            dialog.phase = app::TransferDialogPhase::OverwriteConfirm;
+                        }
+                    } else {
+                        // No conflict — accept directly
+                        accept_current_offer(app);
                     }
-                    app.push_item(app::DisplayItem::System {
-                        time: chrono::Local::now(),
-                        text: format!(
-                            "  \u{2705} Accepted {} \u{2192} {}",
-                            dialog.offer.file_name, save_path,
-                        ),
-                        level: app::SystemLevel::Success,
-                    });
-                    show_next_pending_offer(app);
                 }
                 KeyCode::Char('s') | KeyCode::Char('S') => {
                     // Switch to save-as mode
@@ -905,21 +906,20 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
         app::TransferDialogPhase::SaveAs => {
             match key.code {
                 KeyCode::Enter => {
-                    // Accept with edited save path
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
-                    let save_path = dialog.save_path_input.clone();
-                    if let Some(responder) = dialog.responder.take() {
-                        responder.accept(&save_path);
+                    // Check if file already exists at the edited path
+                    let path_exists = app
+                        .transfer_dialog
+                        .as_ref()
+                        .map(|d| std::path::Path::new(&d.save_path_input).exists())
+                        .unwrap_or(false);
+
+                    if path_exists {
+                        if let Some(ref mut dialog) = app.transfer_dialog {
+                            dialog.phase = app::TransferDialogPhase::OverwriteConfirm;
+                        }
+                    } else {
+                        accept_current_offer(app);
                     }
-                    app.push_item(app::DisplayItem::System {
-                        time: chrono::Local::now(),
-                        text: format!(
-                            "  \u{2705} Accepted {} \u{2192} {}",
-                            dialog.offer.file_name, save_path,
-                        ),
-                        level: app::SystemLevel::Success,
-                    });
-                    show_next_pending_offer(app);
                 }
                 KeyCode::Esc => {
                     // Back to prompt phase
@@ -991,7 +991,40 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 _ => {}
             }
         }
+        app::TransferDialogPhase::OverwriteConfirm => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // User confirmed overwrite
+                    accept_current_offer(app);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Cancel — go back to prompt
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.phase = app::TransferDialogPhase::Prompt;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
+}
+
+/// Accept the current offer and show next pending.
+fn accept_current_offer(app: &mut AppState) {
+    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+    let save_path = dialog.save_path_input.clone();
+    if let Some(responder) = dialog.responder.take() {
+        responder.accept(&save_path);
+    }
+    app.push_item(app::DisplayItem::System {
+        time: chrono::Local::now(),
+        text: format!(
+            "  \u{2705} Accepted {} \u{2192} {}",
+            dialog.offer.file_name, save_path,
+        ),
+        level: app::SystemLevel::Success,
+    });
+    show_next_pending_offer(app);
 }
 
 /// Kill an existing background daemon so the TUI can take over.

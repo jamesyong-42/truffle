@@ -24,6 +24,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &AppState) {
     match dialog.phase {
         TransferDialogPhase::Prompt => render_prompt(f, area, app),
         TransferDialogPhase::SaveAs => render_save_as(f, area, app),
+        TransferDialogPhase::OverwriteConfirm => render_overwrite_confirm(f, area, app),
     }
 }
 
@@ -163,6 +164,51 @@ fn render_save_as(f: &mut Frame, area: Rect, app: &AppState) {
         .title_alignment(Alignment::Left)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
+        .style(Style::default().bg(Color::Black));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, dialog_area);
+}
+
+/// Render the overwrite confirmation dialog.
+fn render_overwrite_confirm(f: &mut Frame, area: Rect, app: &AppState) {
+    let dialog = app.transfer_dialog.as_ref().unwrap();
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "  File already exists:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                &dialog.save_path_input,
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Overwrite? "),
+            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" Yes    "),
+            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" No"),
+        ]),
+        Line::from(""),
+    ];
+
+    let dialog_height = lines.len() as u16 + 2;
+    let dialog_width = 56u16;
+    let dialog_area = centered_rect(dialog_width, dialog_height, area);
+
+    f.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" overwrite? ")
+        .title_alignment(Alignment::Left)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
         .style(Style::default().bg(Color::Black));
 
     let paragraph = Paragraph::new(lines).block(block);

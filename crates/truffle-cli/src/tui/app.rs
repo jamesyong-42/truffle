@@ -114,6 +114,8 @@ pub enum TransferDialogPhase {
     Prompt,
     /// Editing the save path.
     SaveAs,
+    /// File exists — confirm overwrite [y/n].
+    OverwriteConfirm,
 }
 
 /// State for the file transfer accept/reject modal dialog.
