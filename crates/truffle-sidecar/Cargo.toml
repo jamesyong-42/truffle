@@ -1,0 +1,14 @@
+[package]
+name = "truffle-sidecar"
+version = "0.3.2"
+edition = "2021"
+description = "Auto-downloads the truffle mesh networking sidecar binary at build time"
+license = "MIT"
+repository = "https://github.com/jamesyong-42/truffle"
+build = "build.rs"
+
+[build-dependencies]
+ureq = "3"
+flate2 = "1"
+tar = "0.4"
+zip = "2"

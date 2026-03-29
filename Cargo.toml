@@ -3,4 +3,6 @@ resolver = "2"
 members = [
     "crates/truffle-core",
     "crates/truffle-cli",
+    "crates/truffle-sidecar",
+    "crates/truffle",
 ]

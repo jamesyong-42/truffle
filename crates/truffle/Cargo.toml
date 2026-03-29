@@ -1,0 +1,13 @@
+[package]
+name = "truffle"
+version = "0.3.2"
+edition = "2021"
+description = "P2P mesh networking for your devices, built on Tailscale"
+license = "MIT"
+repository = "https://github.com/jamesyong-42/truffle"
+keywords = ["mesh", "networking", "p2p", "tailscale"]
+categories = ["network-programming"]
+
+[dependencies]
+truffle-core = { version = "0.3.2", path = "../truffle-core" }
+truffle-sidecar = { version = "0.3.2", path = "../truffle-sidecar" }
