@@ -31,6 +31,9 @@ pub struct TruffleConfig {
     /// Auto-update settings.
     #[serde(default)]
     pub updates: UpdateConfig,
+    /// Peer IDs whose file transfers are auto-accepted without prompting.
+    #[serde(default)]
+    pub auto_accept_peers: Vec<String>,
 }
 
 /// Node identity and behavior configuration.

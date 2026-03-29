@@ -21,6 +21,7 @@ pub mod file_picker;
 pub mod input_bar;
 pub mod status_bar;
 pub mod toast;
+pub mod transfer_dialog;
 pub mod welcome_box;
 
 /// Render the full TUI layout.
@@ -53,4 +54,5 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     file_picker::render(frame, feed_area, app);
     autocomplete::render(frame, input_area, app);
     toast::render_toast(frame, feed_area, app);
+    transfer_dialog::render(frame, full, app);
 }

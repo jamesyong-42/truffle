@@ -6,7 +6,7 @@
 use crossterm::event::{Event as CtEvent, EventStream, KeyEvent};
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use truffle_core::file_transfer::types::FileTransferEvent;
+use truffle_core::file_transfer::types::{FileOffer, FileTransferEvent, OfferResponder};
 use truffle_core::node::NamespacedMessage;
 use truffle_core::session::PeerEvent;
 
@@ -49,6 +49,11 @@ pub enum AppEvent {
         file_name: String,
         size: u64,
     },
+    /// An incoming file offer with its responder (for interactive accept/reject).
+    FileOfferReceived {
+        offer: FileOffer,
+        responder: OfferResponder,
+    },
     /// Periodic tick (1s) for uptime, toast expiry, etc.
     Tick,
 }
@@ -60,6 +65,7 @@ pub fn spawn_event_collectors(
     peer_rx: tokio::sync::broadcast::Receiver<PeerEvent>,
     chat_rx: tokio::sync::broadcast::Receiver<NamespacedMessage>,
     ft_rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
+    offer_rx: Option<mpsc::UnboundedReceiver<(FileOffer, OfferResponder)>>,
 ) -> (mpsc::UnboundedSender<AppEvent>, mpsc::UnboundedReceiver<AppEvent>) {
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -178,7 +184,19 @@ pub fn spawn_event_collectors(
         });
     }
 
-    // 5. Tick timer (1 second)
+    // 5. File offer channel (interactive accept/reject)
+    if let Some(mut offer_rx) = offer_rx {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            while let Some((offer, responder)) = offer_rx.recv().await {
+                if tx.send(AppEvent::FileOfferReceived { offer, responder }).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    // 6. Tick timer (1 second)
     {
         let tx = tx.clone();
         tokio::spawn(async move {

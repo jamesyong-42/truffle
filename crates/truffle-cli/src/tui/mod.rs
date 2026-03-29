@@ -13,7 +13,6 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 
-use crate::apps::file_transfer::receive;
 use crate::config::TruffleConfig;
 use crate::daemon::server::DaemonServer;
 
@@ -46,13 +45,17 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
 
     let node = server.node().clone();
 
-    // Spawn file transfer receive handler
+    // Get the offer channel for interactive accept/reject instead of auto_accept.
+    // Create the output directory ahead of time so accepted files have a home.
     let output_dir = dirs::download_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
         .join("truffle")
         .to_string_lossy()
         .to_string();
-    let _ft_handle = receive::spawn_receive_handler(node.clone(), output_dir);
+    if let Err(e) = std::fs::create_dir_all(&output_dir) {
+        tracing::error!(dir = output_dir.as_str(), "Failed to create output dir: {e}");
+    }
+    let offer_rx = node.file_transfer().offer_channel(node.clone()).await;
 
     // Subscribe to peer events, chat messages, and file transfer events
     let peer_rx = server.subscribe_peer_events();
@@ -60,14 +63,14 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     let ft_rx = node.file_transfer().subscribe();
 
     // Create app state and load command history
-    let mut app = AppState::new(node.clone());
+    let mut app = AppState::new(node.clone(), config.clone());
     app.load_history();
 
     // Populate initial peer list from current Node state.
     populate_peers(&node, &mut app).await;
 
     // Spawn event collectors — also get the sender for /cp to push transfer progress
-    let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx);
+    let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx, Some(offer_rx));
 
     // Schedule a delayed re-poll of peers. The sidecar's WatchIPNBus may not
     // have delivered its first PeersReceived event yet at startup, and the
@@ -136,11 +139,12 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
 
         match event_rx.recv().await {
             Some(AppEvent::Key(key)) => {
-                // File picker and autocomplete handle Enter themselves,
+                // File picker, autocomplete, and transfer dialog handle Enter themselves,
                 // so route to handle_key first when they're active.
                 if key.code == KeyCode::Enter
                     && app.file_picker.is_none()
                     && app.autocomplete.is_none()
+                    && app.transfer_dialog.is_none()
                 {
                     // Normal submit — no overlay is open
                     let input = app.input.trim().to_string();
@@ -294,6 +298,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 level: app::SystemLevel::Info,
             });
         }
+        AppEvent::FileOfferReceived { offer, responder } => {
+            handle_file_offer_received(app, offer, responder);
+        }
         AppEvent::Tick => {
             // Expire old toasts (4 second lifetime)
             let now = std::time::Instant::now();
@@ -304,12 +311,40 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                     break;
                 }
             }
+
+            // Timeout file transfer dialog after 60 seconds
+            if let Some(dialog) = &app.transfer_dialog {
+                if dialog.created_at.elapsed() > std::time::Duration::from_secs(60) {
+                    // Auto-reject and close
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.reject("timed out (60s)");
+                    }
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  File offer from {} timed out ({})",
+                            dialog.offer.from_name,
+                            dialog.offer.file_name,
+                        ),
+                        level: app::SystemLevel::Warning,
+                    });
+                    // Show next queued offer if any
+                    show_next_pending_offer(app);
+                }
+            }
         }
     }
 }
 
 /// Handle a key press.
 fn handle_key(app: &mut AppState, key: KeyEvent) {
+    // If transfer dialog is open, capture ALL keys
+    if app.transfer_dialog.is_some() {
+        handle_transfer_dialog_key(app, key);
+        return;
+    }
+
     // If file picker is open, route all keys to it
     if app.file_picker.is_some() {
         match key.code {
@@ -665,6 +700,287 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             // During normal TUI operation, auth shouldn't be needed.
             // Log it in case it happens (e.g., key rotation).
             tracing::info!("auth required during TUI session: {url}");
+        }
+    }
+}
+
+/// Handle an incoming file offer: show dialog or queue it.
+fn handle_file_offer_received(
+    app: &mut AppState,
+    offer: truffle_core::file_transfer::types::FileOffer,
+    responder: truffle_core::file_transfer::types::OfferResponder,
+) {
+    // Check if this peer is in the auto-accept list
+    if app.config.auto_accept_peers.contains(&offer.from_peer) {
+        let save_path = if offer.suggested_path.is_empty() || offer.suggested_path == "." {
+            let output_dir = dirs::download_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                .join("truffle")
+                .to_string_lossy()
+                .to_string();
+            format!("{}/{}", output_dir, offer.file_name)
+        } else {
+            offer.suggested_path.clone()
+        };
+        let peer_name = app
+            .peers
+            .iter()
+            .find(|p| p.id == offer.from_peer)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| offer.from_name.clone());
+        app.push_item(app::DisplayItem::System {
+            time: chrono::Local::now(),
+            text: format!(
+                "  \u{2705} Auto-accepted {} from {} (trusted peer)",
+                offer.file_name,
+                peer_name,
+            ),
+            level: app::SystemLevel::Success,
+        });
+        responder.accept(&save_path);
+        return;
+    }
+
+    // If no dialog is open, show it; otherwise queue it
+    if app.transfer_dialog.is_none() {
+        show_offer_dialog(app, offer, responder);
+    } else {
+        app.pending_offers.push_back((offer, responder));
+    }
+}
+
+/// Show a file offer as a dialog.
+fn show_offer_dialog(
+    app: &mut AppState,
+    offer: truffle_core::file_transfer::types::FileOffer,
+    responder: truffle_core::file_transfer::types::OfferResponder,
+) {
+    let save_path = if offer.suggested_path.is_empty() || offer.suggested_path == "." {
+        let output_dir = dirs::download_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("truffle")
+            .to_string_lossy()
+            .to_string();
+        format!("{}/{}", output_dir, offer.file_name)
+    } else {
+        offer.suggested_path.clone()
+    };
+    let cursor = save_path.chars().count();
+
+    app.transfer_dialog = Some(app::TransferDialogState {
+        offer,
+        responder: Some(responder),
+        phase: app::TransferDialogPhase::Prompt,
+        save_path_input: save_path,
+        save_path_cursor: cursor,
+        created_at: std::time::Instant::now(),
+    });
+}
+
+/// Show the next pending offer as a dialog, if any.
+fn show_next_pending_offer(app: &mut AppState) {
+    if let Some((offer, responder)) = app.pending_offers.pop_front() {
+        show_offer_dialog(app, offer, responder);
+    }
+}
+
+/// Handle key events when the transfer dialog is open.
+fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
+    let phase = app
+        .transfer_dialog
+        .as_ref()
+        .map(|d| d.phase.clone())
+        .unwrap_or(app::TransferDialogPhase::Prompt);
+
+    match phase {
+        app::TransferDialogPhase::Prompt => {
+            match key.code {
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    // Accept with current save path
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let save_path = dialog.save_path_input.clone();
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.accept(&save_path);
+                    }
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  \u{2705} Accepted {} \u{2192} {}",
+                            dialog.offer.file_name, save_path,
+                        ),
+                        level: app::SystemLevel::Success,
+                    });
+                    show_next_pending_offer(app);
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    // Switch to save-as mode
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.phase = app::TransferDialogPhase::SaveAs;
+                    }
+                }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    // Reject
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.reject("rejected by user");
+                    }
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  \u{274C} Rejected {} from {}",
+                            dialog.offer.file_name, dialog.offer.from_name,
+                        ),
+                        level: app::SystemLevel::Warning,
+                    });
+                    show_next_pending_offer(app);
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    // Accept and add peer to auto-accept list
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let save_path = dialog.save_path_input.clone();
+                    let peer_id = dialog.offer.from_peer.clone();
+                    let peer_name = app
+                        .peers
+                        .iter()
+                        .find(|p| p.id == peer_id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| dialog.offer.from_name.clone());
+
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.accept(&save_path);
+                    }
+
+                    // Add to auto-accept list and save config
+                    if !app.config.auto_accept_peers.contains(&peer_id) {
+                        app.config.auto_accept_peers.push(peer_id);
+                        if let Err(e) = app.config.save(None) {
+                            tracing::error!("Failed to save config: {e}");
+                        }
+                    }
+
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  \u{2705} Accepted {} \u{2192} {}",
+                            dialog.offer.file_name, save_path,
+                        ),
+                        level: app::SystemLevel::Success,
+                    });
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  Future files from {} accepted automatically",
+                            peer_name,
+                        ),
+                        level: app::SystemLevel::Info,
+                    });
+                    show_next_pending_offer(app);
+                }
+                KeyCode::Esc => {
+                    // Esc in prompt phase rejects (same as 'r')
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.reject("dismissed");
+                    }
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  \u{274C} Dismissed {} from {}",
+                            dialog.offer.file_name, dialog.offer.from_name,
+                        ),
+                        level: app::SystemLevel::Warning,
+                    });
+                    show_next_pending_offer(app);
+                }
+                _ => {
+                    // Ignore all other keys
+                }
+            }
+        }
+        app::TransferDialogPhase::SaveAs => {
+            match key.code {
+                KeyCode::Enter => {
+                    // Accept with edited save path
+                    let mut dialog = app.transfer_dialog.take().unwrap();
+                    let save_path = dialog.save_path_input.clone();
+                    if let Some(responder) = dialog.responder.take() {
+                        responder.accept(&save_path);
+                    }
+                    app.push_item(app::DisplayItem::System {
+                        time: chrono::Local::now(),
+                        text: format!(
+                            "  \u{2705} Accepted {} \u{2192} {}",
+                            dialog.offer.file_name, save_path,
+                        ),
+                        level: app::SystemLevel::Success,
+                    });
+                    show_next_pending_offer(app);
+                }
+                KeyCode::Esc => {
+                    // Back to prompt phase
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.phase = app::TransferDialogPhase::Prompt;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        let byte_pos =
+                            char_to_byte_pos(&dialog.save_path_input, dialog.save_path_cursor);
+                        dialog.save_path_input.insert(byte_pos, c);
+                        dialog.save_path_cursor += 1;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        if dialog.save_path_cursor > 0 {
+                            dialog.save_path_cursor -= 1;
+                            let byte_pos = char_to_byte_pos(
+                                &dialog.save_path_input,
+                                dialog.save_path_cursor,
+                            );
+                            dialog.save_path_input.remove(byte_pos);
+                        }
+                    }
+                }
+                KeyCode::Delete => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        let char_count = dialog.save_path_input.chars().count();
+                        if dialog.save_path_cursor < char_count {
+                            let byte_pos = char_to_byte_pos(
+                                &dialog.save_path_input,
+                                dialog.save_path_cursor,
+                            );
+                            dialog.save_path_input.remove(byte_pos);
+                        }
+                    }
+                }
+                KeyCode::Left => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.save_path_cursor =
+                            dialog.save_path_cursor.saturating_sub(1);
+                    }
+                }
+                KeyCode::Right => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        let char_count = dialog.save_path_input.chars().count();
+                        if dialog.save_path_cursor < char_count {
+                            dialog.save_path_cursor += 1;
+                        }
+                    }
+                }
+                KeyCode::Home => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.save_path_cursor = 0;
+                    }
+                }
+                KeyCode::End => {
+                    if let Some(ref mut dialog) = app.transfer_dialog {
+                        dialog.save_path_cursor =
+                            dialog.save_path_input.chars().count();
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }

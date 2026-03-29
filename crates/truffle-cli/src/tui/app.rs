@@ -5,11 +5,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Local};
+use truffle_core::file_transfer::types::{FileOffer, OfferResponder};
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::node::Node;
 
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
 
+use crate::config::TruffleConfig;
 use crate::output;
 
 /// Peer info cached for the device panel.
@@ -105,6 +107,31 @@ pub enum AutocompleteKind {
     Command,
 }
 
+/// Phase of the file transfer dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransferDialogPhase {
+    /// Main [a][s][r][d] prompt.
+    Prompt,
+    /// Editing the save path.
+    SaveAs,
+}
+
+/// State for the file transfer accept/reject modal dialog.
+pub struct TransferDialogState {
+    /// The incoming file offer.
+    pub offer: FileOffer,
+    /// The responder (consumed on accept/reject).
+    pub responder: Option<OfferResponder>,
+    /// Current dialog phase.
+    pub phase: TransferDialogPhase,
+    /// Editable save path.
+    pub save_path_input: String,
+    /// Cursor position in the save path input.
+    pub save_path_cursor: usize,
+    /// When the dialog was created (for timeout).
+    pub created_at: Instant,
+}
+
 /// Command definition for slash-command autocomplete.
 #[derive(Debug, Clone)]
 pub struct SlashCommandDef {
@@ -179,11 +206,20 @@ pub struct AppState {
 
     /// Whether we should quit.
     pub should_quit: bool,
+
+    /// Active file transfer dialog (modal overlay).
+    pub transfer_dialog: Option<TransferDialogState>,
+
+    /// Queued file offers waiting to be shown (one dialog at a time).
+    pub pending_offers: VecDeque<(FileOffer, OfferResponder)>,
+
+    /// Config (for auto_accept_peers and saving).
+    pub config: TruffleConfig,
 }
 
 impl AppState {
-    pub fn new(node: Arc<Node<TailscaleProvider>>) -> Self {
-        let mut state = Self {
+    pub fn new(node: Arc<Node<TailscaleProvider>>, config: TruffleConfig) -> Self {
+        let state = Self {
             node,
             items: Vec::new(),
             scroll_offset: 0,
@@ -199,6 +235,9 @@ impl AppState {
             unread_count: 0,
             started_at: Instant::now(),
             should_quit: false,
+            transfer_dialog: None,
+            pending_offers: VecDeque::new(),
+            config,
         };
 
         state
