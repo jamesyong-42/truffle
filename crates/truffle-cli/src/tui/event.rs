@@ -173,10 +173,18 @@ pub fn spawn_event_collectors(
                                 } else {
                                     0.0
                                 };
-                                // Show hashing as a special progress state
+                                // Negative percent = hashing phase convention
                                 let _ = tx.send(AppEvent::TransferProgress {
                                     file_name,
-                                    percent: -(percent), // Negative = hashing phase (convention)
+                                    percent: -(percent),
+                                    speed_bps: 0.0,
+                                });
+                            }
+                            FileTransferEvent::WaitingForAccept { file_name, .. } => {
+                                // -200 = waiting for accept convention
+                                let _ = tx.send(AppEvent::TransferProgress {
+                                    file_name,
+                                    percent: -200.0,
                                     speed_bps: 0.0,
                                 });
                             }

@@ -236,6 +236,12 @@ pub enum FileTransferEvent {
         total_bytes: u64,
     },
 
+    /// Offer sent, waiting for the receiver to accept or reject.
+    WaitingForAccept {
+        token: String,
+        file_name: String,
+    },
+
     /// Progress update for an in-flight transfer.
     Progress(TransferProgress),
 

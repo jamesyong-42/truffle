@@ -169,8 +169,18 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
 
             match status {
                 crate::tui::app::TransferStatus::InProgress { percent, speed_bps } => {
-                    // Negative percent = hashing phase (convention from event.rs)
-                    if *percent < 0.0 {
+                    // Negative percent conventions from event.rs:
+                    // -200 = waiting for accept, -N = hashing at N%
+                    if *percent <= -200.0 {
+                        return Line::from(vec![
+                            Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                            Span::raw(format!("{arrow} {file_name} ")),
+                            Span::styled(
+                                "waiting for accept...",
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]);
+                    } else if *percent < 0.0 {
                         let hash_pct = percent.abs();
                         return Line::from(vec![
                             Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),

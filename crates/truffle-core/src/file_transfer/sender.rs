@@ -103,6 +103,14 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         .unwrap_or("file")
         .to_string();
 
+    // Emit final hashing event at 100%
+    let _ = event_tx.send(FileTransferEvent::Hashing {
+        token: token.clone(),
+        file_name: file_name.clone(),
+        bytes_hashed: file_size,
+        total_bytes: file_size,
+    });
+
     // 3. Send OFFER via WS
     let offer = FtMessage::Offer {
         file_name: file_name.clone(),
@@ -121,6 +129,12 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         .map_err(|e| TransferError::Node(e.to_string()))?;
 
     info!(peer = peer_id, file = file_name.as_str(), size = file_size, "Sent OFFER");
+
+    // Notify UI that we're waiting for the receiver's decision
+    let _ = event_tx.send(FileTransferEvent::WaitingForAccept {
+        token: token.clone(),
+        file_name: file_name.clone(),
+    });
 
     // 4. Wait for ACCEPT (extract tcp_port)
     let mut rx = node.subscribe("ft");

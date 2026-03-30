@@ -105,8 +105,10 @@ async fn upload(
                     let phase = notif.params["phase"].as_str().unwrap_or("");
                     if phase == "hashing" {
                         let hash_pct = notif.params["hash_percent"].as_f64().unwrap_or(0.0);
-                        let msg = format!("  Hashing... {hash_pct:.0}%");
-                        print!("\r{:<80}", msg);
+                        print!("\r{:<80}", format!("  Hashing... {hash_pct:.0}%"));
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    } else if phase == "waiting" {
+                        print!("\r{:<80}", "  Waiting for accept...");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                     } else {
                         let current = notif.params["bytes_sent"].as_u64().unwrap_or(0);

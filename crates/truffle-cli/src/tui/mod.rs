@@ -733,14 +733,16 @@ fn handle_file_offer_received(
             .find(|p| p.id == offer.from_peer)
             .map(|p| p.name.clone())
             .unwrap_or_else(|| offer.from_name.clone());
-        app.push_item(app::DisplayItem::System {
+        // Add FileTransfer item so receive progress can update it
+        app.push_item(app::DisplayItem::FileTransfer {
             time: chrono::Local::now(),
-            text: format!(
-                "  \u{2705} Auto-accepted {} from {} (trusted peer)",
-                offer.file_name,
-                peer_name,
-            ),
-            level: app::SystemLevel::Success,
+            direction: app::TransferDirection::Receive,
+            file_name: offer.file_name.clone(),
+            size: offer.size,
+            status: app::TransferStatus::InProgress {
+                percent: 0.0,
+                speed_bps: 0.0,
+            },
         });
         responder.accept(&save_path);
         return;
@@ -1017,13 +1019,16 @@ fn accept_current_offer(app: &mut AppState) {
     if let Some(responder) = dialog.responder.take() {
         responder.accept(&save_path);
     }
-    app.push_item(app::DisplayItem::System {
+    // Add a FileTransfer item so receive progress can update it in-place
+    app.push_item(app::DisplayItem::FileTransfer {
         time: chrono::Local::now(),
-        text: format!(
-            "  \u{2705} Accepted {} \u{2192} {}",
-            dialog.offer.file_name, save_path,
-        ),
-        level: app::SystemLevel::Success,
+        direction: app::TransferDirection::Receive,
+        file_name: dialog.offer.file_name.clone(),
+        size: dialog.offer.size,
+        status: app::TransferStatus::InProgress {
+            percent: 0.0,
+            speed_bps: 0.0,
+        },
     });
     show_next_pending_offer(app);
 }

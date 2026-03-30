@@ -376,6 +376,15 @@ fn ft_event_to_notification(
                 "time": chrono::Utc::now().to_rfc3339(),
             }),
         ),
+        FileTransferEvent::WaitingForAccept { token, file_name } => (
+            "transfer.waiting",
+            serde_json::json!({
+                "type": "transfer.waiting",
+                "token": token,
+                "file_name": file_name,
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
         FileTransferEvent::Progress(p) => (
             "transfer.progress",
             serde_json::json!({
@@ -704,6 +713,19 @@ async fn handle_push_file(
                             "hash_percent": if total_bytes > 0 {
                                 bytes_hashed as f64 / total_bytes as f64 * 100.0
                             } else { 0.0 },
+                        }),
+                    );
+                    let _ = notification_tx.send(notif);
+                }
+                Ok(FileTransferEvent::WaitingForAccept { .. }) => {
+                    let notif = DaemonNotification::new(
+                        super::protocol::notification::CP_PROGRESS,
+                        serde_json::json!({
+                            "bytes_sent": 0,
+                            "total_bytes": 0,
+                            "bytes_per_second": 0.0,
+                            "percent": 0.0,
+                            "phase": "waiting",
                         }),
                     );
                     let _ = notification_tx.send(notif);
