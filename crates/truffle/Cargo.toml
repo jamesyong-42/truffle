@@ -1,6 +1,6 @@
 [package]
 name = "truffle"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 description = "P2P mesh networking for your devices, built on Tailscale"
 license = "MIT"
@@ -9,5 +9,5 @@ keywords = ["mesh", "networking", "p2p", "tailscale"]
 categories = ["network-programming"]
 
 [dependencies]
-truffle-core = { version = "0.3.8", path = "../truffle-core" }
-truffle-sidecar = { version = "0.3.8", path = "../truffle-sidecar" }
+truffle-core = { version = "0.3.9", path = "../truffle-core" }
+truffle-sidecar = { version = "0.3.9", path = "../truffle-sidecar" }
