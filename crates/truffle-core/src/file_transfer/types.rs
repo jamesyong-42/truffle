@@ -228,6 +228,14 @@ pub enum FileTransferEvent {
     /// is the primary mechanism for handling offers).
     OfferReceived(FileOffer),
 
+    /// File is being hashed before transfer (pre-transfer phase).
+    Hashing {
+        token: String,
+        file_name: String,
+        bytes_hashed: u64,
+        total_bytes: u64,
+    },
+
     /// Progress update for an in-flight transfer.
     Progress(TransferProgress),
 

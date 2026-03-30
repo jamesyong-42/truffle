@@ -167,6 +167,19 @@ pub fn spawn_event_collectors(
                             FileTransferEvent::Rejected { .. } => {
                                 // Rejections are handled by the dialog flow.
                             }
+                            FileTransferEvent::Hashing { file_name, bytes_hashed, total_bytes, .. } => {
+                                let percent = if total_bytes > 0 {
+                                    bytes_hashed as f64 / total_bytes as f64 * 100.0
+                                } else {
+                                    0.0
+                                };
+                                // Show hashing as a special progress state
+                                let _ = tx.send(AppEvent::TransferProgress {
+                                    file_name,
+                                    percent: -(percent), // Negative = hashing phase (convention)
+                                    speed_bps: 0.0,
+                                });
+                            }
                             FileTransferEvent::Progress(p) => {
                                 let percent = if p.total_bytes > 0 {
                                     p.bytes_transferred as f64 / p.total_bytes as f64 * 100.0

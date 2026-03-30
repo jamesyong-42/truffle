@@ -303,13 +303,13 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
     let mut hasher = Sha256::new();
     let mut bytes_received: u64 = 0;
     let progress_start = std::time::Instant::now();
+    let mut last_progress = std::time::Instant::now();
     let mut buf = vec![0u8; 64 * 1024];
 
     while bytes_received < file_size {
         let to_read = ((file_size - bytes_received) as usize).min(buf.len());
         let n = stream.read(&mut buf[..to_read]).await?;
         if n == 0 {
-            // Clean up temp file on failure
             tokio::fs::remove_file(&temp_path).await.ok();
             return Err(TransferError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -320,22 +320,24 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         tokio::io::AsyncWriteExt::write_all(&mut temp_file, &buf[..n]).await?;
         bytes_received += n as u64;
 
-        let elapsed = progress_start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            bytes_received as f64 / elapsed
-        } else {
-            0.0
-        };
-
-        // Emit progress event (best-effort)
-        let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
-            token: token.to_string(),
-            direction: TransferDirection::Receive,
-            file_name: file_name.to_string(),
-            bytes_transferred: bytes_received,
-            total_bytes: file_size,
-            speed_bps: speed,
-        }));
+        // Throttle progress events to max 4/sec
+        if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
+            let elapsed = progress_start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                bytes_received as f64 / elapsed
+            } else {
+                0.0
+            };
+            let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
+                token: token.to_string(),
+                direction: TransferDirection::Receive,
+                file_name: file_name.to_string(),
+                bytes_transferred: bytes_received,
+                total_bytes: file_size,
+                speed_bps: speed,
+            }));
+            last_progress = std::time::Instant::now();
+        }
     }
 
     // Flush temp file

@@ -62,18 +62,37 @@ pub async fn send_file<N: NetworkProvider + 'static>(
 
     // 2. Stream-hash the file in chunks (constant memory)
     info!(path = local_path, size = file_size, "Hashing file (streaming)");
+    let token = uuid::Uuid::new_v4().to_string();
     let sha256 = {
         let mut hasher = Sha256::new();
         let mut file = tokio::fs::File::open(local_path)
             .await
             .map_err(TransferError::Io)?;
         let mut buf = vec![0u8; 64 * 1024];
+        let mut bytes_hashed: u64 = 0;
+        let mut last_event = Instant::now();
         loop {
             let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
             if n == 0 {
                 break;
             }
             hasher.update(&buf[..n]);
+            bytes_hashed += n as u64;
+
+            // Emit hashing progress at most 4 times/sec
+            if last_event.elapsed() >= std::time::Duration::from_millis(250) {
+                let _ = event_tx.send(FileTransferEvent::Hashing {
+                    token: token.clone(),
+                    file_name: std::path::Path::new(local_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file")
+                        .to_string(),
+                    bytes_hashed,
+                    total_bytes: file_size,
+                });
+                last_event = Instant::now();
+            }
         }
         hex::encode(hasher.finalize())
     };
@@ -83,8 +102,6 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
-
-    let token = uuid::Uuid::new_v4().to_string();
 
     // 3. Send OFFER via WS
     let offer = FtMessage::Offer {
@@ -146,10 +163,14 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     }
 
     // 5. Open raw TCP stream to the port advertised in ACCEPT
-    let mut stream = node
-        .open_tcp(peer_id, accept_port)
-        .await
-        .map_err(|e| TransferError::Node(format!("Failed to open TCP to port {accept_port}: {e}")))?;
+    info!(accept_port = accept_port, peer = peer_id, "Opening TCP stream to peer");
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        node.open_tcp(peer_id, accept_port),
+    )
+    .await
+    .map_err(|_| TransferError::Timeout)?
+    .map_err(|e| TransferError::Node(format!("Failed to open TCP to port {accept_port}: {e}")))?;
 
     info!(port = accept_port, "TCP stream opened to peer");
 
@@ -165,6 +186,7 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     let mut buf = vec![0u8; chunk_size];
     let mut bytes_sent: u64 = 0;
     let progress_start = Instant::now();
+    let mut last_progress = Instant::now();
 
     loop {
         let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
@@ -174,22 +196,38 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         stream.write_all(&buf[..n]).await?;
         bytes_sent += n as u64;
 
-        let elapsed = progress_start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            bytes_sent as f64 / elapsed
-        } else {
-            0.0
-        };
+        // Throttle progress events to max 4/sec (250ms interval)
+        if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
+            let elapsed = progress_start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                bytes_sent as f64 / elapsed
+            } else {
+                0.0
+            };
 
-        let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
-            token: token.clone(),
-            direction: TransferDirection::Send,
-            file_name: file_name.clone(),
-            bytes_transferred: bytes_sent,
-            total_bytes: file_size,
-            speed_bps: speed,
-        }));
+            let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
+                token: token.clone(),
+                direction: TransferDirection::Send,
+                file_name: file_name.clone(),
+                bytes_transferred: bytes_sent,
+                total_bytes: file_size,
+                speed_bps: speed,
+            }));
+            last_progress = Instant::now();
+        }
     }
+
+    // Final progress event at 100%
+    let elapsed = progress_start.elapsed().as_secs_f64();
+    let speed = if elapsed > 0.0 { bytes_sent as f64 / elapsed } else { 0.0 };
+    let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
+        token: token.clone(),
+        direction: TransferDirection::Send,
+        file_name: file_name.clone(),
+        bytes_transferred: bytes_sent,
+        total_bytes: file_size,
+        speed_bps: speed,
+    }));
 
     stream.flush().await?;
 

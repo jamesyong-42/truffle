@@ -169,7 +169,19 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
 
             match status {
                 crate::tui::app::TransferStatus::InProgress { percent, speed_bps } => {
-                    // Progress bar: ████████████░░░░░░░░ 45%  1.2 MB/s
+                    // Negative percent = hashing phase (convention from event.rs)
+                    if *percent < 0.0 {
+                        let hash_pct = percent.abs();
+                        return Line::from(vec![
+                            Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                            Span::raw(format!("{arrow} {file_name} ")),
+                            Span::styled(
+                                format!("hashing... {hash_pct:.0}%"),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]);
+                    }
+
                     let bar_width: usize = 24;
                     let filled = (*percent / 100.0 * bar_width as f64) as usize;
                     let empty = bar_width.saturating_sub(filled);

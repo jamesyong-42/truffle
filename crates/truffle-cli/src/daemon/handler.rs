@@ -364,6 +364,18 @@ fn ft_event_to_notification(
                 "time": chrono::Utc::now().to_rfc3339(),
             }),
         ),
+        FileTransferEvent::Hashing { token, file_name, bytes_hashed, total_bytes } => (
+            "transfer.hashing",
+            serde_json::json!({
+                "type": "transfer.hashing",
+                "token": token,
+                "file_name": file_name,
+                "bytes_hashed": bytes_hashed,
+                "total_bytes": total_bytes,
+                "percent": if *total_bytes > 0 { *bytes_hashed as f64 / *total_bytes as f64 * 100.0 } else { 0.0 },
+                "time": chrono::Utc::now().to_rfc3339(),
+            }),
+        ),
         FileTransferEvent::Progress(p) => (
             "transfer.progress",
             serde_json::json!({
@@ -680,6 +692,22 @@ async fn handle_push_file(
     let progress_handle = tokio::spawn(async move {
         loop {
             match rx.recv().await {
+                Ok(FileTransferEvent::Hashing { bytes_hashed, total_bytes, .. }) => {
+                    let notif = DaemonNotification::new(
+                        super::protocol::notification::CP_PROGRESS,
+                        serde_json::json!({
+                            "bytes_sent": 0,
+                            "total_bytes": total_bytes,
+                            "bytes_per_second": 0.0,
+                            "percent": 0.0,
+                            "phase": "hashing",
+                            "hash_percent": if total_bytes > 0 {
+                                bytes_hashed as f64 / total_bytes as f64 * 100.0
+                            } else { 0.0 },
+                        }),
+                    );
+                    let _ = notification_tx.send(notif);
+                }
                 Ok(FileTransferEvent::Progress(p)) => {
                     let notif = DaemonNotification::new(
                         super::protocol::notification::CP_PROGRESS,
