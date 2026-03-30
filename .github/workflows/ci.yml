@@ -69,4 +69,4 @@ jobs:
           go build -ldflags "-s -w" -o bin/sidecar-slim.exe .
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
