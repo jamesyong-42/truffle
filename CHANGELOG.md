@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.14](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.13...truffle-v0.3.14) (2026-03-30)
+
+
+### Bug Fixes
+
+* exclude Tauri plugin and NAPI from CI tests ([623505b](https://github.com/jamesyong-42/truffle/commit/623505bc058feb8e0c06832c3ec3f4ae638f7621))
+* rename connected to ws_connected for explicit WebSocket semantics ([193a827](https://github.com/jamesyong-42/truffle/commit/193a827756098e5ce973d0215b8da7b6867bafbf))
+
 ## [0.3.13](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.12...truffle-v0.3.13) (2026-03-30)
 
 
