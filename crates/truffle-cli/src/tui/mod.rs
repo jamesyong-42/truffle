@@ -274,10 +274,6 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 }
             }
         }
-        AppEvent::IncomingFileOffer { .. } => {
-            // Offers are now handled exclusively via the modal dialog
-            // (FileOfferReceived event from the offer channel).
-        }
         AppEvent::FileOfferReceived { offer, responder } => {
             handle_file_offer_received(app, offer, responder);
         }

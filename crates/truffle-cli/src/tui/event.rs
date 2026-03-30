@@ -43,13 +43,6 @@ pub enum AppEvent {
         file_name: String,
         reason: String,
     },
-    /// An incoming file offer from a peer.
-    IncomingFileOffer {
-        from_id: String,
-        from_name: String,
-        file_name: String,
-        size: u64,
-    },
     /// An incoming file offer with its responder (for interactive accept/reject).
     FileOfferReceived {
         offer: FileOffer,

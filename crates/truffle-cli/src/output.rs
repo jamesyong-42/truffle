@@ -82,16 +82,6 @@ pub fn cyan(text: &str) -> String {
     apply_ansi(text, "36")
 }
 
-#[allow(dead_code)]
-pub fn bold_red(text: &str) -> String {
-    apply_ansi(text, "1;31")
-}
-
-#[allow(dead_code)]
-pub fn bold_green(text: &str) -> String {
-    apply_ansi(text, "1;32")
-}
-
 // ==========================================================================
 // Status indicators
 // ==========================================================================

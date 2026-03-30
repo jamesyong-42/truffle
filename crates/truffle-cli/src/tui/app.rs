@@ -393,50 +393,6 @@ impl AppState {
         }
     }
 
-    /// Push the startup banner.
-    fn _push_banner(&mut self) {
-        let banner_lines = [
-            "",
-            "   \u{2580}\u{2588}\u{2580} \u{2588}\u{2580}\u{2588} \u{2588} \u{2588} \u{2588}\u{2580}\u{2580} \u{2588}\u{2580}\u{2580} \u{2588}   \u{2588}\u{2580}\u{2580}",
-            "    \u{2588}  \u{2588}\u{2580}\u{2584} \u{2588} \u{2588} \u{2588}\u{2580}  \u{2588}\u{2580}  \u{2588}   \u{2588}\u{2580}",
-            "    \u{2588}  \u{2588} \u{2588} \u{2580}\u{2584}\u{2580} \u{2588}   \u{2588}   \u{2588}\u{2584}\u{2584} \u{2588}\u{2584}\u{2584}",
-            "",
-            "   mesh networking for your devices",
-            "",
-        ];
-
-        for line in banner_lines {
-            self.items.push(DisplayItem::System {
-                time: Local::now(),
-                text: line.to_string(),
-                level: SystemLevel::Info,
-            });
-        }
-
-        // Add node info
-        let info = self.node.local_info();
-        let ip_str = info.ip.map(|ip| ip.to_string()).unwrap_or_default();
-        if !ip_str.is_empty() {
-            self.items.push(DisplayItem::System {
-                time: Local::now(),
-                text: format!("   {} \u{00b7} {}", info.name, ip_str),
-                level: SystemLevel::Info,
-            });
-        } else {
-            self.items.push(DisplayItem::System {
-                time: Local::now(),
-                text: format!("   {}", info.name),
-                level: SystemLevel::Info,
-            });
-        }
-
-        self.items.push(DisplayItem::System {
-            time: Local::now(),
-            text: String::new(),
-            level: SystemLevel::Info,
-        });
-    }
-
     /// Get uptime in seconds.
     pub fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()

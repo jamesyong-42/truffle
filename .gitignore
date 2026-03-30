@@ -33,3 +33,4 @@ docs/.vitepress/cache/
 *.swp
 sidecar-slim-linux
 test-sidecar
+*.sidecar-slim

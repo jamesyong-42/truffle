@@ -16,7 +16,6 @@ use crate::tui::app::AppState;
 
 pub mod activity_feed;
 pub mod autocomplete;
-pub mod device_panel;
 pub mod file_picker;
 pub mod input_bar;
 pub mod status_bar;
