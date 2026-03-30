@@ -1,6 +1,6 @@
 [package]
 name = "truffle-core"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 description = "Truffle mesh networking core (clean architecture)"
 license = "MIT"
