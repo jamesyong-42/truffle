@@ -11,7 +11,7 @@ use truffle_core::node::Node;
 ///
 /// `progress_cb` is called periodically with (bytes_received, total_bytes, speed_bps).
 /// Progress information comes from the core's `FileTransferEvent::Progress` events.
-pub async fn download<N: NetworkProvider + 'static>(
+pub async fn _download<N: NetworkProvider + 'static>(
     node: &Node<N>,
     peer_id: &str,
     remote_path: &str,

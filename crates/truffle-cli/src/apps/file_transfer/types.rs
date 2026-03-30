@@ -3,4 +3,3 @@
 //! Re-exports from truffle-core's file transfer types. The CLI no longer
 //! defines its own types — everything comes from core.
 
-pub use truffle_core::file_transfer::types::*;

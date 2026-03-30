@@ -144,7 +144,7 @@ pub async fn run(
         .map_err(|e| format!("Draw error: {e}"))?;
 
     // Set up auth event channel
-    let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (_auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // Start the daemon in a background task
     let config_clone = config.clone();

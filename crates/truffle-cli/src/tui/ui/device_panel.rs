@@ -1,3 +1,5 @@
+//! Device panel — kept for future use.
+#![allow(dead_code)]
 //! Device panel — always-visible peer list on the right side.
 
 use ratatui::prelude::*;

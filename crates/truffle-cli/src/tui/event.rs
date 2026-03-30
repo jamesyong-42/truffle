@@ -12,6 +12,7 @@ use truffle_core::session::PeerEvent;
 
 /// All events the TUI can receive.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum AppEvent {
     /// A key was pressed.
     Key(KeyEvent),

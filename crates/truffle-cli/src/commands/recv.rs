@@ -5,7 +5,6 @@ use crate::daemon::client::DaemonClient;
 use crate::output;
 
 /// Exit code for timeout.
-const EXIT_TIMEOUT: i32 = 5;
 
 pub async fn run(
     config: &TruffleConfig,

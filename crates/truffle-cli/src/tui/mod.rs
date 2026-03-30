@@ -727,7 +727,7 @@ fn handle_file_offer_received(
         } else {
             offer.suggested_path.clone()
         };
-        let peer_name = app
+        let _peer_name = app
             .peers
             .iter()
             .find(|p| p.id == offer.from_peer)

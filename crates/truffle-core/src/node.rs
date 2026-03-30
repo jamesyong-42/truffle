@@ -261,7 +261,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
 
                             // Route to namespace-specific subscriber if present.
                             let filters = namespace_filters.read().await;
-                            let has_subscriber = filters.contains_key(&namespaced.namespace);
+                            let _has_subscriber = filters.contains_key(&namespaced.namespace);
                             if let Some(tx) = filters.get(&namespaced.namespace) {
                                 let send_result = tx.send(namespaced);
                                 tracing::debug!(

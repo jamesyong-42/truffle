@@ -10,7 +10,7 @@ use crate::tui::app::AppState;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let info = app.node.local_info();
-    let node_name = info.name.trim_start_matches("truffle-").to_string();
+    let _node_name = info.name.trim_start_matches("truffle-").to_string();
     let peer_count = app.online_peer_count();
 
     let status = if info.ip.is_some() { "online" } else { "connecting" };

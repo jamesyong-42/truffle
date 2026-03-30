@@ -7,7 +7,6 @@
 //! 5. Stream [size][sha256][file_bytes] in 64KB chunks
 //! 6. Read ACK
 
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};

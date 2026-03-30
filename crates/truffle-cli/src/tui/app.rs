@@ -26,6 +26,7 @@ pub struct PeerInfo {
 
 /// A single item in the activity feed.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DisplayItem {
     System {
         time: DateTime<Local>,
@@ -393,7 +394,7 @@ impl AppState {
     }
 
     /// Push the startup banner.
-    fn push_banner(&mut self) {
+    fn _push_banner(&mut self) {
         let banner_lines = [
             "",
             "   \u{2580}\u{2588}\u{2580} \u{2588}\u{2580}\u{2588} \u{2588} \u{2588} \u{2588}\u{2580}\u{2580} \u{2588}\u{2580}\u{2580} \u{2588}   \u{2588}\u{2580}\u{2580}",
