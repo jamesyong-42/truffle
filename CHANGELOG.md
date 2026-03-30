@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.13](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.12...truffle-v0.3.13) (2026-03-30)
+
+
+### Features
+
+* rewrite NAPI-RS bindings for current Node API (RFC 015 Phase 1) ([c828d9f](https://github.com/jamesyong-42/truffle/commit/c828d9f6a3e477dc854fce209e3a6815a45e7170))
+* rewrite Tauri v2 plugin for current Node API (RFC 015 Phase 2) ([fcf174d](https://github.com/jamesyong-42/truffle/commit/fcf174d2c1a6098e4202ce6b3b1efa380a959100))
+
+
+### Bug Fixes
+
+* address all NAPI + Tauri binding audit findings ([fea6a92](https://github.com/jamesyong-42/truffle/commit/fea6a926a2260b32182af9524c00cb3fa1abdc80))
+
 ## [0.3.12](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.11...truffle-v0.3.12) (2026-03-30)
 
 
