@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.9](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.8...truffle-v0.3.9) (2026-03-30)
+
+
+### Features
+
+* add file_transfer module to truffle-core (RFC 014 Phase 1) ([da85cec](https://github.com/jamesyong-42/truffle/commit/da85cec6657da7307c0b882adfe2e1d81843c9cc))
+* file overwrite confirmation dialog ([20ca606](https://github.com/jamesyong-42/truffle/commit/20ca6068753b78be6eb5e4cca91d2f599945871d))
+* interactive file transfer accept/reject modal dialog (RFC 014 Phase 3) ([ceb7cec](https://github.com/jamesyong-42/truffle/commit/ceb7cece93b24f4cc78c11b1024a160dc7ce30cd))
+* rich file transfer progress display in TUI feed (RFC 014 Phase 4) ([b0d7b48](https://github.com/jamesyong-42/truffle/commit/b0d7b48fefde92bfad70829281179ab771da146c))
+
+
+### Bug Fixes
+
+* add debug logging to envelope router and file save path ([397ee95](https://github.com/jamesyong-42/truffle/commit/397ee95e97c4d2cfc29f3b4144a9f80cf98d2958))
+* address all RFC 014 audit findings ([7373f80](https://github.com/jamesyong-42/truffle/commit/7373f806530783a5c01f90e533f11438f76c16df))
+* auto-open file explorer when /cp command is entered ([045b3b2](https://github.com/jamesyong-42/truffle/commit/045b3b23fd7fbe075cc639e4cecbb3929817bead))
+* bump Cargo.toml versions to 0.3.9 ([b75cbda](https://github.com/jamesyong-42/truffle/commit/b75cbda6b047c79419854fcad288f377b4c2f9e8))
+* clear activity feed area before rendering file picker overlay ([d37d49a](https://github.com/jamesyong-42/truffle/commit/d37d49abf6862c7b1e929043648422f43f9c61dc))
+* dismiss device autocomplete list after selecting a device ([6fa20a3](https://github.com/jamesyong-42/truffle/commit/6fa20a3a2717573492e9482dfb0f19906b7a5c11))
+* don't reopen file picker when completing [@device](https://github.com/device) in /cp command ([80d8b2a](https://github.com/jamesyong-42/truffle/commit/80d8b2a7b345da95db9ffbfc6a4eed42cd97971e))
+* Esc on file picker resets input to / and shows command list ([c053e29](https://github.com/jamesyong-42/truffle/commit/c053e29de36645c89e726d92ff8c153944da3dde))
+* file picker Enter now correctly fills path instead of clearing input ([e5c0373](https://github.com/jamesyong-42/truffle/commit/e5c037365be8803119ea294042ae074e9f894df0))
+* file picker opens whenever input is exactly "/cp " ([4b8cb02](https://github.com/jamesyong-42/truffle/commit/4b8cb02cd9cc146eb7c09cfe7b7e223ec1b47df9))
+* file transfer bridge half-close and ACK timeout handling ([ee4f0f4](https://github.com/jamesyong-42/truffle/commit/ee4f0f4f75c839fb84b2a301ea5760dbaac7269c))
+* file transfer save path resolution and cross-device rename ([a78fa5b](https://github.com/jamesyong-42/truffle/commit/a78fa5b3a710b61eb0882999c75fb9761a4de4df))
+* open file picker immediately on Save As ([6336166](https://github.com/jamesyong-42/truffle/commit/6336166b0627e5b9bebd49669ce9a89f56a58e0a))
+* TUI Enter key fills autocomplete selection instead of submitting ([7ffaf7c](https://github.com/jamesyong-42/truffle/commit/7ffaf7c3ab94f8d62819df561217a96f514d5f7e))
+
 ## [0.3.8](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.7...truffle-v0.3.8) (2026-03-29)
 
 
