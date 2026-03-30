@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "truffle"
-version = "0.3.8"
+version = "0.3.10"
 dependencies = [
  "truffle-core",
  "truffle-sidecar",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-cli"
-version = "0.3.8"
+version = "0.3.10"
 dependencies = [
  "chrono",
  "clap",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-core"
-version = "0.3.8"
+version = "0.3.10"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-sidecar"
-version = "0.3.8"
+version = "0.3.10"
 dependencies = [
  "flate2",
  "tar",
