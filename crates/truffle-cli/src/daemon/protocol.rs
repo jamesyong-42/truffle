@@ -108,8 +108,8 @@ pub mod notification {
     pub const PEER_JOINED: &str = "peer.joined";
     pub const PEER_LEFT: &str = "peer.left";
     pub const PEER_UPDATED: &str = "peer.updated";
-    pub const PEER_CONNECTED: &str = "peer.connected";
-    pub const PEER_DISCONNECTED: &str = "peer.disconnected";
+    pub const PEER_WS_CONNECTED: &str = "peer.ws_connected";
+    pub const PEER_WS_DISCONNECTED: &str = "peer.ws_disconnected";
     pub const MESSAGE_RECEIVED: &str = "message.received";
 }
 

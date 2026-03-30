@@ -62,7 +62,7 @@ pub struct NapiPeer {
     /// Whether the peer is online (from Layer 3).
     pub online: bool,
     /// Whether there is an active WebSocket connection.
-    pub connected: bool,
+    pub ws_connected: bool,
     /// Connection type description (e.g., "direct" or "relay:ord").
     pub connection_type: String,
     /// Operating system, if known.
@@ -110,7 +110,7 @@ pub struct NapiHealthInfo {
 /// A peer change event delivered to JS.
 #[napi(object)]
 pub struct NapiPeerEvent {
-    /// Event type: "joined", "left", "updated", "connected", "disconnected", "auth_required".
+    /// Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required".
     pub event_type: String,
     /// Peer ID (present for peer events, empty for auth_required).
     pub peer_id: String,

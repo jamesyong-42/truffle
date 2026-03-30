@@ -17,7 +17,7 @@ use crate::types::{FileOfferJs, FileTransferEventJs, PeerEventJs};
 /// Spawn background tasks that forward truffle-core events to the Tauri frontend.
 ///
 /// This starts three forwarding tasks:
-/// 1. Peer events (joined, left, connected, disconnected, auth required)
+/// 1. Peer events (joined, left, ws_connected, ws_disconnected, auth required)
 /// 2. File transfer events (progress, completed, failed, etc.)
 /// 3. File offer channel (stores OfferResponders for accept/reject commands)
 pub fn start_event_forwarding<R: Runtime>(

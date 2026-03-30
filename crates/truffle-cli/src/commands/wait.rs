@@ -82,8 +82,8 @@ pub async fn run(
             let event_type = notif.params["type"].as_str().unwrap_or("");
             let peer_name = notif.params["peer"].as_str().unwrap_or("");
 
-            // Match on peer.joined or peer.connected events.
-            if (event_type == "peer.joined" || event_type == "peer.connected")
+            // Match on peer.joined or peer.ws_connected events.
+            if (event_type == "peer.joined" || event_type == "peer.ws_connected")
                 && peer_name.to_lowercase().contains(&node_filter)
             {
                 matched_peer = Some(notif.params.clone());

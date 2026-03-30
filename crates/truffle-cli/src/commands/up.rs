@@ -152,16 +152,16 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
                                 id,
                             );
                         }
-                        PeerEvent::Connected(id) => {
+                        PeerEvent::WsConnected(id) => {
                             println!(
-                                "  {} peer connected: {}",
+                                "  {} peer ws connected: {}",
                                 output::status_indicator("online"),
                                 id,
                             );
                         }
-                        PeerEvent::Disconnected(id) => {
+                        PeerEvent::WsDisconnected(id) => {
                             println!(
-                                "  {} peer disconnected: {}",
+                                "  {} peer ws disconnected: {}",
                                 output::status_indicator("offline"),
                                 id,
                             );

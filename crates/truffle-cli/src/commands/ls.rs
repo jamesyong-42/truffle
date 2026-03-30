@@ -64,7 +64,7 @@ pub async fn run(
                 let online = p["online"].as_bool().unwrap_or(false);
                 let ip = p["ip"].as_str().unwrap_or("-");
                 let conn_type = p["connection_type"].as_str().unwrap_or("-");
-                let connected = p["connected"].as_bool().unwrap_or(false);
+                let connected = p["ws_connected"].as_bool().unwrap_or(false);
                 let os = p["os"].as_str().unwrap_or("-");
 
                 vec![

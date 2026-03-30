@@ -68,7 +68,7 @@ pub struct PeerJs {
     pub name: String,
     pub ip: String,
     pub online: bool,
-    pub connected: bool,
+    pub ws_connected: bool,
     pub connection_type: String,
     pub os: Option<String>,
     pub last_seen: Option<String>,
@@ -81,7 +81,7 @@ impl From<truffle_core::Peer> for PeerJs {
             name: p.name,
             ip: p.ip.to_string(),
             online: p.online,
-            connected: p.connected,
+            ws_connected: p.ws_connected,
             connection_type: p.connection_type,
             os: p.os,
             last_seen: p.last_seen,
@@ -202,8 +202,8 @@ pub enum PeerEventJs {
     Joined { peer: PeerStateJs },
     Left { id: String },
     Updated { peer: PeerStateJs },
-    Connected { id: String },
-    Disconnected { id: String },
+    WsConnected { id: String },
+    WsDisconnected { id: String },
     AuthRequired { url: String },
 }
 
@@ -215,7 +215,7 @@ pub struct PeerStateJs {
     pub name: String,
     pub ip: String,
     pub online: bool,
-    pub connected: bool,
+    pub ws_connected: bool,
     pub connection_type: String,
     pub os: Option<String>,
     pub last_seen: Option<String>,
@@ -228,7 +228,7 @@ impl From<truffle_core::session::PeerState> for PeerStateJs {
             name: s.name,
             ip: s.ip.to_string(),
             online: s.online,
-            connected: s.connected,
+            ws_connected: s.ws_connected,
             connection_type: s.connection_type,
             os: s.os,
             last_seen: s.last_seen,
@@ -247,8 +247,8 @@ impl From<truffle_core::session::PeerEvent> for PeerEventJs {
             PeerEvent::Updated(state) => PeerEventJs::Updated {
                 peer: state.into(),
             },
-            PeerEvent::Connected(id) => PeerEventJs::Connected { id },
-            PeerEvent::Disconnected(id) => PeerEventJs::Disconnected { id },
+            PeerEvent::WsConnected(id) => PeerEventJs::WsConnected { id },
+            PeerEvent::WsDisconnected(id) => PeerEventJs::WsDisconnected { id },
             PeerEvent::AuthRequired { url } => PeerEventJs::AuthRequired { url },
         }
     }

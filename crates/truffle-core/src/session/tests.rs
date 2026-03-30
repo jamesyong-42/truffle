@@ -288,7 +288,7 @@ async fn test_peers_online_without_connection() {
     let p = &peers[0];
     assert_eq!(p.id, "peer-1");
     assert!(p.online, "peer should be online");
-    assert!(!p.connected, "peer should NOT be connected (no WS yet)");
+    assert!(!p.ws_connected, "peer should NOT be ws_connected (no WS yet)");
 }
 
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn test_peer_updated_preserves_connected() {
     assert_eq!(peers.len(), 1);
     let p = &peers[0];
     assert_eq!(p.connection_type, "relay:sfo");
-    assert!(!p.connected, "connected should be preserved as false");
+    assert!(!p.ws_connected, "ws_connected should be preserved as false");
 }
 
 #[tokio::test]
@@ -413,7 +413,7 @@ async fn test_send_lazy_connects() {
     // Verify peer is known but not connected
     let peers = client_registry.peers().await;
     assert_eq!(peers.len(), 1);
-    assert!(!peers[0].connected, "should not be connected before send");
+    assert!(!peers[0].ws_connected, "should not be connected before send");
 
     // Send — triggers lazy connect
     let msg = b"hello from lazy connect";
@@ -421,7 +421,7 @@ async fn test_send_lazy_connects() {
 
     // Verify peer is now connected
     let peers = client_registry.peers().await;
-    assert!(peers[0].connected, "should be connected after send");
+    assert!(peers[0].ws_connected, "should be connected after send");
 
     // Server should receive the message
     let incoming = tokio::time::timeout(Duration::from_millis(500), server_incoming.recv())
@@ -458,7 +458,7 @@ async fn test_send_reuses_connection() {
     let event = tokio::time::timeout(Duration::from_millis(200), async {
         loop {
             match client_events.recv().await {
-                Ok(PeerEvent::Connected(_)) => return,
+                Ok(PeerEvent::WsConnected(_)) => return,
                 _ => continue,
             }
         }
@@ -606,7 +606,7 @@ async fn test_disconnect_reconnect() {
     let peers = client_registry.peers().await;
     let server_peer = peers.iter().find(|p| p.id == "server").unwrap();
     assert!(
-        !server_peer.connected,
+        !server_peer.ws_connected,
         "should be disconnected after disconnect()"
     );
 
@@ -617,7 +617,7 @@ async fn test_disconnect_reconnect() {
     let peers = client_registry.peers().await;
     let server_peer = peers.iter().find(|p| p.id == "server").unwrap();
     assert!(
-        server_peer.connected,
+        server_peer.ws_connected,
         "should be reconnected after second send"
     );
 
@@ -658,7 +658,7 @@ async fn test_peer_left_closes_ws_connection() {
     // Wait for Connected event
     tokio::time::timeout(Duration::from_millis(200), async {
         loop {
-            if let Ok(PeerEvent::Connected(id)) = client_events.recv().await {
+            if let Ok(PeerEvent::WsConnected(id)) = client_events.recv().await {
                 if id == "server" {
                     return;
                 }
@@ -670,7 +670,7 @@ async fn test_peer_left_closes_ws_connection() {
 
     // Verify connected
     let peers = client_registry.peers().await;
-    assert!(peers[0].connected, "should be connected before Left");
+    assert!(peers[0].ws_connected, "should be connected before Left");
 
     // Emit Left event — should close WS and emit Disconnected then Left
     client_es
@@ -684,7 +684,7 @@ async fn test_peer_left_closes_ws_connection() {
     let _ = tokio::time::timeout(Duration::from_millis(500), async {
         loop {
             match client_events.recv().await {
-                Ok(PeerEvent::Disconnected(id)) if id == "server" => {
+                Ok(PeerEvent::WsDisconnected(id)) if id == "server" => {
                     got_disconnected = true;
                 }
                 Ok(PeerEvent::Left(id)) if id == "server" => {

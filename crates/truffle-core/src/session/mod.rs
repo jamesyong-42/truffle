@@ -52,7 +52,7 @@ pub struct PeerState {
     /// Whether the peer is currently online (from Layer 3).
     pub online: bool,
     /// Whether the peer has an active WebSocket connection.
-    pub connected: bool,
+    pub ws_connected: bool,
     /// Connection type description (e.g., "direct" or "relay:ord").
     pub connection_type: String,
     /// Operating system of the peer, if known.
@@ -74,10 +74,10 @@ pub enum PeerEvent {
     Left(String),
     /// A peer's metadata changed (IP, relay, online status, from Layer 3).
     Updated(PeerState),
-    /// A WebSocket connection was established to a peer (Layer 5).
-    Connected(String),
-    /// A WebSocket connection was lost to a peer (Layer 5).
-    Disconnected(String),
+    /// A WebSocket connection was established to a peer (Layer 5 — WS transport).
+    WsConnected(String),
+    /// A WebSocket connection was lost to a peer (Layer 5 — WS transport).
+    WsDisconnected(String),
     /// Authentication is required — the URL should be shown to the user.
     AuthRequired { url: String },
 }
@@ -293,7 +293,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                         if let Some(handle) = handle {
                             let _ = handle.close_tx.send(()).await;
                             // Emit Disconnected before Left
-                            let _ = event_tx.send(PeerEvent::Disconnected(peer_id.clone()));
+                            let _ = event_tx.send(PeerEvent::WsDisconnected(peer_id.clone()));
                             tracing::info!(
                                 peer_id = %peer_id,
                                 "session: closed WS connection for departing peer"
@@ -311,11 +311,11 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                     Ok(NetworkPeerEvent::Updated(network_peer)) => {
                         let mut state = network_peer_to_state(&network_peer);
 
-                        // Preserve the `connected` flag from existing state
+                        // Preserve the `ws_connected` flag from existing state
                         {
                             let mut map = peers.write().await;
                             if let Some(existing) = map.get(&network_peer.id) {
-                                state.connected = existing.connected;
+                                state.ws_connected = existing.ws_connected;
                             }
                             map.insert(network_peer.id.clone(), state.clone());
                         }
@@ -390,11 +390,11 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                         {
                             let mut map = peers.write().await;
                             if let Some(state) = map.get_mut(&peer_id) {
-                                state.connected = true;
+                                state.ws_connected = true;
                             }
                         }
 
-                        let _ = event_tx.send(PeerEvent::Connected(peer_id));
+                        let _ = event_tx.send(PeerEvent::WsConnected(peer_id));
                     }
                     None => {
                         tracing::debug!("session: WS listener closed");
@@ -408,7 +408,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// Return all known peers.
     ///
     /// This returns peers discovered by Layer 3, including those with
-    /// no active transport connections (`connected: false`).
+    /// no active transport connections (`ws_connected: false`).
     pub async fn peers(&self) -> Vec<PeerState> {
         let map = self.peers.read().await;
         map.values().cloned().collect()
@@ -565,13 +565,13 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         {
             let mut map = self.peers.write().await;
             if let Some(state) = map.get_mut(peer_id) {
-                state.connected = true;
+                state.ws_connected = true;
             }
         }
 
         let _ = self
             .event_tx
-            .send(PeerEvent::Connected(peer_id.to_string()));
+            .send(PeerEvent::WsConnected(peer_id.to_string()));
 
         send_result
     }
@@ -624,13 +624,13 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         {
             let mut map = self.peers.write().await;
             if let Some(state) = map.get_mut(peer_id) {
-                state.connected = false;
+                state.ws_connected = false;
             }
         }
 
         let _ = self
             .event_tx
-            .send(PeerEvent::Disconnected(peer_id.to_string()));
+            .send(PeerEvent::WsDisconnected(peer_id.to_string()));
     }
 }
 
@@ -738,10 +738,10 @@ fn spawn_connection_task(
             {
                 let mut map = peers.write().await;
                 if let Some(state) = map.get_mut(&peer_id) {
-                    state.connected = false;
+                    state.ws_connected = false;
                 }
             }
-            let _ = event_tx.send(PeerEvent::Disconnected(peer_id));
+            let _ = event_tx.send(PeerEvent::WsDisconnected(peer_id));
         }
     });
 
@@ -754,7 +754,7 @@ fn spawn_connection_task(
 
 /// Convert a Layer 3 `NetworkPeer` to a Layer 5 `PeerState`.
 ///
-/// Sets `connected: false` by default — connections are managed by Layer 5,
+/// Sets `ws_connected: false` by default — connections are managed by Layer 5,
 /// not by Layer 3 discovery.
 fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
     let connection_type = if let Some(ref relay) = peer.relay {
@@ -770,7 +770,7 @@ fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
         name: peer.hostname.clone(),
         ip: peer.ip,
         online: peer.online,
-        connected: false,
+        ws_connected: false,
         connection_type,
         os: peer.os.clone(),
         last_seen: peer.last_seen.clone(),

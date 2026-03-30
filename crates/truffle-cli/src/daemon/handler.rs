@@ -288,32 +288,32 @@ fn peer_event_to_notification(
                     "peer": state.name,
                     "ip": state.ip.to_string(),
                     "online": state.online,
-                    "connected": state.connected,
+                    "ws_connected": state.ws_connected,
                     "time": chrono::Utc::now().to_rfc3339(),
                 }),
             )
         }
-        PeerEvent::Connected(id) => {
+        PeerEvent::WsConnected(id) => {
             if !matches_peer_filter(id, peer_filter) {
                 return None;
             }
             (
-                notification::PEER_CONNECTED,
+                notification::PEER_WS_CONNECTED,
                 serde_json::json!({
-                    "type": notification::PEER_CONNECTED,
+                    "type": notification::PEER_WS_CONNECTED,
                     "peer": id,
                     "time": chrono::Utc::now().to_rfc3339(),
                 }),
             )
         }
-        PeerEvent::Disconnected(id) => {
+        PeerEvent::WsDisconnected(id) => {
             if !matches_peer_filter(id, peer_filter) {
                 return None;
             }
             (
-                notification::PEER_DISCONNECTED,
+                notification::PEER_WS_DISCONNECTED,
                 serde_json::json!({
-                    "type": notification::PEER_DISCONNECTED,
+                    "type": notification::PEER_WS_DISCONNECTED,
                     "peer": id,
                     "time": chrono::Utc::now().to_rfc3339(),
                 }),
@@ -520,7 +520,7 @@ async fn handle_peers(
                 "name": p.name,
                 "ip": p.ip.to_string(),
                 "online": p.online,
-                "connected": p.connected,
+                "ws_connected": p.ws_connected,
                 "connection_type": p.connection_type,
                 "os": p.os,
                 "last_seen": p.last_seen,

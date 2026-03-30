@@ -92,7 +92,7 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                             name: peer.name.clone(),
                             ip: peer.ip,
                             online: peer.online,
-                            connected: peer.connected,
+                            ws_connected: peer.ws_connected,
                             connection_type: peer.connection_type.clone(),
                             os: peer.os.clone(),
                             last_seen: peer.last_seen.clone(),
@@ -615,16 +615,13 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 detail: String::new(),
             });
         }
-        PeerEvent::Connected(id) => {
+        PeerEvent::WsConnected(id) => {
             let name = app
                 .peers
                 .iter()
                 .find(|p| p.id == id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| id.clone());
-            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == id) {
-                peer.online = true;
-            }
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
                 kind: app::PeerEventKind::Connected,
@@ -632,16 +629,13 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 detail: String::new(),
             });
         }
-        PeerEvent::Disconnected(id) => {
+        PeerEvent::WsDisconnected(id) => {
             let name = app
                 .peers
                 .iter()
                 .find(|p| p.id == id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| id.clone());
-            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == id) {
-                peer.online = false;
-            }
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
                 kind: app::PeerEventKind::Disconnected,

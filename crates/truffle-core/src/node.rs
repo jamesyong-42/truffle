@@ -90,7 +90,7 @@ pub struct Peer {
     /// Whether the peer is online (from Layer 3).
     pub online: bool,
     /// Whether there is an active WebSocket connection.
-    pub connected: bool,
+    pub ws_connected: bool,
     /// Connection type description (e.g., `"direct"` or `"relay:ord"`).
     pub connection_type: String,
     /// Operating system, if known.
@@ -106,7 +106,7 @@ impl From<PeerState> for Peer {
             name: s.name,
             ip: s.ip,
             online: s.online,
-            connected: s.connected,
+            ws_connected: s.ws_connected,
             connection_type: s.connection_type,
             os: s.os,
             last_seen: s.last_seen,
@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].id, "peer-a");
         assert!(peers[0].online);
-        assert!(!peers[0].connected);
+        assert!(!peers[0].ws_connected);
     }
 
     #[tokio::test]

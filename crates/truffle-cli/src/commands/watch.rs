@@ -127,19 +127,19 @@ fn print_human_event(notif: &crate::daemon::protocol::DaemonNotification) {
                 output::bold(peer),
             );
         }
-        "peer.connected" => {
+        "peer.ws_connected" => {
             let peer = params["peer"].as_str().unwrap_or("?");
             println!(
-                "  {}{} {} connected",
+                "  {}{} {} ws connected",
                 time_str,
                 output::Indicator::Pass,
                 output::bold(peer),
             );
         }
-        "peer.disconnected" => {
+        "peer.ws_disconnected" => {
             let peer = params["peer"].as_str().unwrap_or("?");
             println!(
-                "  {}{} {} disconnected",
+                "  {}{} {} ws disconnected",
                 time_str,
                 output::Indicator::Warn,
                 output::bold(peer),
