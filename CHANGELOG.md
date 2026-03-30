@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.11](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.10...truffle-v0.3.11) (2026-03-30)
+
+
+### Bug Fixes
+
+* bump Cargo.toml versions to 0.3.11 ([6ce3693](https://github.com/jamesyong-42/truffle/commit/6ce3693da7a11b210fe87eb93b042ca0021e1b1b))
+* revert ARM64 Linux to gnu target (musl cross needs extra tooling) ([e25ede2](https://github.com/jamesyong-42/truffle/commit/e25ede29decfd00668fe17d26c6bfc83d5c0d62c))
+* throttle file transfer progress + show hashing phase ([4ed9477](https://github.com/jamesyong-42/truffle/commit/4ed9477ca52521ed70b8c03ac77504e7cb9042de))
+
 ## [0.3.10](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.9...truffle-v0.3.10) (2026-03-30)
 
 
