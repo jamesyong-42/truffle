@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.10](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.9...truffle-v0.3.10) (2026-03-30)
+
+
+### Bug Fixes
+
+* use musl (static linking) for Linux release binaries ([c707275](https://github.com/jamesyong-42/truffle/commit/c707275fbbd36339a8529c3a63455f65f9006125))
+
 ## [0.3.9](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.8...truffle-v0.3.9) (2026-03-30)
 
 
