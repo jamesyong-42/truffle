@@ -355,8 +355,28 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         });
     }
 
-    // Rename temp file to final path
-    tokio::fs::rename(&temp_path, save_path).await?;
+    // Resolve final path: if save_path is a directory, append the file name
+    let final_path = {
+        let p = std::path::Path::new(save_path);
+        if p.is_dir() || save_path.ends_with('/') || save_path.ends_with('\\') {
+            format!("{}/{}", save_path.trim_end_matches(['/', '\\']), file_name)
+        } else {
+            save_path.to_string()
+        }
+    };
+
+    // Create parent directories for the final path
+    if let Some(parent) = std::path::Path::new(&final_path).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    // Move temp file to final path. Use rename first (fast, atomic on same
+    // filesystem), fall back to copy+delete for cross-device moves (e.g.,
+    // tmpfs /tmp → ext4 /home).
+    if let Err(_rename_err) = tokio::fs::rename(&temp_path, &final_path).await {
+        tokio::fs::copy(&temp_path, &final_path).await?;
+        tokio::fs::remove_file(&temp_path).await.ok();
+    }
 
     // Send ACK and flush
     stream.write_all(&[0x01]).await?;
@@ -370,7 +390,7 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
 
     let elapsed = start.elapsed().as_secs_f64();
     info!(
-        file = save_path,
+        file = final_path.as_str(),
         bytes = file_size,
         elapsed_ms = (elapsed * 1000.0) as u64,
         "File received and verified"
