@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.12](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.11...truffle-v0.3.12) (2026-03-30)
+
+
+### Bug Fixes
+
+* bump Cargo.toml versions to 0.3.12 ([298d300](https://github.com/jamesyong-42/truffle/commit/298d300cfb061931c211be90d7de738fae14aa52))
+* complete file transfer UX — hashing/waiting/receive progress ([cb9113c](https://github.com/jamesyong-42/truffle/commit/cb9113c0ee964682b9fb2609ccaf0b711edb7619))
+
 ## [0.3.11](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.10...truffle-v0.3.11) (2026-03-30)
 
 
