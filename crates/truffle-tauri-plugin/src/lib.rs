@@ -86,6 +86,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::send_file,
             commands::pull_file,
             commands::auto_accept,
+            commands::auto_reject,
             commands::accept_offer,
             commands::reject_offer,
         ])

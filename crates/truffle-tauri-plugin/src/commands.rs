@@ -44,12 +44,10 @@ pub async fn start<R: Runtime>(
     state: State<'_, TruffleState>,
     config: StartConfig,
 ) -> Result<NodeIdentityJs, String> {
-    // Prevent double-start
-    {
-        let existing = state.node.read().await;
-        if existing.is_some() {
-            return Err("Node is already running. Call `stop` first.".to_string());
-        }
+    // Hold write lock for the entire start sequence to prevent TOCTOU race
+    let mut node_guard = state.node.write().await;
+    if node_guard.is_some() {
+        return Err("Node is already running. Call `stop` first.".to_string());
     }
 
     let mut builder = NodeBuilder::default()
@@ -86,8 +84,8 @@ pub async fn start<R: Runtime>(
     // Start event forwarding
     start_event_forwarding(&app, &arc, &state.pending_offers);
 
-    // Store in state
-    *state.node.write().await = Some(arc);
+    // Store in state (already holding write lock)
+    *node_guard = Some(arc);
 
     Ok(info.into())
 }
@@ -233,6 +231,17 @@ pub async fn auto_accept(
     let node = get_node(&state).await?;
     let ft = node.file_transfer();
     ft.auto_accept(node.clone(), &output_dir).await;
+    Ok(())
+}
+
+/// Auto-reject all incoming file offers.
+#[command]
+pub async fn auto_reject(
+    state: State<'_, TruffleState>,
+) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    ft.auto_reject(node.clone()).await;
     Ok(())
 }
 

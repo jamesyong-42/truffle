@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
     "send_file",
     "pull_file",
     "auto_accept",
+    "auto_reject",
     "accept_offer",
     "reject_offer",
 ];

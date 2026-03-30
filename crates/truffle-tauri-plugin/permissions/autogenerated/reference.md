@@ -85,6 +85,32 @@ Denies the auto_accept command without any pre-configured scope.
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-auto-reject`
+
+</td>
+<td>
+
+Enables the auto_reject command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-auto-reject`
+
+</td>
+<td>
+
+Denies the auto_reject command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-broadcast`
 
 </td>

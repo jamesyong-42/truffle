@@ -5,13 +5,47 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use tokio::sync::Mutex;
 
+use truffle_core::file_transfer::types::OfferResponder;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::{FileTransferEvent, Node};
 
 use crate::types::{
     NapiFileOffer, NapiFileTransferEvent, NapiTransferProgress, NapiTransferResult,
 };
+
+/// Responder for accepting or rejecting a file offer from JS.
+///
+/// The responder is consumed on the first call to `accept()` or `reject()`.
+/// If neither is called, the offer times out after 60 seconds.
+#[napi]
+pub struct NapiOfferResponder {
+    inner: Arc<Mutex<Option<OfferResponder>>>,
+}
+
+#[napi]
+impl NapiOfferResponder {
+    /// Accept the file offer, saving to the specified path.
+    #[napi]
+    pub async fn accept(&self, save_path: String) -> Result<()> {
+        let responder = self.inner.lock().await.take().ok_or_else(|| {
+            Error::from_reason("Offer already responded to")
+        })?;
+        responder.accept(&save_path);
+        Ok(())
+    }
+
+    /// Reject the file offer with a reason.
+    #[napi]
+    pub async fn reject(&self, reason: String) -> Result<()> {
+        let responder = self.inner.lock().await.take().ok_or_else(|| {
+            Error::from_reason("Offer already responded to")
+        })?;
+        responder.reject(&reason);
+        Ok(())
+    }
+}
 
 /// File transfer handle exposed to JavaScript.
 ///
@@ -96,12 +130,17 @@ impl NapiFileTransfer {
     /// The callback receives a `NapiFileOffer`. Use `autoAccept()` or
     /// `autoReject()` for automated handling, or use `onOffer()` for
     /// manual inspection of offers.
+    /// Subscribe to incoming file offers with a callback.
+    ///
+    /// The callback receives `(offer, responder)` — call `responder.accept(path)`
+    /// or `responder.reject(reason)` to handle the offer. If neither is called
+    /// within 60 seconds, the offer is auto-rejected.
     #[napi(
-        ts_args_type = "callback: (offer: FileOffer) => void"
+        ts_args_type = "callback: (offer: FileOffer, responder: NapiOfferResponder) => void"
     )]
     pub fn on_offer(
         &self,
-        callback: ThreadsafeFunction<NapiFileOffer>,
+        callback: ThreadsafeFunction<(NapiFileOffer, NapiOfferResponder)>,
     ) -> Result<()> {
         let node = self.node.clone();
 
@@ -109,7 +148,7 @@ impl NapiFileTransfer {
             let ft = node.file_transfer();
             let mut rx = ft.offer_channel(node.clone()).await;
 
-            while let Some((offer, _responder)) = rx.recv().await {
+            while let Some((offer, responder)) = rx.recv().await {
                 let napi_offer = NapiFileOffer {
                     from_peer: offer.from_peer.clone(),
                     from_name: offer.from_name.clone(),
@@ -120,11 +159,12 @@ impl NapiFileTransfer {
                     token: offer.token.clone(),
                 };
 
-                // Notify JS about the offer. The responder is dropped here,
-                // which means the offer will time out unless auto_accept or
-                // auto_reject is configured separately.
+                let napi_responder = NapiOfferResponder {
+                    inner: Arc::new(Mutex::new(Some(responder))),
+                };
+
                 let status = callback.call(
-                    Ok(napi_offer),
+                    Ok((napi_offer, napi_responder)),
                     ThreadsafeFunctionCallMode::NonBlocking,
                 );
                 if status != Status::Ok {

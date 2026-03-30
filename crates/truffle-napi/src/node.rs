@@ -5,6 +5,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use tokio::task::JoinHandle;
 
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::Node;
@@ -39,6 +40,8 @@ fn peer_to_napi(p: &truffle_core::node::Peer) -> NapiPeer {
 #[napi]
 pub struct NapiNode {
     node: Option<Arc<Node<TailscaleProvider>>>,
+    /// Handles to spawned event-forwarding tasks (cancelled on stop).
+    task_handles: Vec<JoinHandle<()>>,
 }
 
 #[napi]
@@ -46,7 +49,10 @@ impl NapiNode {
     /// Create a new (unstarted) NapiNode.
     #[napi(constructor)]
     pub fn new() -> Self {
-        Self { node: None }
+        Self {
+            node: None,
+            task_handles: Vec::new(),
+        }
     }
 
     /// Start the node with the given configuration.
@@ -91,6 +97,10 @@ impl NapiNode {
     /// no other calls are made on this NapiNode while `stop()` is in progress.
     #[napi]
     pub async unsafe fn stop(&mut self) -> Result<()> {
+        // Cancel all event-forwarding tasks
+        for handle in self.task_handles.drain(..) {
+            handle.abort();
+        }
         if let Some(node) = self.node.take() {
             node.stop().await;
         }
@@ -186,13 +196,13 @@ impl NapiNode {
         ts_args_type = "callback: (event: PeerEvent) => void"
     )]
     pub fn on_peer_change(
-        &self,
+        &mut self,
         callback: ThreadsafeFunction<NapiPeerEvent>,
     ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -213,6 +223,7 @@ impl NapiNode {
                 }
             }
         });
+        self.task_handles.push(handle);
 
         Ok(())
     }
@@ -224,14 +235,14 @@ impl NapiNode {
         ts_args_type = "namespace: string, callback: (msg: NamespacedMessage) => void"
     )]
     pub fn on_message(
-        &self,
+        &mut self,
         namespace: String,
         callback: ThreadsafeFunction<NapiNamespacedMessage>,
     ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.subscribe(&namespace);
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => {
@@ -258,6 +269,7 @@ impl NapiNode {
                 }
             }
         });
+        self.task_handles.push(handle);
 
         Ok(())
     }
@@ -300,11 +312,13 @@ fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent
                 os: state.os.clone(),
                 last_seen: state.last_seen.clone(),
             }),
+            auth_url: None,
         },
         PeerEvent::Left(id) => NapiPeerEvent {
             event_type: "left".to_string(),
             peer_id: id.clone(),
             peer: None,
+            auth_url: None,
         },
         PeerEvent::Updated(state) => NapiPeerEvent {
             event_type: "updated".to_string(),
@@ -319,21 +333,25 @@ fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent
                 os: state.os.clone(),
                 last_seen: state.last_seen.clone(),
             }),
+            auth_url: None,
         },
         PeerEvent::Connected(id) => NapiPeerEvent {
             event_type: "connected".to_string(),
             peer_id: id.clone(),
             peer: None,
+            auth_url: None,
         },
         PeerEvent::Disconnected(id) => NapiPeerEvent {
             event_type: "disconnected".to_string(),
             peer_id: id.clone(),
             peer: None,
+            auth_url: None,
         },
         PeerEvent::AuthRequired { url } => NapiPeerEvent {
             event_type: "auth_required".to_string(),
-            peer_id: url.clone(),
+            peer_id: String::new(),
             peer: None,
+            auth_url: Some(url.clone()),
         },
     }
 }

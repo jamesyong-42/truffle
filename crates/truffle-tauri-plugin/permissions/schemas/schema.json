@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the auto_accept command without any pre-configured scope."
         },
         {
+          "description": "Enables the auto_reject command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-auto-reject",
+          "markdownDescription": "Enables the auto_reject command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the auto_reject command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-auto-reject",
+          "markdownDescription": "Denies the auto_reject command without any pre-configured scope."
+        },
+        {
           "description": "Enables the broadcast command without any pre-configured scope.",
           "type": "string",
           "const": "allow-broadcast",

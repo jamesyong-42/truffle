@@ -110,12 +110,14 @@ pub struct NapiHealthInfo {
 /// A peer change event delivered to JS.
 #[napi(object)]
 pub struct NapiPeerEvent {
-    /// Event type: "joined", "left", "updated", "connected", "disconnected".
+    /// Event type: "joined", "left", "updated", "connected", "disconnected", "auth_required".
     pub event_type: String,
-    /// Peer ID (always present).
+    /// Peer ID (present for peer events, empty for auth_required).
     pub peer_id: String,
     /// Full peer info (present for joined/updated events).
     pub peer: Option<NapiPeer>,
+    /// Auth URL (present only for auth_required events).
+    pub auth_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
