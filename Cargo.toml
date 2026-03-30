@@ -5,4 +5,5 @@ members = [
     "crates/truffle-cli",
     "crates/truffle-sidecar",
     "crates/truffle",
+    "crates/truffle-napi",
 ]

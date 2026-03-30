@@ -1,6 +1,6 @@
 [package]
 name = "truffle-napi"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "NAPI-RS bindings for truffle-core (published to npm, not crates.io)"
 license = "MIT"
@@ -15,7 +15,7 @@ truffle-core = { path = "../truffle-core" }
 napi = { version = "3", features = ["async", "napi4", "tokio_rt", "serde-json"] }
 napi-derive = "3"
 serde_json = "1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 [build-dependencies]

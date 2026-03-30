@@ -1,512 +1,341 @@
+//! NapiFileTransfer — Node.js wrapper for file transfer operations.
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use tokio::sync::mpsc;
 
-use truffle_core::services::file_transfer::adapter::{
-    AdapterEvent, FileTransferAdapter as CoreAdapter, FileTransferAdapterConfig,
-    FileTransferOffer,
+use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::{FileTransferEvent, Node};
+
+use crate::types::{
+    NapiFileOffer, NapiFileTransferEvent, NapiTransferProgress, NapiTransferResult,
 };
-use truffle_core::services::file_transfer::manager::FileTransferManager;
-use truffle_core::services::file_transfer::types::{FileInfo, FileTransferConfig, FileTransferEvent};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// NAPI object types for file transfer
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// File transfer adapter configuration (JS representation).
-#[napi(object)]
-pub struct NapiFileTransferAdapterConfig {
-    /// Local device ID.
-    pub device_id: String,
-    /// Local address for file transfers (e.g. "host.ts.net:9417").
-    pub local_addr: String,
-    /// Default output directory for received files.
-    pub output_dir: String,
-    /// Maximum file size in bytes.
-    pub max_file_size: Option<f64>,
-    /// Max concurrent incoming transfers.
-    pub max_concurrent_recv: Option<u32>,
-    /// Progress event interval in milliseconds.
-    pub progress_interval_ms: Option<u32>,
-    /// Progress event byte threshold.
-    pub progress_bytes: Option<f64>,
-}
-
-/// File transfer offer (JS representation, for accept/reject).
-#[napi(object)]
-pub struct NapiFileTransferOffer {
-    pub transfer_id: String,
-    pub sender_device_id: String,
-    pub sender_addr: String,
-    pub file_name: String,
-    pub file_size: f64,
-    pub file_sha256: String,
-    pub token: String,
-}
-
-/// Transfer info returned to JS.
-#[napi(object)]
-pub struct NapiAdapterTransferInfo {
-    pub transfer_id: String,
-    pub direction: String,
-    pub state: String,
-    pub peer_device_id: String,
-    pub file_name: String,
-    pub file_size: f64,
-    pub bytes_transferred: f64,
-    pub percent: f64,
-    pub bytes_per_second: f64,
-    pub eta: f64,
-}
-
-/// Outgoing bus message (sent from adapter to be relayed via mesh).
-#[napi(object)]
-pub struct NapiBusMessage {
-    pub target_device_id: String,
-    pub message_type: String,
-    pub payload: String,
-}
-
-/// File transfer event delivered to JS.
-#[napi(object)]
-pub struct NapiFileTransferEvent {
-    pub event_type: String,
-    pub transfer_id: Option<String>,
-    pub payload: serde_json::Value,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Conversions
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Convert an AdapterEvent to a NapiFileTransferEvent.
-/// IMPORTANT: Must NEVER panic.
-fn adapter_event_to_napi(event: &AdapterEvent) -> NapiFileTransferEvent {
-    match event {
-        AdapterEvent::Offer(offer) => NapiFileTransferEvent {
-            event_type: "offer".to_string(),
-            transfer_id: Some(offer.transfer_id.clone()),
-            payload: serde_json::to_value(offer).unwrap_or(serde_json::Value::Null),
-        },
-        AdapterEvent::PreparingProgress(ft_event) => {
-            ft_event_to_napi("preparingProgress", ft_event)
-        }
-        AdapterEvent::Progress(ft_event) => ft_event_to_napi("progress", ft_event),
-        AdapterEvent::Completed(ft_event) => ft_event_to_napi("completed", ft_event),
-        AdapterEvent::Failed(reason, ft_event) => {
-            let mut napi = ft_event_to_napi("failed", ft_event);
-            if let serde_json::Value::Object(ref mut map) = napi.payload {
-                map.insert(
-                    "reason".to_string(),
-                    serde_json::Value::String(reason.clone()),
-                );
-            }
-            napi
-        }
-        AdapterEvent::Cancelled(transfer_id) => NapiFileTransferEvent {
-            event_type: "cancelled".to_string(),
-            transfer_id: Some(transfer_id.clone()),
-            payload: serde_json::Value::Null,
-        },
-    }
-}
-
-fn ft_event_to_napi(event_type: &str, event: &FileTransferEvent) -> NapiFileTransferEvent {
-    let transfer_id = match event {
-        FileTransferEvent::PreparingProgress { transfer_id, .. } => Some(transfer_id.clone()),
-        FileTransferEvent::Prepared { transfer_id, .. } => Some(transfer_id.clone()),
-        FileTransferEvent::Progress { transfer_id, .. } => Some(transfer_id.clone()),
-        FileTransferEvent::Complete { transfer_id, .. } => Some(transfer_id.clone()),
-        FileTransferEvent::Error { transfer_id, .. } => Some(transfer_id.clone()),
-        FileTransferEvent::Cancelled { transfer_id } => Some(transfer_id.clone()),
-        FileTransferEvent::List { .. } => None,
-    };
-
-    NapiFileTransferEvent {
-        event_type: event_type.to_string(),
-        transfer_id,
-        payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
-    }
-}
-
-fn napi_offer_to_core(offer: &NapiFileTransferOffer) -> FileTransferOffer {
-    FileTransferOffer {
-        transfer_id: offer.transfer_id.clone(),
-        sender_device_id: offer.sender_device_id.clone(),
-        sender_addr: offer.sender_addr.clone(),
-        file: FileInfo {
-            name: offer.file_name.clone(),
-            size: offer.file_size as i64,
-            sha256: offer.file_sha256.clone(),
-        },
-        token: offer.token.clone(),
-        cli_mode: false,
-        save_path: None,
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// NapiFileTransferAdapter
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// NapiFileTransferAdapter - Node.js wrapper for file transfer signaling.
+/// File transfer handle exposed to JavaScript.
 ///
-/// Handles file transfer offer/accept/reject/cancel via the mesh message bus.
-/// Progress events use the broadcast channel (drops allowed for lag recovery).
+/// Obtained via `NapiNode.fileTransfer()`. Holds an `Arc<Node>` to create
+/// fresh `FileTransfer` handles on each method call (the Rust `FileTransfer`
+/// borrows `&Node`, so we can't store it across JS boundaries).
 #[napi]
-pub struct NapiFileTransferAdapter {
-    inner: Arc<CoreAdapter>,
-    event_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<AdapterEvent>>>,
-    bus_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, String, String)>>>,
-    manager_event_rx:
-        tokio::sync::Mutex<Option<tokio::sync::broadcast::Receiver<FileTransferEvent>>>,
-    pending_event_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiFileTransferEvent>>>,
-    pending_bus_cb: std::sync::Mutex<Option<ThreadsafeFunction<NapiBusMessage>>>,
+pub struct NapiFileTransfer {
+    node: Arc<Node<TailscaleProvider>>,
+}
+
+impl NapiFileTransfer {
+    pub(crate) fn new(node: Arc<Node<TailscaleProvider>>) -> Self {
+        Self { node }
+    }
 }
 
 #[napi]
-impl NapiFileTransferAdapter {
-    /// Create a new FileTransferAdapter.
+impl NapiFileTransfer {
+    /// Send a file to a peer.
     ///
-    /// Sets up the underlying FileTransferManager and adapter with default TCP dial.
-    #[napi(constructor)]
-    pub fn new(config: NapiFileTransferAdapterConfig) -> Result<Self> {
-        // Build FileTransferConfig from NAPI config
-        let mut ft_config = FileTransferConfig::default();
-        if let Some(max_size) = config.max_file_size {
-            ft_config.max_file_size = max_size as i64;
-        }
-        if let Some(max_recv) = config.max_concurrent_recv {
-            ft_config.max_concurrent_recv = max_recv as usize;
-        }
-        if let Some(interval_ms) = config.progress_interval_ms {
-            ft_config.progress_interval = Duration::from_millis(interval_ms as u64);
-        }
-        if let Some(progress_bytes) = config.progress_bytes {
-            ft_config.progress_bytes = progress_bytes as i64;
-        }
-
-        // Create manager event channel (broadcast for multiple consumers)
-        let (manager_event_tx, manager_event_rx) = tokio::sync::broadcast::channel(256);
-
-        // Create the FileTransferManager
-        let manager = FileTransferManager::new(ft_config, manager_event_tx);
-
-        // Create bus channel for outgoing messages
-        let (bus_tx, bus_rx) = mpsc::unbounded_channel();
-
-        // Create adapter event channel
-        let (adapter_event_tx, adapter_event_rx) = mpsc::unbounded_channel();
-
-        // Default dial function: standard TCP connect
-        let dial_fn: Arc<
-            dyn Fn(
-                    &str,
-                )
-                    -> std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<Output = std::io::Result<tokio::net::TcpStream>>
-                            + Send,
-                    >,
-                > + Send
-                + Sync,
-        > = Arc::new(|addr: &str| {
-            let addr = addr.to_string();
-            Box::pin(async move { tokio::net::TcpStream::connect(&addr).await })
-        });
-
-        let adapter_config = FileTransferAdapterConfig {
-            local_device_id: config.device_id,
-            local_addr: config.local_addr,
-            output_dir: config.output_dir,
-            dial_fn,
-        };
-
-        let adapter = CoreAdapter::new(adapter_config, manager, bus_tx, adapter_event_tx);
-
-        Ok(Self {
-            inner: adapter,
-            event_rx: tokio::sync::Mutex::new(Some(adapter_event_rx)),
-            bus_rx: tokio::sync::Mutex::new(Some(bus_rx)),
-            manager_event_rx: tokio::sync::Mutex::new(Some(manager_event_rx)),
-            pending_event_cb: std::sync::Mutex::new(None),
-            pending_bus_cb: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// Initiate sending a file to a target device.
-    /// Returns the transfer ID.
+    /// Resolves with transfer result on success.
     #[napi]
     pub async fn send_file(
         &self,
-        target_device_id: String,
-        file_path: String,
-    ) -> Result<String> {
-        let transfer_id = self.inner.send_file(&target_device_id, &file_path).await;
-        Ok(transfer_id)
+        peer_id: String,
+        local_path: String,
+        remote_path: String,
+    ) -> Result<NapiTransferResult> {
+        let ft = self.node.file_transfer();
+        let result = ft
+            .send_file(&peer_id, &local_path, &remote_path)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiTransferResult {
+            bytes_transferred: result.bytes_transferred as f64,
+            sha256: result.sha256,
+            elapsed_secs: result.elapsed_secs,
+        })
     }
 
-    /// Accept an incoming file transfer offer.
-    #[napi]
-    pub async fn accept_transfer(
-        &self,
-        offer: NapiFileTransferOffer,
-        save_path: Option<String>,
-    ) -> Result<()> {
-        let core_offer = napi_offer_to_core(&offer);
-        self.inner
-            .accept_transfer(&core_offer, save_path.as_deref())
-            .await;
-        Ok(())
-    }
-
-    /// Reject an incoming file transfer offer.
-    #[napi]
-    pub async fn reject_transfer(
-        &self,
-        offer: NapiFileTransferOffer,
-        reason: String,
-    ) -> Result<()> {
-        let core_offer = napi_offer_to_core(&offer);
-        self.inner.reject_transfer(&core_offer, &reason).await;
-        Ok(())
-    }
-
-    /// Cancel an active transfer.
-    #[napi]
-    pub async fn cancel_transfer(&self, transfer_id: String) -> Result<()> {
-        self.inner.cancel_transfer(&transfer_id).await;
-        Ok(())
-    }
-
-    /// Get all tracked transfers.
-    #[napi]
-    pub async fn get_transfers(&self) -> Result<Vec<NapiAdapterTransferInfo>> {
-        let transfers = self.inner.get_transfers().await;
-        Ok(transfers
-            .into_iter()
-            .map(|t| NapiAdapterTransferInfo {
-                transfer_id: t.transfer_id,
-                direction: t.direction,
-                state: t.state,
-                peer_device_id: t.peer_device_id,
-                file_name: t.file.name,
-                file_size: t.file.size as f64,
-                bytes_transferred: t.bytes_transferred as f64,
-                percent: t.percent,
-                bytes_per_second: t.bytes_per_second,
-                eta: t.eta,
-            })
-            .collect())
-    }
-
-    /// Handle an incoming message from the mesh bus.
-    /// Call this when a file-transfer namespace message arrives.
-    #[napi]
-    pub async fn handle_bus_message(
-        &self,
-        msg_type: String,
-        payload: serde_json::Value,
-    ) -> Result<()> {
-        self.inner.handle_bus_message(&msg_type, &payload).await;
-        Ok(())
-    }
-
-    /// Subscribe to adapter events (offers, progress, completed, failed, cancelled).
+    /// Pull (download) a file from a remote peer.
     ///
-    /// Only one subscriber allowed. Can be called before or after `start_manager_events`.
-    #[napi(ts_args_type = "callback: (err: null | Error, event: NapiFileTransferEvent) => void")]
+    /// Resolves with transfer result on success.
+    #[napi]
+    pub async fn pull_file(
+        &self,
+        peer_id: String,
+        remote_path: String,
+        local_path: String,
+    ) -> Result<NapiTransferResult> {
+        let ft = self.node.file_transfer();
+        let result = ft
+            .pull_file(&peer_id, &remote_path, &local_path)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiTransferResult {
+            bytes_transferred: result.bytes_transferred as f64,
+            sha256: result.sha256,
+            elapsed_secs: result.elapsed_secs,
+        })
+    }
+
+    /// Auto-accept all incoming file offers, saving files to `output_dir`.
+    #[napi]
+    pub async fn auto_accept(&self, output_dir: String) -> Result<()> {
+        let ft = self.node.file_transfer();
+        ft.auto_accept(self.node.clone(), &output_dir).await;
+        Ok(())
+    }
+
+    /// Auto-reject all incoming file offers.
+    #[napi]
+    pub async fn auto_reject(&self) -> Result<()> {
+        let ft = self.node.file_transfer();
+        ft.auto_reject(self.node.clone()).await;
+        Ok(())
+    }
+
+    /// Subscribe to incoming file offers with a callback.
+    ///
+    /// The callback receives a `NapiFileOffer`. Use `autoAccept()` or
+    /// `autoReject()` for automated handling, or use `onOffer()` for
+    /// manual inspection of offers.
+    #[napi(
+        ts_args_type = "callback: (offer: FileOffer) => void"
+    )]
+    pub fn on_offer(
+        &self,
+        callback: ThreadsafeFunction<NapiFileOffer>,
+    ) -> Result<()> {
+        let node = self.node.clone();
+
+        tokio::spawn(async move {
+            let ft = node.file_transfer();
+            let mut rx = ft.offer_channel(node.clone()).await;
+
+            while let Some((offer, _responder)) = rx.recv().await {
+                let napi_offer = NapiFileOffer {
+                    from_peer: offer.from_peer.clone(),
+                    from_name: offer.from_name.clone(),
+                    file_name: offer.file_name.clone(),
+                    size: offer.size as f64,
+                    sha256: offer.sha256.clone(),
+                    suggested_path: offer.suggested_path.clone(),
+                    token: offer.token.clone(),
+                };
+
+                // Notify JS about the offer. The responder is dropped here,
+                // which means the offer will time out unless auto_accept or
+                // auto_reject is configured separately.
+                let status = callback.call(
+                    Ok(napi_offer),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
+                if status != Status::Ok {
+                    break;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Subscribe to file transfer events.
+    ///
+    /// The callback receives `NapiFileTransferEvent` objects for all
+    /// transfer lifecycle events (hashing, progress, completed, failed, etc.).
+    #[napi(
+        ts_args_type = "callback: (event: FileTransferEvent) => void"
+    )]
     pub fn on_event(
         &self,
         callback: ThreadsafeFunction<NapiFileTransferEvent>,
     ) -> Result<()> {
-        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-            let mut guard = self
-                .event_rx
-                .try_lock()
-                .map_err(|_| Error::from_reason("event receiver lock contention"))?;
+        let ft = self.node.file_transfer();
+        let mut rx = ft.subscribe();
 
-            let rx = guard.take().ok_or_else(|| {
-                Error::from_reason("on_event already called - only one subscriber allowed")
-            })?;
-
-            tokio::spawn(async move {
-                Self::event_loop(rx, callback).await;
-            });
-        } else {
-            let mut guard = self
-                .pending_event_cb
-                .lock()
-                .map_err(|_| Error::from_reason("pending_event_cb lock poisoned"))?;
-            if guard.is_some() {
-                return Err(Error::from_reason(
-                    "on_event already called - only one subscriber allowed",
-                ));
-            }
-            *guard = Some(callback);
-        }
-
-        Ok(())
-    }
-
-    /// Subscribe to outgoing bus messages.
-    ///
-    /// The adapter generates outgoing messages (OFFER, ACCEPT, REJECT, CANCEL)
-    /// that must be sent via the mesh message bus. Can be called before or after
-    /// `start_manager_events`.
-    #[napi(ts_args_type = "callback: (err: null | Error, message: NapiBusMessage) => void")]
-    pub fn on_bus_message(
-        &self,
-        callback: ThreadsafeFunction<NapiBusMessage>,
-    ) -> Result<()> {
-        if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-            let mut guard = self
-                .bus_rx
-                .try_lock()
-                .map_err(|_| Error::from_reason("bus receiver lock contention"))?;
-
-            let rx = guard.take().ok_or_else(|| {
-                Error::from_reason("on_bus_message already called - only one subscriber allowed")
-            })?;
-
-            tokio::spawn(async move {
-                Self::bus_message_loop(rx, callback).await;
-            });
-        } else {
-            let mut guard = self
-                .pending_bus_cb
-                .lock()
-                .map_err(|_| Error::from_reason("pending_bus_cb lock poisoned"))?;
-            if guard.is_some() {
-                return Err(Error::from_reason(
-                    "on_bus_message already called - only one subscriber allowed",
-                ));
-            }
-            *guard = Some(callback);
-        }
-
-        Ok(())
-    }
-
-    /// Start forwarding manager events to the adapter.
-    ///
-    /// The FileTransferManager emits events (progress, complete, error) that
-    /// the adapter needs to process. Call this once after construction.
-    /// Also spawns any pending event/bus callbacks registered before a Tokio
-    /// runtime was available.
-    #[napi]
-    pub async fn start_manager_events(&self) -> Result<()> {
-        // Spawn pending event callback if registered before runtime was available
-        let event_cb = self
-            .pending_event_cb
-            .lock()
-            .map_err(|_| Error::from_reason("pending_event_cb lock poisoned"))?
-            .take();
-        if let Some(cb) = event_cb {
-            let mut guard = self.event_rx.lock().await;
-            if let Some(rx) = guard.take() {
-                tokio::spawn(async move {
-                    Self::event_loop(rx, cb).await;
-                });
-            }
-        }
-
-        // Spawn pending bus callback if registered before runtime was available
-        let bus_cb = self
-            .pending_bus_cb
-            .lock()
-            .map_err(|_| Error::from_reason("pending_bus_cb lock poisoned"))?
-            .take();
-        if let Some(cb) = bus_cb {
-            let mut guard = self.bus_rx.lock().await;
-            if let Some(rx) = guard.take() {
-                tokio::spawn(async move {
-                    Self::bus_message_loop(rx, cb).await;
-                });
-            }
-        }
-
-        // Spawn manager event loop
-        let mut guard = self
-            .manager_event_rx
-            .try_lock()
-            .map_err(|_| Error::from_reason("manager event receiver lock contention"))?;
-
-        let rx = guard.take().ok_or_else(|| {
-            Error::from_reason(
-                "start_manager_events already called - only one subscriber allowed",
-            )
-        })?;
-
-        let adapter = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            Self::manager_event_loop(rx, adapter).await;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let napi_event = convert_ft_event(&event);
+                        let status = callback.call(
+                            Ok(napi_event),
+                            ThreadsafeFunctionCallMode::NonBlocking,
+                        );
+                        if status != Status::Ok {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(missed = n, "on_event lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
         });
 
         Ok(())
     }
 
-    // --- Internal event loops ---
-
-    async fn event_loop(
-        mut rx: mpsc::UnboundedReceiver<AdapterEvent>,
-        callback: ThreadsafeFunction<NapiFileTransferEvent>,
-    ) {
-        while let Some(event) = rx.recv().await {
-            let napi_event = adapter_event_to_napi(&event);
-            let status = callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::Blocking);
-            if status != Status::Ok {
-                tracing::warn!("Failed to deliver file transfer event to JS: {:?}", status);
-                if status == Status::Closing || status == Status::InvalidArg {
-                    tracing::info!(
-                        "File transfer event callback closed, stopping event loop"
-                    );
-                    break;
-                }
-            }
-        }
-        tracing::info!("File transfer event loop ended (channel closed)");
+    /// Set the maximum allowed transfer size in bytes.
+    #[napi]
+    pub fn set_max_transfer_size(&self, bytes: f64) {
+        let ft = self.node.file_transfer();
+        ft.set_max_transfer_size(bytes as u64);
     }
+}
 
-    async fn bus_message_loop(
-        mut rx: mpsc::UnboundedReceiver<(String, String, String)>,
-        callback: ThreadsafeFunction<NapiBusMessage>,
-    ) {
-        while let Some((target_device_id, message_type, payload)) = rx.recv().await {
-            let msg = NapiBusMessage {
-                target_device_id,
-                message_type,
-                payload,
-            };
-            let status = callback.call(Ok(msg), ThreadsafeFunctionCallMode::Blocking);
-            if status != Status::Ok {
-                tracing::warn!("Failed to deliver bus message to JS: {:?}", status);
-                if status == Status::Closing || status == Status::InvalidArg {
-                    tracing::info!("Bus message callback closed, stopping loop");
-                    break;
-                }
-            }
-        }
-        tracing::info!("Bus message loop ended (channel closed)");
+// ---------------------------------------------------------------------------
+// FileTransferEvent conversion
+// ---------------------------------------------------------------------------
+
+fn direction_str(d: &truffle_core::file_transfer::TransferDirection) -> String {
+    use truffle_core::file_transfer::TransferDirection;
+    match d {
+        TransferDirection::Send => "send".to_string(),
+        TransferDirection::Receive => "receive".to_string(),
     }
+}
 
-    async fn manager_event_loop(
-        mut rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
-        adapter: Arc<CoreAdapter>,
-    ) {
-        loop {
-            match rx.recv().await {
-                Ok(event) => adapter.handle_manager_event(event).await,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Manager event receiver lagged, skipped {n} events");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-        tracing::info!("Manager event loop ended (channel closed)");
+fn convert_ft_event(event: &FileTransferEvent) -> NapiFileTransferEvent {
+    match event {
+        FileTransferEvent::OfferReceived(offer) => NapiFileTransferEvent {
+            event_type: "offer_received".to_string(),
+            token: Some(offer.token.clone()),
+            file_name: Some(offer.file_name.clone()),
+            direction: None,
+            progress: None,
+            offer: Some(NapiFileOffer {
+                from_peer: offer.from_peer.clone(),
+                from_name: offer.from_name.clone(),
+                file_name: offer.file_name.clone(),
+                size: offer.size as f64,
+                sha256: offer.sha256.clone(),
+                suggested_path: offer.suggested_path.clone(),
+                token: offer.token.clone(),
+            }),
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: None,
+            bytes_hashed: None,
+            total_bytes: None,
+        },
+
+        FileTransferEvent::Hashing {
+            token,
+            file_name,
+            bytes_hashed,
+            total_bytes,
+        } => NapiFileTransferEvent {
+            event_type: "hashing".to_string(),
+            token: Some(token.clone()),
+            file_name: Some(file_name.clone()),
+            direction: None,
+            progress: None,
+            offer: None,
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: None,
+            bytes_hashed: Some(*bytes_hashed as f64),
+            total_bytes: Some(*total_bytes as f64),
+        },
+
+        FileTransferEvent::WaitingForAccept { token, file_name } => NapiFileTransferEvent {
+            event_type: "waiting_for_accept".to_string(),
+            token: Some(token.clone()),
+            file_name: Some(file_name.clone()),
+            direction: None,
+            progress: None,
+            offer: None,
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: None,
+            bytes_hashed: None,
+            total_bytes: None,
+        },
+
+        FileTransferEvent::Progress(p) => NapiFileTransferEvent {
+            event_type: "progress".to_string(),
+            token: Some(p.token.clone()),
+            file_name: Some(p.file_name.clone()),
+            direction: Some(direction_str(&p.direction)),
+            progress: Some(NapiTransferProgress {
+                token: p.token.clone(),
+                direction: direction_str(&p.direction),
+                file_name: p.file_name.clone(),
+                bytes_transferred: p.bytes_transferred as f64,
+                total_bytes: p.total_bytes as f64,
+                speed_bps: p.speed_bps,
+            }),
+            offer: None,
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: None,
+            bytes_hashed: None,
+            total_bytes: None,
+        },
+
+        FileTransferEvent::Completed {
+            token,
+            direction,
+            file_name,
+            bytes_transferred,
+            sha256,
+            elapsed_secs,
+        } => NapiFileTransferEvent {
+            event_type: "completed".to_string(),
+            token: Some(token.clone()),
+            file_name: Some(file_name.clone()),
+            direction: Some(direction_str(direction)),
+            progress: None,
+            offer: None,
+            bytes_transferred: Some(*bytes_transferred as f64),
+            sha256: Some(sha256.clone()),
+            elapsed_secs: Some(*elapsed_secs),
+            reason: None,
+            bytes_hashed: None,
+            total_bytes: None,
+        },
+
+        FileTransferEvent::Rejected {
+            token,
+            file_name,
+            reason,
+        } => NapiFileTransferEvent {
+            event_type: "rejected".to_string(),
+            token: Some(token.clone()),
+            file_name: Some(file_name.clone()),
+            direction: None,
+            progress: None,
+            offer: None,
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: Some(reason.clone()),
+            bytes_hashed: None,
+            total_bytes: None,
+        },
+
+        FileTransferEvent::Failed {
+            token,
+            direction,
+            file_name,
+            reason,
+        } => NapiFileTransferEvent {
+            event_type: "failed".to_string(),
+            token: Some(token.clone()),
+            file_name: Some(file_name.clone()),
+            direction: Some(direction_str(direction)),
+            progress: None,
+            offer: None,
+            bytes_transferred: None,
+            sha256: None,
+            elapsed_secs: None,
+            reason: Some(reason.clone()),
+            bytes_hashed: None,
+            total_bytes: None,
+        },
     }
 }
