@@ -37,10 +37,10 @@ jobs:
             archive: truffle-darwin-x64.tar.gz
             archive_cmd: tar czf
 
-          # Linux x64
+          # Linux x64 (musl — statically linked, works on any Linux distro)
           - platform: linux-x64
             os: ubuntu-latest
-            rust_target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-musl
             goos: linux
             goarch: amd64
             cli_bin: truffle
@@ -48,10 +48,10 @@ jobs:
             archive: truffle-linux-x64.tar.gz
             archive_cmd: tar czf
 
-          # Linux ARM64 (cross-compiled)
+          # Linux ARM64 (cross-compiled, musl)
           - platform: linux-arm64
             os: ubuntu-latest
-            rust_target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-musl
             goos: linux
             goarch: arm64
             cli_bin: truffle
@@ -87,11 +87,17 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: packages/sidecar-slim/go.sum
 
+      - name: Install musl toolchain (Linux x64)
+        if: matrix.rust_target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
 
       - name: Build Rust CLI
         shell: bash
