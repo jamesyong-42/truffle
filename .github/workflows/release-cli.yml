@@ -48,10 +48,10 @@ jobs:
             archive: truffle-linux-x64.tar.gz
             archive_cmd: tar czf
 
-          # Linux ARM64 (cross-compiled, musl)
+          # Linux ARM64 (cross-compiled, gnu — musl cross-compile needs extra tooling)
           - platform: linux-arm64
             os: ubuntu-latest
-            rust_target: aarch64-unknown-linux-musl
+            rust_target: aarch64-unknown-linux-gnu
             goos: linux
             goarch: arm64
             cli_bin: truffle
