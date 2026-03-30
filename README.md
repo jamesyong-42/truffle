@@ -4,9 +4,30 @@
 [![Release](https://img.shields.io/github/v/release/jamesyong-42/truffle?label=latest)](https://github.com/jamesyong-42/truffle/releases/latest)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**P2P mesh networking for your devices, built on Tailscale.**
+**Mesh networking for your devices, built on Tailscale.**
 
-Truffle gives your devices automatic discovery and direct peer-to-peer communication over Tailscale's encrypted WireGuard tunnels. No coordinator, no election, no central server -- every node connects directly to every other node. ~15k LOC Rust across 2 crates with a clean 7-layer architecture (RFC 012), a product-grade CLI (9 working commands), and a thin Go sidecar (~1.8k LOC) for Tailscale `tsnet` integration. All four transports (WS, TCP, UDP, QUIC) verified cross-machine over real Tailscale. Node.js bindings (NAPI-RS) and Tauri plugin exist but are pending update to the new Node API.
+Truffle lets your devices discover each other, exchange messages, and transfer files over Tailscale's encrypted WireGuard tunnels. No central server. Run `truffle` to launch an interactive TUI, or use one-shot commands for scripts and AI agents.
+
+```
+╭─── truffle v0.3.12 ──────────────────────────────────────────────╮
+│                                         │ Devices                │
+│  ▀█▀ █▀█ █ █ █▀▀ █▀▀ █   █▀▀          │ ● server (direct)      │
+│   █  █▀▄ █ █ █▀  █▀  █   █▀           │ ● laptop (relay)       │
+│   █  █ █ ▀▄▀ █   █   █▄▄ █▄▄          │ ○ pi (offline)         │
+│                                         │                        │
+│  mesh networking for your devices       │                        │
+│  jamess-mbp · 100.64.0.5               │                        │
+│  ● online · 2 peers · 15m              │                        │
+╰───────────────────────────────────────────────────────────────────╯
+  14:02  ● server joined (direct)
+  14:03  You → server: Hello!
+  14:03  server → You: Hey there!
+  14:05  ⬇ report.pdf from server ████████████████ 100% ✓
+─────────────────────────────────────────────────────────────────────
+❯ /send how are things? @server
+─────────────────────────────────────────────────────────────────────
+  truffle · ● online · 2 peers
+```
 
 ## Install
 
@@ -14,108 +35,139 @@ Truffle gives your devices automatic discovery and direct peer-to-peer communica
 curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
 ```
 
-Supports macOS (arm64/x64), Linux (x64/arm64), and Windows (x64).
+Supports macOS (arm64/x64), Linux (x64/arm64), and Windows (x64). Linux binaries are statically linked (musl) — works on any distro.
 
 ## Quick Start
 
+### Interactive TUI
+
 ```bash
-truffle up                        # start your node and join the mesh
-truffle ls                        # see who's online
-truffle status                    # show node identity, IP, uptime
-truffle ping laptop               # check latency (direct or relay)
-truffle send server "hello"       # send a namespaced message
-truffle cp file.txt server:/tmp/  # copy files (SHA-256 verified)
-truffle tcp server:5432           # raw TCP stream (like netcat)
-truffle doctor                    # diagnose connectivity issues
-truffle down                      # graceful shutdown
+truffle                           # launch the interactive TUI
 ```
 
-## What Works (v2 — RFC 012)
+First run shows an onboarding wizard with smart device naming and Tailscale auth. After setup, the TUI shows a live activity feed, device panel, and slash commands:
 
-All commands verified end-to-end over real Tailscale (macOS <-> EC2 Linux).
+| Command | Description |
+|---------|-------------|
+| `/send <msg> @device` | Send a message (`@` autocompletes devices) |
+| `/broadcast <msg>` | Message all online peers |
+| `/cp <path> @device` | Send a file (Tab opens file picker) |
+| `/exit` | Quit |
 
-| Command | Status | Description |
-|---------|--------|-------------|
-| `truffle up` | **Working** | Start node via Go sidecar, discover peers via WatchIPNBus, establish mesh |
-| `truffle down` | **Working** | Graceful shutdown — close transports, stop sidecar |
-| `truffle status` | **Working** | Show node identity, IP, DNS name, uptime, peer count |
-| `truffle ls` | **Working** | List peers with online/offline status and OS info |
-| `truffle ping` | **Working** | Latency check via Tailscale (direct path or DERP relay) |
-| `truffle cp` | **Working** | File transfer over mesh (HTTP PUT, SHA-256 verified, progress bar) |
-| `truffle send` | **Working** | Send namespaced messages via Layer 6 envelopes over WebSocket |
-| `truffle tcp` | **Working** | Raw TCP stream through Tailscale (pipe-friendly, like netcat) |
-| `truffle doctor` | **Working** | Diagnose Tailscale, sidecar binary, mesh connectivity, key expiry |
+Incoming file transfers show an accept/reject modal dialog.
+
+### One-Shot Commands (for scripts & agents)
+
+```bash
+truffle up                        # start daemon in background
+truffle ls                        # see who's online
+truffle status                    # node identity, IP, uptime
+truffle ping laptop               # check latency
+truffle send server "hello"       # send a message
+truffle cp file.txt server:/tmp/  # copy files (SHA-256 verified)
+truffle tcp server:5432           # raw TCP (like netcat)
+truffle doctor                    # diagnose connectivity
+truffle down                      # graceful shutdown
+truffle update                    # self-update to latest release
+```
+
+### Agent-Friendly Streaming
+
+```bash
+truffle watch --json              # stream mesh events as JSONL
+truffle wait server --timeout 60  # block until peer comes online
+truffle recv --json --from server # block for next message
+```
+
+All commands support `--json` for structured output with versioned envelopes.
+
+## Features
+
+- **Interactive TUI** — Claude Code-inspired terminal UI with live activity feed, device panel, slash commands, file picker, autocomplete
+- **Chat messaging** — send/broadcast with `@device` mentions, message grouping for consecutive messages
+- **File transfer** — SHA-256 verified, progress bars, interactive accept/reject modal, streaming to disk (constant memory)
+- **Peer discovery** — automatic via Tailscale WatchIPNBus, ~30s offline detection
+- **Smart naming** — auto-generates clean device names from OS hostname (`Jamess-MBP-6.ts.net lan` → `jamess-mbp`)
+- **Agent mode** — `--json` on all 13 commands, structured exit codes, `NO_COLOR`, `truffle watch/wait/recv` for scripting
+- **Cross-platform** — macOS, Linux (musl static), Windows
+- **First-run onboarding** — name picker + Tailscale auth wizard
 
 ## Architecture
 
-Clean 7-layer architecture (RFC 012), built bottom-up with trait boundaries at each layer:
+Clean 7-layer architecture (RFC 012), with file transfer as a first-class core feature (RFC 014):
 
 ```
-Layer 7: Applications   -- CLI commands: file transfer, messaging, diagnostics
-         Node API       -- 15-method public API (the only import apps need)
-Layer 6: Envelope       -- namespace-routed message framing (EnvelopeCodec)
-Layer 5: Session        -- PeerRegistry, lazy connections, message fan-out
-Layer 4: Transport      -- WebSocket, TCP, UDP, QUIC (all verified cross-machine)
-Layer 3: Network        -- TailscaleProvider, WatchIPNBus peer discovery
-         Go Sidecar     -- tsnet integration, encrypted WireGuard tunnels
+Layer 7: Applications   ── CLI commands, TUI, daemon handler
+         Node API       ── 15-method public API + FileTransfer manager
+Layer 6: Envelope       ── namespace-routed message framing
+Layer 5: Session        ── PeerRegistry, lazy connections, event broadcast
+Layer 4: Transport      ── WebSocket, TCP, UDP, QUIC
+Layer 3: Network        ── TailscaleProvider, WatchIPNBus
+         Go Sidecar     ── tsnet integration, WireGuard tunnels
 ```
 
-The `Node` struct is the single public entry point. Applications never import from lower layers directly. Peer discovery works via Tailscale's WatchIPNBus -- peers are known before any transport connections are established. Messages are sent point-to-point or fan-out broadcast with namespace-based routing.
+### File Transfer (RFC 014)
 
-### Port Map
+The `file_transfer` module in `truffle-core` provides:
 
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 443  | TLS/WS   | Incoming WebSocket connections (tsnet HTTPS listener) |
-| 9417 | TCP       | Direct TCP mesh connections |
-| dynamic | UDP   | UDP relay via tsnet ListenPacket |
+```rust
+let ft = node.file_transfer();
+
+// Send a file
+ft.send_file("peer-id", "/path/to/file.txt", "/dest/").await?;
+
+// Receive with interactive accept/reject
+let mut offers = ft.offer_channel(node.clone()).await;
+while let Some((offer, responder)) = offers.recv().await {
+    responder.accept("/save/path");  // or responder.reject("reason")
+}
+
+// Or auto-accept everything
+ft.auto_accept(node.clone(), "~/Downloads/truffle/").await;
+
+// Subscribe to transfer lifecycle events
+let mut events = ft.subscribe();
+```
 
 ## Crates & Packages
 
 | Crate / Package | Status | Description |
 |-----------------|--------|-------------|
-| [`truffle-core`](crates/truffle-core) | **Active** | Rust library -- Layers 3-6, Node API (~12k LOC) |
-| [`truffle-cli`](crates/truffle-cli) | **Active** | CLI tool -- 9 working commands on the Node API (~3k LOC) |
-| [`sidecar-slim`](packages/sidecar-slim/) | **Active** | Go sidecar -- Tailscale tsnet, WatchIPNBus, UDP relay (~1.8k LOC) |
-| [`truffle-napi`](crates/truffle-napi) | Pending | NAPI-RS native addon for Node.js (needs update to new Node API) |
-| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Pending | Tauri v2 plugin for desktop apps (needs update to new Node API) |
+| [`truffle-core`](crates/truffle-core) | **Active** | Rust library — Layers 3-6, Node API, file transfer (~14k LOC) |
+| [`truffle-cli`](crates/truffle-cli) | **Active** | CLI + TUI — 13 commands, interactive terminal UI (~5k LOC) |
+| [`sidecar-slim`](packages/sidecar-slim/) | **Active** | Go sidecar — tsnet, WatchIPNBus, TCP bridge (~1.8k LOC) |
+| [`truffle-napi`](crates/truffle-napi) | Pending | NAPI-RS native addon for Node.js |
+| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Pending | Tauri v2 plugin for desktop apps |
 
-**npm:** `@vibecook/truffle` + platform-specific sidecar packages (`@vibecook/truffle-sidecar-*`)
+**npm:** `@vibecook/truffle` + platform-specific sidecar packages
 
 ## Development
 
 ```bash
 cargo build --workspace       # build all Rust crates
-cargo test --workspace        # run tests (~192 tests)
+cargo test --workspace        # run tests (~190 tests)
 ```
 
 ### Prerequisites
 
-- **Rust** >= 1.75
+- **Rust** >= 1.86
 - **Go** >= 1.22 (for building the sidecar)
 - **Tailscale** installed and authenticated
-
-## Releases
-
-Automated via [release-please](https://github.com/googleapis/release-please). Push `feat:` or `fix:` commits to main, merge the generated Release PR, and builds trigger automatically for all 5 platforms.
 
 ## RFCs
 
 | RFC | Status | Description |
 |-----|--------|-------------|
-| [RFC 003](docs/rfcs/) | Implemented | Rust rewrite (truffle-core, truffle-napi, truffle-tauri-plugin) |
-| [RFC 005](docs/rfcs/) | Implemented | Core refactor (broadcast events, MessageBus dispatch) |
-| [RFC 007](docs/rfcs/) | Implemented | Comprehensive refactor (23 audit fixes) |
-| [RFC 008](docs/rfcs/) | Superseded | 6-layer architecture vision (replaced by RFC 012's 7-layer design) |
-| [RFC 009](docs/rfcs/) | Implemented | Wire protocol v3 (frame types, typed dispatch) |
-| [RFC 010](docs/rfcs/) | Implemented | P2P redesign (remove STAR topology, CLI daemon) |
-| [RFC 011](docs/rfcs/) | Implemented | File transfer over mesh (HTTP PUT, resume, SHA-256) |
-| [RFC 012](docs/rfcs/012-layered-architecture-redesign.md) | Implemented | Clean layered architecture redesign (Layers 3-7, Node API) |
+| [RFC 012](docs/rfcs/012-layered-architecture-redesign.md) | Implemented | Clean 7-layer architecture redesign |
+| [RFC 013](docs/rfcs/013-tui-redesign.md) | Implemented | Dual-mode TUI + agent CLI redesign |
+| [RFC 014](docs/rfcs/014-file-transfer-core.md) | Implemented | File transfer as core feature with accept/reject API |
 
 ## Documentation
 
-- [GitHub Pages](https://jamesyong-42.github.io/truffle/) -- install scripts and docs site
-- [Architecture: Networking Flows (v1, archived)](docs/architecture/networking-flows.md) -- flow analysis for the old architecture
+- [GitHub Pages](https://jamesyong-42.github.io/truffle/) — install scripts and docs
+- [Getting Started](docs/guide/getting-started.md)
+- [CLI Reference](docs/guide/cli.md)
+- [Architecture](docs/guide/architecture.md)
 
 ## License
 

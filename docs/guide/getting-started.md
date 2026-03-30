@@ -17,83 +17,99 @@ curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
 iwr -useb https://jamesyong-42.github.io/truffle/install.ps1 | iex
 ```
 
-```sh [Homebrew]
-brew install jamesyong-42/tap/truffle
-```
-
 :::
 
-The installer downloads the `truffle` CLI and the `sidecar-slim` binary, places them in `~/.config/truffle/bin` (Unix) or `%LOCALAPPDATA%\truffle\bin` (Windows), and adds them to your PATH.
+The installer downloads the `truffle` CLI and the `sidecar-slim` binary, places them in `~/.config/truffle/bin`, and adds them to your PATH. Linux binaries are statically linked — works on any distro.
 
 ## Quick Start
 
-### 1. Start your node
+### 1. Launch the TUI
 
 ```sh
-truffle up
+truffle
 ```
 
-Output:
+On first run, you'll see an onboarding wizard:
 
 ```
-  truffle
-  ───────────────────────────────────────
-
-  Node        james-macbook
-  Status      ● online
-  IP          100.64.0.3
-  DNS         truffle-desktop-a1b2.tailnet.ts.net
-  Mesh        3 nodes online
-  Uptime      just started
+╭─── truffle ── first time setup ──────────────────────────╮
+│                                                          │
+│         ▀█▀ █▀█ █ █ █▀▀ █▀▀ █   █▀▀                   │
+│          █  █▀▄ █ █ █▀  █▀  █   █▀                    │
+│          █  █ █ ▀▄▀ █   █   █▄▄ █▄▄                   │
+│                                                          │
+│   Name this device:                                      │
+│   ❯ jamess-mbp                                           │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯
 ```
 
-### 2. See who's on the mesh
+Accept the auto-generated name or type your own, then authenticate with Tailscale. After setup, the TUI launches with a live activity feed showing peer events, messages, and file transfers.
+
+### 2. Send a message
+
+Type in the TUI:
+
+```
+/send hello @server
+```
+
+The `@` triggers device autocomplete. The message appears on both sides instantly.
+
+### 3. Send a file
+
+```
+/cp report.pdf @server
+```
+
+Press Tab to open the file picker, or type the path directly. The other device sees an accept/reject dialog:
+
+```
+╭─── incoming file ────────────────────────────────────╮
+│  server wants to send you a file:                    │
+│  📄 report.pdf  (2.1 MB)                            │
+│  [a] Accept  [s] Save as  [r] Reject                │
+│                    [d] Don't ask from server         │
+╰──────────────────────────────────────────────────────╯
+```
+
+### 4. Broadcast to all peers
+
+```
+/broadcast deploy starting in 5 minutes
+```
+
+## One-Shot Commands
+
+For scripts, CI, and AI agents, use subcommands instead of the TUI:
 
 ```sh
-truffle ls
+truffle up                        # start daemon
+truffle ls --json                 # list peers as JSON
+truffle send server "hello"       # send a message
+truffle cp file.txt server:/tmp/  # copy a file
+truffle watch --json              # stream events as JSONL
+truffle wait server --timeout 60  # block until peer online
+truffle recv --json               # block for next message
+truffle down                      # stop daemon
 ```
 
-```
-  NAME              IP             OS       STATUS
-  james-macbook     100.64.0.3     macOS    ● online
-  work-desktop      100.64.0.5     Linux    ● online
-  home-server       100.64.0.7     Linux    ● online
-```
+All commands support `--json` for structured output with versioned envelopes:
 
-### 3. Ping a node
-
-```sh
-truffle ping work-desktop
+```json
+{"version": 1, "node": "jamess-mbp", "peers": [...]}
 ```
 
-### 4. Send a message
+## How It Works
 
-```sh
-truffle send work-desktop "build is done"
-```
-
-### 5. Copy a file
-
-```sh
-truffle cp ./report.pdf work-desktop:/tmp/
-```
-
-### 6. Stop your node
-
-```sh
-truffle down
-```
-
-## What's happening under the hood
-
-1. `truffle up` starts the Go sidecar, which joins your Tailscale network via `tsnet`
-2. Peers are discovered automatically via Tailscale's WatchIPNBus (known before any connections)
-3. WebSocket connections are established lazily on first message send -- no coordinator, no hub
-4. Messages flow through the 7-layer stack: CLI -> Node API -> Envelope -> Session -> Transport -> Network -> Sidecar
+1. `truffle` starts the Go sidecar, which joins your Tailscale network via `tsnet`
+2. Peers are discovered automatically via Tailscale's WatchIPNBus
+3. WebSocket connections are established lazily on first message
+4. Messages flow through the 7-layer stack: TUI → Node API → Envelope → Session → Transport → Network → Sidecar
+5. File transfers use WS for signaling (offer/accept) and raw TCP for data, with SHA-256 verification
 
 ## Next Steps
 
-- [CLI Quick Start](/guide/cli) -- full command reference
-- [Installation](/guide/install) -- detailed install options
-- [Architecture](/guide/architecture) -- how it works
-- [Mesh Networking](/guide/mesh-networking) -- programmatic usage with the Rust/Node.js library
+- [CLI Reference](/guide/cli) — full command reference
+- [Installation](/guide/install) — detailed install options
+- [Architecture](/guide/architecture) — how the layers work

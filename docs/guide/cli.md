@@ -1,185 +1,80 @@
-# CLI Quick Start
+# CLI Reference
 
-The `truffle` CLI is the primary way to use truffle. It runs as a background daemon -- start it once with `truffle up`, then use commands like `ls`, `send`, `cp`, and `tcp` to interact with your mesh.
+## Interactive TUI
 
-## Commands at a Glance
-
-```
-$ truffle --help
-
-truffle -- Mesh networking for your devices, built on Tailscale. (v2 — Node API)
-
-Usage: truffle [command]
-
-Node:
-  up              Start your node and join the mesh
-  down            Stop your node and leave the mesh
-  status          Show your node's status and connectivity
-
-Discovery:
-  ls              List all nodes on your mesh
-  ping <node>     Check if a node is reachable
-
-Connectivity:
-  tcp <target>    Open a raw TCP connection (like netcat)
-
-Communication:
-  send <node>     Send a one-shot message
-
-Files:
-  cp <src> <dst>  Copy files between nodes (like scp)
-
-Diagnostics:
-  doctor          Diagnose connectivity issues
-
-Run 'truffle <command> --help' for details on any command.
+```bash
+truffle              # launch interactive TUI (when no subcommand given on a TTY)
 ```
 
-## Node Lifecycle
+The TUI provides a Claude Code-inspired terminal interface with:
+- Live activity feed (peer events, messages, file transfers)
+- Always-visible device panel
+- Slash commands with `@` device autocomplete and `/` command autocomplete
+- File picker (Tab in `/cp`)
+- Accept/reject modal for incoming files
+- Toast notifications when scrolled up
 
-### Start your node
+### TUI Slash Commands
 
-```sh
-truffle up
+| Command | Description |
+|---------|-------------|
+| `/send <msg> @device` | Send a chat message |
+| `/broadcast <msg>` | Message all online peers |
+| `/cp <path> @device[:/dest]` | Send a file (Tab opens file picker) |
+| `/exit` | Quit |
+
+## One-Shot Commands
+
+### Node Lifecycle
+
+```bash
+truffle up [--name <name>] [--foreground]
+truffle down [--force]
+truffle status [--watch] [--json]
+truffle update
 ```
 
-This starts the Go sidecar, joins your Tailscale network via `tsnet`, and begins discovering peers via WatchIPNBus. By default it runs in the foreground with a live status dashboard.
+### Discovery & Diagnostics
 
-Options:
-```
---name <name>         Set this node's display name     [default: hostname]
---foreground          Run in foreground (for debugging)
-```
-
-### Check status
-
-```sh
-truffle status
-```
-
-Running `truffle` with no arguments also shows status.
-
-Options:
-```
---watch, -w     Continuously update (like top)
---json          Output as JSON
-```
-
-### Stop your node
-
-```sh
-truffle down
-```
-
-Options:
-```
---force, -f     Force stop even if transfers are in progress
-```
-
-## Discovery
-
-### List nodes
-
-```sh
-truffle ls
-```
-
-```
-  NAME              IP             OS       STATUS
-  james-macbook     100.64.0.3     macOS    online
-  work-desktop      100.64.0.5     Linux    online
-  home-server       100.64.0.7     Linux    online
-```
-
-Options:
-```
---all, -a       Show offline nodes too
---long, -l      Show detailed info (IP, OS, connection type)
---json          Output as JSON
-```
-
-### Ping a node
-
-```sh
-truffle ping laptop
-```
-
-Nodes are addressed by name (Tailscale hostname). No need to remember IPs.
-
-Options:
-```
--c, --count <n>     Number of pings [default: 4]
-```
-
-## Communication
-
-### Send a one-shot message
-
-```sh
-truffle send laptop "deploy is done"
-```
-
-Options:
-```
---all, -a       Send to all nodes (broadcast)
---wait, -w      Wait for and print the reply
-```
-
-## File Transfer
-
-### Copy files
-
-```sh
-# Copy a local file to a remote node
-truffle cp ./report.pdf server:/tmp/
-
-# Copy from remote to local
-truffle cp server:/var/log/app.log ./
-```
-
-The syntax follows `scp` conventions. SHA-256 verification is on by default.
-
-Options:
-```
---no-verify     Skip SHA-256 integrity verification after transfer
-```
-
-## Connectivity
-
-### Raw TCP connection
-
-```sh
-truffle tcp server:8080
-```
-
-Works like `netcat` -- stdin is sent, stdout receives. Pipe-friendly.
-
-Options:
-```
---check         Only test connectivity, don't open interactive session
-```
-
-## Diagnostics
-
-### Doctor
-
-```sh
+```bash
+truffle ls [--all] [--long] [--json]
+truffle ping <node> [-c <count>]
 truffle doctor
 ```
 
-Checks:
-- Tailscale is installed and running
-- Sidecar binary is present and executable
-- Network connectivity to peers
-- Configuration file validity
+### Communication
+
+```bash
+truffle send <node> <message> [--json]
+truffle cp <src> <dst> [--no-verify] [--json]
+truffle tcp <target> [--check]
+```
+
+### Streaming (Agent-Friendly)
+
+```bash
+truffle watch [--json] [--filter peer|message|transfer] [--timeout <secs>]
+truffle wait <node> [--timeout <secs>] [--json]
+truffle recv [--from <node>] [--timeout <secs>] [--json]
+```
 
 ## Global Flags
 
-Available on every command:
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON with versioned envelope |
+| `--quiet` | Suppress non-essential output |
+| `--verbose` | Show debug info |
+| `--color <auto\|always\|never>` | Color mode |
 
-```
---quiet, -q      Suppress all non-essential output
---verbose, -v    Show detailed output (debug info, timings)
---color <when>   Force color: auto, always, never  [default: auto]
---config <path>  Path to config file  [default: ~/.config/truffle/config.toml]
-```
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error |
+| 2 | Usage error |
+| 3 | Peer not found |
+| 4 | Not online |
+| 5 | Timeout |
+| 6 | Transfer failed |
