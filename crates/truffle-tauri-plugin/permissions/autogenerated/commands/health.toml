@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-health"
+description = "Enables the health command without any pre-configured scope."
+commands.allow = ["health"]
+
+[[permission]]
+identifier = "deny-health"
+description = "Denies the health command without any pre-configured scope."
+commands.deny = ["health"]

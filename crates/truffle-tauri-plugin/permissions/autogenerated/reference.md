@@ -33,6 +33,84 @@ Default permissions for the Truffle plugin
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-accept-offer`
+
+</td>
+<td>
+
+Enables the accept_offer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-accept-offer`
+
+</td>
+<td>
+
+Denies the accept_offer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-auto-accept`
+
+</td>
+<td>
+
+Enables the auto_accept command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-auto-accept`
+
+</td>
+<td>
+
+Denies the auto_accept command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-broadcast`
+
+</td>
+<td>
+
+Enables the broadcast command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-broadcast`
+
+</td>
+<td>
+
+Denies the broadcast command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-broadcast-envelope`
 
 </td>
@@ -137,6 +215,58 @@ Denies the devices command without any pre-configured scope.
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-get-local-info`
+
+</td>
+<td>
+
+Enables the get_local_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-get-local-info`
+
+</td>
+<td>
+
+Denies the get_local_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-get-peers`
+
+</td>
+<td>
+
+Enables the get_peers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-get-peers`
+
+</td>
+<td>
+
+Denies the get_peers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-handle-tailnet-peers`
 
 </td>
@@ -156,6 +286,32 @@ Enables the handle_tailnet_peers command without any pre-configured scope.
 <td>
 
 Denies the handle_tailnet_peers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-health`
+
+</td>
+<td>
+
+Enables the health command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-health`
+
+</td>
+<td>
+
+Denies the health command without any pre-configured scope.
 
 </td>
 </tr>
@@ -208,6 +364,32 @@ Enables the is_running command without any pre-configured scope.
 <td>
 
 Denies the is_running command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-ping`
+
+</td>
+<td>
+
+Enables the ping command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-ping`
+
+</td>
+<td>
+
+Denies the ping command without any pre-configured scope.
 
 </td>
 </tr>
@@ -319,6 +501,58 @@ Denies the proxy_remove command without any pre-configured scope.
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-pull-file`
+
+</td>
+<td>
+
+Enables the pull_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-pull-file`
+
+</td>
+<td>
+
+Denies the pull_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-reject-offer`
+
+</td>
+<td>
+
+Enables the reject_offer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-reject-offer`
+
+</td>
+<td>
+
+Denies the reject_offer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-role`
 
 </td>
@@ -364,6 +598,58 @@ Enables the send_envelope command without any pre-configured scope.
 <td>
 
 Denies the send_envelope command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-send-file`
+
+</td>
+<td>
+
+Enables the send_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-send-file`
+
+</td>
+<td>
+
+Denies the send_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-send-message`
+
+</td>
+<td>
+
+Enables the send_message command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-send-message`
+
+</td>
+<td>
+
+Denies the send_message command without any pre-configured scope.
 
 </td>
 </tr>

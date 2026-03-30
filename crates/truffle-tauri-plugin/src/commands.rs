@@ -1,291 +1,278 @@
-use serde::{Deserialize, Serialize};
-use tauri::{command, State};
+//! Tauri commands for the truffle plugin.
+//!
+//! Each command accesses `TruffleState` from Tauri's managed state, reads the
+//! `Node<TailscaleProvider>`, and delegates to the core API. All commands are
+//! async and return `Result<T, String>` as required by Tauri.
 
+use std::sync::Arc;
+
+use tauri::{command, AppHandle, Emitter, Runtime, State};
+
+use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::{Node, NodeBuilder};
+
+use crate::events::start_event_forwarding;
+use crate::types::*;
 use crate::TruffleState;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Command types (serialized to/from frontend)
-// ═══════════════════════════════════════════════════════════════════════════
+// ---------------------------------------------------------------------------
+// Helper: get a clone of the Arc<Node> from state, or error
+// ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceInfo {
-    pub id: String,
-    pub device_type: String,
-    pub name: String,
-    pub tailscale_hostname: String,
-    pub tailscale_dns_name: Option<String>,
-    pub tailscale_ip: Option<String>,
-    pub status: String,
-    pub capabilities: Vec<String>,
-    pub metadata: Option<serde_json::Value>,
-    pub last_seen: Option<f64>,
-    pub started_at: Option<f64>,
-    pub os: Option<String>,
-    pub latency_ms: Option<f64>,
+async fn get_node(
+    state: &TruffleState,
+) -> Result<Arc<Node<TailscaleProvider>>, String> {
+    state
+        .node
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "Node not started. Call `start` first.".to_string())
 }
 
-impl From<&truffle_core::types::BaseDevice> for DeviceInfo {
-    fn from(d: &truffle_core::types::BaseDevice) -> Self {
-        Self {
-            id: d.id.clone(),
-            device_type: d.device_type.clone(),
-            name: d.name.clone(),
-            tailscale_hostname: d.tailscale_hostname.clone(),
-            tailscale_dns_name: d.tailscale_dns_name.clone(),
-            tailscale_ip: d.tailscale_ip.clone(),
-            status: match d.status {
-                truffle_core::types::DeviceStatus::Online => "online".to_string(),
-                truffle_core::types::DeviceStatus::Offline => "offline".to_string(),
-                truffle_core::types::DeviceStatus::Connecting => "connecting".to_string(),
-            },
-            capabilities: d.capabilities.clone(),
-            metadata: d.metadata.as_ref().map(|m| {
-                serde_json::to_value(m).unwrap_or(serde_json::Value::Null)
-            }),
-            last_seen: d.last_seen.map(|v| v as f64),
-            started_at: d.started_at.map(|v| v as f64),
-            os: d.os.clone(),
-            latency_ms: d.latency_ms,
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+/// Start the truffle node with the given configuration.
+///
+/// Creates a `Node<TailscaleProvider>` via the builder, stores it in state,
+/// and starts event forwarding to the Tauri frontend.
+#[command]
+pub async fn start<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, TruffleState>,
+    config: StartConfig,
+) -> Result<NodeIdentityJs, String> {
+    // Prevent double-start
+    {
+        let existing = state.node.read().await;
+        if existing.is_some() {
+            return Err("Node is already running. Call `stop` first.".to_string());
         }
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TailnetPeerInput {
-    pub id: String,
-    pub hostname: String,
-    pub dns_name: String,
-    pub tailscale_ips: Vec<String>,
-    pub online: bool,
-    pub os: Option<String>,
-}
+    let mut builder = NodeBuilder::default()
+        .name(&config.name)
+        .sidecar_path(&config.sidecar_path);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyConfigInput {
-    pub id: String,
-    pub name: String,
-    pub port: u16,
-    pub target_port: u16,
-    pub target_scheme: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyInfoOutput {
-    pub id: String,
-    pub name: String,
-    pub port: u16,
-    pub target_port: u16,
-    pub target_scheme: String,
-    pub is_active: bool,
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MeshNode commands
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[command]
-pub async fn start(state: State<'_, TruffleState>) -> Result<(), String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => { n.start().await; Ok(()) }
-        None => Err("MeshNode not initialized".to_string()),
+    if let Some(ref dir) = config.state_dir {
+        builder = builder.state_dir(dir);
     }
+    if let Some(ref key) = config.auth_key {
+        builder = builder.auth_key(key);
+    }
+    if config.ephemeral {
+        builder = builder.ephemeral(true);
+    }
+    if let Some(port) = config.ws_port {
+        builder = builder.ws_port(port);
+    }
+
+    // Build with auth handler that forwards auth URLs to the frontend
+    let app_clone = app.clone();
+    let node = builder
+        .build_with_auth_handler(move |url| {
+            if let Err(e) = app_clone.emit("truffle://auth-required", &url) {
+                tracing::warn!("Failed to emit auth-required event: {e}");
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let info = node.local_info();
+    let arc = Arc::new(node);
+
+    // Start event forwarding
+    start_event_forwarding(&app, &arc, &state.pending_offers);
+
+    // Store in state
+    *state.node.write().await = Some(arc);
+
+    Ok(info.into())
 }
 
+/// Stop the truffle node and clean up state.
 #[command]
 pub async fn stop(state: State<'_, TruffleState>) -> Result<(), String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => { n.stop().await; Ok(()) }
-        None => Err("MeshNode not initialized".to_string()),
-    }
-}
-
-#[command]
-pub async fn is_running(state: State<'_, TruffleState>) -> Result<bool, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => Ok(n.is_running().await),
-        None => Ok(false),
-    }
-}
-
-#[command]
-pub async fn device_id(state: State<'_, TruffleState>) -> Result<String, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => Ok(n.device_id().await),
-        None => Err("MeshNode not initialized".to_string()),
-    }
-}
-
-#[command]
-pub async fn devices(state: State<'_, TruffleState>) -> Result<Vec<DeviceInfo>, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
+    let node = state.node.write().await.take();
+    match node {
         Some(n) => {
-            let devs = n.devices().await;
-            Ok(devs.iter().map(DeviceInfo::from).collect())
+            n.stop().await;
+            // Clear pending offers
+            state.pending_offers.write().await.clear();
+            Ok(())
         }
-        None => Err("MeshNode not initialized".to_string()),
+        None => Err("Node is not running.".to_string()),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Identity & Discovery
+// ---------------------------------------------------------------------------
+
+/// Get the local node's identity.
 #[command]
-pub async fn device_by_id(
+pub async fn get_local_info(
     state: State<'_, TruffleState>,
-    id: String,
-) -> Result<Option<DeviceInfo>, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => Ok(n.device_by_id(&id).await.as_ref().map(DeviceInfo::from)),
-        None => Err("MeshNode not initialized".to_string()),
-    }
+) -> Result<NodeIdentityJs, String> {
+    let node = get_node(&state).await?;
+    Ok(node.local_info().into())
 }
 
+/// Get all known peers.
 #[command]
-pub async fn send_envelope(
+pub async fn get_peers(
     state: State<'_, TruffleState>,
-    device_id: String,
+) -> Result<Vec<PeerJs>, String> {
+    let node = get_node(&state).await?;
+    let peers = node.peers().await;
+    Ok(peers.into_iter().map(PeerJs::from).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+/// Ping a peer by ID or name.
+#[command]
+pub async fn ping(
+    state: State<'_, TruffleState>,
+    peer_id: String,
+) -> Result<PingResultJs, String> {
+    let node = get_node(&state).await?;
+    let result = node.ping(&peer_id).await.map_err(|e| e.to_string())?;
+    Ok(result.into())
+}
+
+/// Get health information from the network layer.
+#[command]
+pub async fn health(
+    state: State<'_, TruffleState>,
+) -> Result<HealthInfoJs, String> {
+    let node = get_node(&state).await?;
+    Ok(node.health().await.into())
+}
+
+// ---------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------
+
+/// Send a namespaced message to a specific peer.
+#[command]
+pub async fn send_message(
+    state: State<'_, TruffleState>,
+    peer_id: String,
     namespace: String,
-    msg_type: String,
-    payload: serde_json::Value,
-) -> Result<bool, String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => {
-            let envelope = truffle_core::protocol::envelope::MeshEnvelope::new(
-                namespace, msg_type, payload,
-            );
-            Ok(n.send_envelope(&device_id, &envelope).await)
-        }
-        None => Err("MeshNode not initialized".to_string()),
-    }
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    node.send(&peer_id, &namespace, &data)
+        .await
+        .map_err(|e| e.to_string())
 }
 
+/// Broadcast a namespaced message to all connected peers.
 #[command]
-pub async fn broadcast_envelope(
+pub async fn broadcast(
     state: State<'_, TruffleState>,
     namespace: String,
-    msg_type: String,
-    payload: serde_json::Value,
+    data: Vec<u8>,
 ) -> Result<(), String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => {
-            let envelope = truffle_core::protocol::envelope::MeshEnvelope::new(
-                namespace, msg_type, payload,
-            );
-            n.broadcast_envelope(&envelope).await;
-            Ok(())
-        }
-        None => Err("MeshNode not initialized".to_string()),
-    }
+    let node = get_node(&state).await?;
+    node.broadcast(&namespace, &data).await;
+    Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// File Transfer
+// ---------------------------------------------------------------------------
+
+/// Send a file to a peer.
 #[command]
-pub async fn handle_tailnet_peers(
+pub async fn send_file(
     state: State<'_, TruffleState>,
-    peers: Vec<TailnetPeerInput>,
-) -> Result<(), String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => {
-            let core_peers: Vec<truffle_core::types::TailnetPeer> = peers.iter().map(|p| {
-                truffle_core::types::TailnetPeer {
-                    id: p.id.clone(),
-                    hostname: p.hostname.clone(),
-                    dns_name: p.dns_name.clone(),
-                    tailscale_ips: p.tailscale_ips.clone(),
-                    online: p.online,
-                    os: p.os.clone(),
-                    cur_addr: None,
-                    relay: None,
-                    last_seen: None,
-                    key_expiry: None,
-                    expired: false,
-                }
-            }).collect();
-            n.handle_tailnet_peers(&core_peers).await;
-            Ok(())
-        }
-        None => Err("MeshNode not initialized".to_string()),
-    }
+    peer_id: String,
+    local_path: String,
+    remote_path: String,
+) -> Result<TransferResultJs, String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    let result = ft
+        .send_file(&peer_id, &local_path, &remote_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.into())
 }
 
+/// Pull (download) a file from a peer.
 #[command]
-pub async fn set_local_online(
+pub async fn pull_file(
     state: State<'_, TruffleState>,
-    tailscale_ip: String,
-    dns_name: Option<String>,
-) -> Result<(), String> {
-    let node = state.mesh_node.read().await;
-    match node.as_ref() {
-        Some(n) => {
-            n.set_local_online(&tailscale_ip, dns_name.as_deref()).await;
-            Ok(())
-        }
-        None => Err("MeshNode not initialized".to_string()),
-    }
+    peer_id: String,
+    remote_path: String,
+    local_path: String,
+) -> Result<TransferResultJs, String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    let result = ft
+        .pull_file(&peer_id, &remote_path, &local_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.into())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Reverse proxy commands
-// ═══════════════════════════════════════════════════════════════════════════
-
+/// Enable auto-accept mode for incoming file offers.
+///
+/// All incoming offers will be automatically accepted and saved to `output_dir`.
 #[command]
-pub async fn proxy_add(
+pub async fn auto_accept(
     state: State<'_, TruffleState>,
-    config: ProxyConfigInput,
+    output_dir: String,
 ) -> Result<(), String> {
-    let proxy_manager = state.proxy_manager.read().await;
-    match proxy_manager.as_ref() {
-        Some(pm) => {
-            pm.add(truffle_core::http::proxy::ProxyConfig {
-                id: config.id,
-                name: config.name,
-                port: config.port,
-                target_port: config.target_port,
-                target_scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
-            }).await
-        }
-        None => Err("ProxyManager not initialized".to_string()),
-    }
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    ft.auto_accept(node.clone(), &output_dir).await;
+    Ok(())
 }
 
+/// Accept an incoming file offer by its token.
+///
+/// The offer must have been received via the `truffle://file-offer` event.
+/// The `save_path` is the local filesystem path where the file will be saved.
 #[command]
-pub async fn proxy_remove(
+pub async fn accept_offer(
     state: State<'_, TruffleState>,
-    id: String,
+    token: String,
+    save_path: String,
 ) -> Result<(), String> {
-    let proxy_manager = state.proxy_manager.read().await;
-    match proxy_manager.as_ref() {
-        Some(pm) => pm.remove(&id).await,
-        None => Err("ProxyManager not initialized".to_string()),
-    }
+    let responder = state
+        .pending_offers
+        .write()
+        .await
+        .remove(&token)
+        .ok_or_else(|| format!("No pending offer with token: {token}"))?;
+
+    responder.accept(&save_path);
+    Ok(())
 }
 
+/// Reject an incoming file offer by its token.
+///
+/// The offer must have been received via the `truffle://file-offer` event.
 #[command]
-pub async fn proxy_list(
+pub async fn reject_offer(
     state: State<'_, TruffleState>,
-) -> Result<Vec<ProxyInfoOutput>, String> {
-    let proxy_manager = state.proxy_manager.read().await;
-    match proxy_manager.as_ref() {
-        Some(pm) => {
-            let list = pm.list().await;
-            Ok(list.into_iter().map(|p| ProxyInfoOutput {
-                id: p.id,
-                name: p.name,
-                port: p.port,
-                target_port: p.target_port,
-                target_scheme: p.target_scheme,
-                is_active: p.is_active,
-            }).collect())
-        }
-        None => Ok(vec![]),
-    }
+    token: String,
+    reason: String,
+) -> Result<(), String> {
+    let responder = state
+        .pending_offers
+        .write()
+        .await
+        .remove(&token)
+        .ok_or_else(|| format!("No pending offer with token: {token}"))?;
+
+    responder.reject(&reason);
+    Ok(())
 }

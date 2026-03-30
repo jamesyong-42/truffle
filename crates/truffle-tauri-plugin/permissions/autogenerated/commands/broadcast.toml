@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-broadcast"
+description = "Enables the broadcast command without any pre-configured scope."
+commands.allow = ["broadcast"]
+
+[[permission]]
+identifier = "deny-broadcast"
+description = "Denies the broadcast command without any pre-configured scope."
+commands.deny = ["broadcast"]

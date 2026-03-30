@@ -295,6 +295,42 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the accept_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-accept-offer",
+          "markdownDescription": "Enables the accept_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the accept_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-accept-offer",
+          "markdownDescription": "Denies the accept_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the auto_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-auto-accept",
+          "markdownDescription": "Enables the auto_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the auto_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-auto-accept",
+          "markdownDescription": "Denies the auto_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the broadcast command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-broadcast",
+          "markdownDescription": "Enables the broadcast command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the broadcast command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-broadcast",
+          "markdownDescription": "Denies the broadcast command without any pre-configured scope."
+        },
+        {
           "description": "Enables the broadcast_envelope command without any pre-configured scope.",
           "type": "string",
           "const": "allow-broadcast-envelope",
@@ -343,6 +379,30 @@
           "markdownDescription": "Denies the devices command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_local_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-local-info",
+          "markdownDescription": "Enables the get_local_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_local_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-local-info",
+          "markdownDescription": "Denies the get_local_info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_peers command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-peers",
+          "markdownDescription": "Enables the get_peers command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_peers command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-peers",
+          "markdownDescription": "Denies the get_peers command without any pre-configured scope."
+        },
+        {
           "description": "Enables the handle_tailnet_peers command without any pre-configured scope.",
           "type": "string",
           "const": "allow-handle-tailnet-peers",
@@ -353,6 +413,18 @@
           "type": "string",
           "const": "deny-handle-tailnet-peers",
           "markdownDescription": "Denies the handle_tailnet_peers command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the health command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-health",
+          "markdownDescription": "Enables the health command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the health command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-health",
+          "markdownDescription": "Denies the health command without any pre-configured scope."
         },
         {
           "description": "Enables the is_primary command without any pre-configured scope.",
@@ -377,6 +449,18 @@
           "type": "string",
           "const": "deny-is-running",
           "markdownDescription": "Denies the is_running command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ping command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ping",
+          "markdownDescription": "Enables the ping command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ping command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ping",
+          "markdownDescription": "Denies the ping command without any pre-configured scope."
         },
         {
           "description": "Enables the primary_id command without any pre-configured scope.",
@@ -427,6 +511,30 @@
           "markdownDescription": "Denies the proxy_remove command without any pre-configured scope."
         },
         {
+          "description": "Enables the pull_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pull-file",
+          "markdownDescription": "Enables the pull_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pull_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pull-file",
+          "markdownDescription": "Denies the pull_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the reject_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-reject-offer",
+          "markdownDescription": "Enables the reject_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the reject_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-reject-offer",
+          "markdownDescription": "Denies the reject_offer command without any pre-configured scope."
+        },
+        {
           "description": "Enables the role command without any pre-configured scope.",
           "type": "string",
           "const": "allow-role",
@@ -449,6 +557,30 @@
           "type": "string",
           "const": "deny-send-envelope",
           "markdownDescription": "Denies the send_envelope command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the send_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-send-file",
+          "markdownDescription": "Enables the send_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the send_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-send-file",
+          "markdownDescription": "Denies the send_file command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the send_message command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-send-message",
+          "markdownDescription": "Enables the send_message command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the send_message command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-send-message",
+          "markdownDescription": "Denies the send_message command without any pre-configured scope."
         },
         {
           "description": "Enables the set_local_online command without any pre-configured scope.",

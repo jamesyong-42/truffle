@@ -6,4 +6,5 @@ members = [
     "crates/truffle-sidecar",
     "crates/truffle",
     "crates/truffle-napi",
+    "crates/truffle-tauri-plugin",
 ]

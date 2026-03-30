@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-pull-file"
+description = "Enables the pull_file command without any pre-configured scope."
+commands.allow = ["pull_file"]
+
+[[permission]]
+identifier = "deny-pull-file"
+description = "Denies the pull_file command without any pre-configured scope."
+commands.deny = ["pull_file"]
