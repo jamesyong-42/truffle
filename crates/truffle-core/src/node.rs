@@ -249,13 +249,32 @@ impl<N: NetworkProvider + 'static> Node<N> {
                                 timestamp: envelope.timestamp,
                             };
 
+                            tracing::debug!(
+                                from = %namespaced.from,
+                                namespace = %namespaced.namespace,
+                                msg_type = %namespaced.msg_type,
+                                "envelope router: dispatching message"
+                            );
+
                             // Send to global channel (best-effort).
                             let _ = incoming_tx.send(namespaced.clone());
 
                             // Route to namespace-specific subscriber if present.
                             let filters = namespace_filters.read().await;
+                            let has_subscriber = filters.contains_key(&namespaced.namespace);
                             if let Some(tx) = filters.get(&namespaced.namespace) {
-                                let _ = tx.send(namespaced);
+                                let send_result = tx.send(namespaced);
+                                tracing::debug!(
+                                    namespace = %envelope.namespace,
+                                    subscriber_count = tx.receiver_count(),
+                                    sent = send_result.is_ok(),
+                                    "envelope router: sent to namespace subscriber"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    namespace = %envelope.namespace,
+                                    "envelope router: no subscriber for namespace"
+                                );
                             }
                         } else {
                             tracing::warn!(

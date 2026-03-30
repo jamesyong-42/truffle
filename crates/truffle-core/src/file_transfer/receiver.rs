@@ -371,12 +371,25 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
     }
 
     // Move temp file to final path. Use rename first (fast, atomic on same
-    // filesystem), fall back to copy+delete for cross-device moves (e.g.,
-    // tmpfs /tmp → ext4 /home).
-    if let Err(_rename_err) = tokio::fs::rename(&temp_path, &final_path).await {
+    // filesystem), fall back to copy+delete for cross-device moves.
+    info!(
+        temp = temp_path.as_str(),
+        final_path = final_path.as_str(),
+        "Moving temp file to final destination"
+    );
+    if let Err(rename_err) = tokio::fs::rename(&temp_path, &final_path).await {
+        info!(
+            err = %rename_err,
+            "Rename failed, trying copy+delete fallback"
+        );
         tokio::fs::copy(&temp_path, &final_path).await?;
         tokio::fs::remove_file(&temp_path).await.ok();
     }
+    info!(
+        final_path = final_path.as_str(),
+        exists = std::path::Path::new(&final_path).exists(),
+        "File save completed"
+    );
 
     // Send ACK and flush
     stream.write_all(&[0x01]).await?;
