@@ -1566,12 +1566,42 @@ func bridgeCopy(tsnetConn, localConn net.Conn) {
 	tsnetWriter := &deadlineWriter{conn: tsnetConn, timeout: writeDeadline}
 	localWriter := &deadlineWriter{conn: localConn, timeout: writeDeadline}
 
+	// Use a WaitGroup to wait for both copy directions to complete.
+	// Previously, we closed both connections when either direction hit EOF,
+	// which could drop in-flight data (e.g., a 1-byte ACK in the reverse
+	// direction that hasn't been flushed through the bridge yet).
+	// Now we use half-close: when one direction sees EOF, we shut down
+	// the write half of the destination, signaling "no more data" without
+	// closing the read half. Both goroutines must finish before we close.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// closeWrite shuts down the write half of a connection if supported.
+	closeWrite := func(c net.Conn) {
+		type closeWriter interface{ CloseWrite() error }
+		if cw, ok := c.(closeWriter); ok {
+			cw.CloseWrite()
+		}
+	}
+
+	// remote (tsnet) -> local (Rust)
 	go func() {
+		defer wg.Done()
 		io.Copy(localWriter, tsnetConn)
-		closeAll() // remote EOF -> close both
+		// Remote EOF: shut down local write half so Rust sees EOF
+		closeWrite(localConn)
 	}()
-	io.Copy(tsnetWriter, localConn)
-	// local (Rust) EOF -> close both (handled by defer)
+
+	// local (Rust) -> remote (tsnet)
+	go func() {
+		defer wg.Done()
+		io.Copy(tsnetWriter, localConn)
+		// Local EOF: shut down tsnet write half so remote sees EOF
+		closeWrite(tsnetConn)
+	}()
+
+	wg.Wait()
+	// Both directions complete -> close everything
 }
 
 // deadlineWriter wraps a net.Conn and refreshes the write deadline on each Write.

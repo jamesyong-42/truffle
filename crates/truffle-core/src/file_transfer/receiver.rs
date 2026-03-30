@@ -358,8 +358,15 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
     // Rename temp file to final path
     tokio::fs::rename(&temp_path, save_path).await?;
 
-    // Send ACK
+    // Send ACK and flush
     stream.write_all(&[0x01]).await?;
+    tokio::io::AsyncWriteExt::flush(&mut stream).await?;
+
+    // Wait briefly for the ACK to propagate through the Go bridge.
+    // The bridge uses bidirectional io.Copy — when we drop the stream,
+    // the bridge may close both directions before the ACK byte has been
+    // forwarded to the sender. This small delay ensures the ACK is delivered.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let elapsed = start.elapsed().as_secs_f64();
     info!(
