@@ -1,32 +1,52 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type {
-  NapiBaseDevice as BaseDevice,
-  NapiMeshNode as MeshNode,
-  NapiMeshEvent,
+  NapiNode,
+  NapiPeer,
+  NapiPeerEvent,
+  NapiNodeIdentity,
+  NapiNamespacedMessage,
 } from '@vibecook/truffle';
 
 export interface UseMeshResult {
-  devices: BaseDevice[];
-  localDevice: BaseDevice | null;
-  isConnected: boolean;
-  broadcast: (namespace: string, type: string, payload: unknown) => void;
-  sendTo: (deviceId: string, namespace: string, type: string, payload: unknown) => void;
+  /** All known peers (from Tailscale discovery). */
+  peers: NapiPeer[];
+  /** Local node identity (id, hostname, name, ip). */
+  localInfo: NapiNodeIdentity | null;
+  /** Whether the node has been started. */
+  isStarted: boolean;
+  /** Send a namespaced JSON message to a specific peer. */
+  send: (peerId: string, namespace: string, payload: unknown) => Promise<void>;
+  /** Broadcast a namespaced JSON message to all connected peers. */
+  broadcast: (namespace: string, payload: unknown) => Promise<void>;
 }
 
 /**
- * React hook for Truffle mesh networking (P2P).
+ * React hook for Truffle mesh networking.
  *
- * Subscribes to mesh events via the NAPI callback API and provides messaging helpers.
- * The MeshNode must already be started before using this hook.
+ * Provides reactive peer state and messaging helpers built on the new
+ * Node API (RFC 012). The NapiNode must already be started.
+ *
+ * @example
+ * ```tsx
+ * const { peers, send, broadcast } = useMesh(node);
+ *
+ * await send('peer-id', 'chat', { text: 'hello' });
+ * await broadcast('chat', { text: 'hello everyone' });
+ * ```
  */
-export function useMesh(node: MeshNode | null): UseMeshResult {
-  const [devices, setDevices] = useState<BaseDevice[]>([]);
-  const [localDevice, setLocalDevice] = useState<BaseDevice | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const nodeRef = useRef<MeshNode | null>(null);
+export function useMesh(node: NapiNode | null): UseMeshResult {
+  const [peers, setPeers] = useState<NapiPeer[]>([]);
+  const [localInfo, setLocalInfo] = useState<NapiNodeIdentity | null>(null);
+  const [isStarted, setIsStarted] = useState(false);
+  const nodeRef = useRef<NapiNode | null>(null);
 
   useEffect(() => {
-    if (!node) return;
+    if (!node) {
+      setIsStarted(false);
+      setLocalInfo(null);
+      setPeers([]);
+      return;
+    }
 
     nodeRef.current = node;
     let cancelled = false;
@@ -34,53 +54,65 @@ export function useMesh(node: MeshNode | null): UseMeshResult {
     // Fetch initial state
     const init = async () => {
       try {
-        const [running, local, devs] = await Promise.all([
-          node.isRunning(),
-          node.localDevice(),
-          node.devices(),
-        ]);
-        if (cancelled) return;
-        setIsConnected(running);
-        setLocalDevice(local);
-        setDevices(devs);
+        const info = node.getLocalInfo();
+        if (!cancelled) {
+          setLocalInfo(info);
+          setIsStarted(true);
+        }
+
+        const currentPeers = await node.getPeers();
+        if (!cancelled) setPeers(currentPeers);
       } catch {
-        // Node may not be started yet
+        if (!cancelled) setIsStarted(false);
       }
     };
     init();
 
-    // Subscribe to mesh events via NAPI callback
-    node.onEvent((err: null | Error, event: NapiMeshEvent) => {
-      if (err || cancelled) return;
+    // Subscribe to peer change events
+    node.onPeerChange((event: NapiPeerEvent) => {
+      if (cancelled) return;
 
       switch (event.eventType) {
-        case 'started':
-          setIsConnected(true);
-          node.localDevice().then((d) => {
-            if (!cancelled) setLocalDevice(d);
-          });
-          break;
-
-        case 'stopped':
-          setIsConnected(false);
-          setDevices([]);
-          break;
-
-        case 'peersChanged':
-          if (Array.isArray(event.payload)) {
-            setDevices(event.payload);
-          } else {
-            node.devices().then((d) => {
-              if (!cancelled) setDevices(d);
+        case 'joined':
+          if (event.peer) {
+            setPeers((prev) => {
+              const idx = prev.findIndex((p) => p.id === event.peer!.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = event.peer!;
+                return next;
+              }
+              return [...prev, event.peer!];
             });
           }
           break;
 
-        case 'peerDiscovered':
-        case 'peerOffline':
-          node.devices().then((d) => {
-            if (!cancelled) setDevices(d);
-          });
+        case 'left':
+          setPeers((prev) => prev.filter((p) => p.id !== event.peerId));
+          break;
+
+        case 'updated':
+          if (event.peer) {
+            setPeers((prev) =>
+              prev.map((p) => (p.id === event.peer!.id ? event.peer! : p)),
+            );
+          }
+          break;
+
+        case 'ws_connected':
+          setPeers((prev) =>
+            prev.map((p) =>
+              p.id === event.peerId ? { ...p, wsConnected: true } : p,
+            ),
+          );
+          break;
+
+        case 'ws_disconnected':
+          setPeers((prev) =>
+            prev.map((p) =>
+              p.id === event.peerId ? { ...p, wsConnected: false } : p,
+            ),
+          );
           break;
       }
     });
@@ -91,16 +123,23 @@ export function useMesh(node: MeshNode | null): UseMeshResult {
     };
   }, [node]);
 
-  const broadcast = useCallback((namespace: string, type: string, payload: unknown) => {
-    nodeRef.current?.broadcastEnvelope(namespace, type, payload);
-  }, []);
-
-  const sendTo = useCallback(
-    (deviceId: string, namespace: string, type: string, payload: unknown): void => {
-      nodeRef.current?.sendEnvelope(deviceId, namespace, type, payload);
+  const send = useCallback(
+    async (peerId: string, namespace: string, payload: unknown) => {
+      if (!nodeRef.current) return;
+      const data = Buffer.from(JSON.stringify(payload));
+      await nodeRef.current.send(peerId, namespace, data);
     },
     [],
   );
 
-  return { devices, localDevice, isConnected, broadcast, sendTo };
+  const broadcast = useCallback(
+    async (namespace: string, payload: unknown) => {
+      if (!nodeRef.current) return;
+      const data = Buffer.from(JSON.stringify(payload));
+      await nodeRef.current.broadcast(namespace, data);
+    },
+    [],
+  );
+
+  return { peers, localInfo, isStarted, send, broadcast };
 }

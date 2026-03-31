@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import type { NapiMeshNode as MeshNode } from '@vibecook/truffle';
+import { useState, useEffect } from 'react';
+import type { NapiNode, NapiPeerEvent } from '@vibecook/truffle';
 
 export type AuthStatus = 'unknown' | 'required' | 'authenticated';
 
@@ -17,10 +17,19 @@ export interface UseAuthResult {
 /**
  * React hook for tracking Tailscale auth state.
  *
- * Polls the MeshNode's auth status to stay in sync.
- * Works alongside useMesh — does not consume onEvent.
+ * Listens for `auth_required` peer events from the Node API.
+ * Once peers start arriving, auth is considered complete.
+ *
+ * @example
+ * ```tsx
+ * const { isAuthRequired, authUrl } = useAuth(node);
+ *
+ * if (isAuthRequired && authUrl) {
+ *   return <a href={authUrl}>Authenticate with Tailscale</a>;
+ * }
+ * ```
  */
-export function useAuth(node: MeshNode | null): UseAuthResult {
+export function useAuth(node: NapiNode | null): UseAuthResult {
   const [status, setStatus] = useState<AuthStatus>('unknown');
   const [authUrl, setAuthUrl] = useState<string | null>(null);
 
@@ -28,26 +37,33 @@ export function useAuth(node: MeshNode | null): UseAuthResult {
     if (!node) return;
     let cancelled = false;
 
-    const fetchAuth = async () => {
+    // Check if we're already authenticated by trying to get peers
+    const init = async () => {
       try {
-        const [s, url] = await Promise.all([node.authStatus(), node.authUrl()]);
-        if (cancelled) return;
-        setStatus(s as AuthStatus);
-        setAuthUrl(url);
+        node.getLocalInfo(); // throws if not started
+        if (!cancelled) setStatus('authenticated');
       } catch {
-        // Node may not be started yet
+        // Not started yet — wait for events
       }
     };
+    init();
 
-    fetchAuth();
+    // Listen for auth events via onPeerChange
+    node.onPeerChange((event: NapiPeerEvent) => {
+      if (cancelled) return;
 
-    // Auth state changes rarely (2-3 times per session).
-    // 1-second polling is acceptable and avoids consuming onEvent.
-    const interval = setInterval(fetchAuth, 1000);
+      if (event.eventType === 'auth_required' && event.authUrl) {
+        setStatus('required');
+        setAuthUrl(event.authUrl);
+      } else if (event.eventType === 'joined') {
+        // Peers arriving means auth succeeded
+        setStatus('authenticated');
+        setAuthUrl(null);
+      }
+    });
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
     };
   }, [node]);
 
