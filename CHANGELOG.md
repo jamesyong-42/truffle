@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.16](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.15...truffle-v0.3.16) (2026-03-31)
+
+
+### Bug Fixes
+
+* filter KeyEventKind::Press to prevent double input on Windows ([ebf0be3](https://github.com/jamesyong-42/truffle/commit/ebf0be395d4da0c227a94072053fa9d1adc3575b))
+
 ## [0.3.15](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.14...truffle-v0.3.15) (2026-03-31)
 
 
