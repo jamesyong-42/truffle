@@ -57,4 +57,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run publish-npm.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
+          gh workflow run release-npm.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
