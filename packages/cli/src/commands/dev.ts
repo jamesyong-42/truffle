@@ -1,13 +1,13 @@
 import { defineCommand } from 'citty';
 import { consola } from 'consola';
-import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
-import type { NapiBaseDevice as BaseDevice, NapiMeshEvent } from '@vibecook/truffle';
+import { NapiNode, resolveSidecarPath } from '@vibecook/truffle';
+import type { NapiPeer, NapiPeerEvent } from '@vibecook/truffle';
 
-function formatDevice(device: BaseDevice): string {
-  const status = device.status === 'online' ? 'online' : 'offline';
-  return `  ${device.name} (${device.id}) - ${status}`;
+function formatPeer(peer: NapiPeer): string {
+  const status = peer.online ? 'online' : 'offline';
+  const ws = peer.wsConnected ? ', ws' : '';
+  return `  ${peer.name} (${peer.id}) - ${status}${ws}`;
 }
 
 export const devCommand = defineCommand({
@@ -18,13 +18,8 @@ export const devCommand = defineCommand({
   args: {
     name: {
       type: 'string',
-      description: 'Device name',
+      description: 'Node name',
       default: hostname(),
-    },
-    prefix: {
-      type: 'string',
-      description: 'Hostname prefix for peer discovery',
-      default: 'truffle',
     },
     sidecar: {
       type: 'string',
@@ -39,81 +34,55 @@ export const devCommand = defineCommand({
       type: 'string',
       description: 'Tailscale auth key',
     },
-    type: {
-      type: 'string',
-      description: 'Device type',
-      default: 'desktop',
-    },
   },
   async run({ args }) {
-    const deviceId = randomUUID().slice(0, 8);
+    consola.start(`Starting Truffle dev node: ${args.name}`);
 
-    consola.start(`Starting Truffle dev node: ${args.name} (${deviceId})`);
+    const node = new NapiNode();
 
-    const node = new NapiMeshNode({
-      deviceId,
-      deviceName: args.name,
-      deviceType: args.type,
-      hostnamePrefix: args.prefix,
+    await node.start({
+      name: args.name,
       sidecarPath: args.sidecar ?? resolveSidecarPath(),
       stateDir: args['state-dir'],
       authKey: args['auth-key'],
     });
 
-    // Subscribe to mesh events via NAPI callback
-    node.onEvent((err: null | Error, event: NapiMeshEvent) => {
-      if (err) {
-        consola.error('Mesh error:', err.message);
-        return;
-      }
+    const info = node.getLocalInfo();
+    consola.success(`Node started: ${info.name} (${info.id})`);
+    consola.info('Waiting for peers...');
 
+    // Subscribe to peer change events
+    node.onPeerChange((event: NapiPeerEvent) => {
       switch (event.eventType) {
-        case 'started':
-          consola.success('Mesh node started');
-          consola.info(`Local device: ${args.name} (${deviceId})`);
-          consola.info('Waiting for peers...');
-          break;
-
-        case 'peersChanged':
-          if (Array.isArray(event.payload)) {
-            const devices = event.payload as BaseDevice[];
-            consola.info(`Devices (${devices.length}):`);
-            for (const device of devices) {
-              consola.log(formatDevice(device));
-            }
+        case 'joined':
+          if (event.peer) {
+            consola.success(`Joined: ${formatPeer(event.peer)}`);
           }
           break;
 
-        case 'peerDiscovered':
-          if (event.payload) {
-            const device = event.payload as BaseDevice;
-            consola.success(`Discovered: ${device.name} (${device.id})`);
-          } else if (event.deviceId) {
-            consola.success(`Discovered: ${event.deviceId}`);
+        case 'left':
+          consola.warn(`Left: ${event.peerId}`);
+          break;
+
+        case 'updated':
+          if (event.peer) {
+            consola.info(`Updated: ${formatPeer(event.peer)}`);
           }
           break;
 
-        case 'peerOffline':
-          consola.warn(`Offline: ${event.deviceId ?? 'unknown'}`);
+        case 'ws_connected':
+          consola.info(`WS connected: ${event.peerId}`);
           break;
 
-        case 'peerConnected':
-          consola.info(`Peer connected: ${event.payload?.peer_dns ?? event.deviceId ?? 'unknown'}`);
+        case 'ws_disconnected':
+          consola.warn(`WS disconnected: ${event.peerId}`);
           break;
 
-        case 'peerDisconnected':
-          consola.warn(`Peer disconnected: ${event.deviceId ?? 'unknown'}`);
-          break;
-
-        case 'authRequired':
+        case 'auth_required':
           consola.warn('Authentication required!');
-          if (event.payload?.url) {
-            consola.info(`Open: ${event.payload.url}`);
+          if (event.authUrl) {
+            consola.info(`Open: ${event.authUrl}`);
           }
-          break;
-
-        case 'error':
-          consola.error('Mesh error:', event.payload?.message ?? event.payload);
           break;
       }
     });
@@ -128,12 +97,5 @@ export const devCommand = defineCommand({
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-
-    try {
-      await node.start();
-    } catch (error) {
-      consola.error('Failed to start:', error);
-      process.exit(1);
-    }
   },
 });

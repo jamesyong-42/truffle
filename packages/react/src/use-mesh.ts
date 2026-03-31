@@ -1,10 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type {
-  NapiNode,
-  NapiPeer,
-  NapiPeerEvent,
-  NapiNodeIdentity,
-} from '@vibecook/truffle';
+import type { NapiNode, NapiPeer, NapiPeerEvent, NapiNodeIdentity } from '@vibecook/truffle';
 
 export interface UseMeshResult {
   /** All known peers (from Tailscale discovery). */
@@ -92,25 +87,19 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
 
         case 'updated':
           if (event.peer) {
-            setPeers((prev) =>
-              prev.map((p) => (p.id === event.peer!.id ? event.peer! : p)),
-            );
+            setPeers((prev) => prev.map((p) => (p.id === event.peer!.id ? event.peer! : p)));
           }
           break;
 
         case 'ws_connected':
           setPeers((prev) =>
-            prev.map((p) =>
-              p.id === event.peerId ? { ...p, wsConnected: true } : p,
-            ),
+            prev.map((p) => (p.id === event.peerId ? { ...p, wsConnected: true } : p)),
           );
           break;
 
         case 'ws_disconnected':
           setPeers((prev) =>
-            prev.map((p) =>
-              p.id === event.peerId ? { ...p, wsConnected: false } : p,
-            ),
+            prev.map((p) => (p.id === event.peerId ? { ...p, wsConnected: false } : p)),
           );
           break;
       }
@@ -122,23 +111,17 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
     };
   }, [node]);
 
-  const send = useCallback(
-    async (peerId: string, namespace: string, payload: unknown) => {
-      if (!nodeRef.current) return;
-      const data = Buffer.from(JSON.stringify(payload));
-      await nodeRef.current.send(peerId, namespace, data);
-    },
-    [],
-  );
+  const send = useCallback(async (peerId: string, namespace: string, payload: unknown) => {
+    if (!nodeRef.current) return;
+    const data = Buffer.from(JSON.stringify(payload));
+    await nodeRef.current.send(peerId, namespace, data);
+  }, []);
 
-  const broadcast = useCallback(
-    async (namespace: string, payload: unknown) => {
-      if (!nodeRef.current) return;
-      const data = Buffer.from(JSON.stringify(payload));
-      await nodeRef.current.broadcast(namespace, data);
-    },
-    [],
-  );
+  const broadcast = useCallback(async (namespace: string, payload: unknown) => {
+    if (!nodeRef.current) return;
+    const data = Buffer.from(JSON.stringify(payload));
+    await nodeRef.current.broadcast(namespace, data);
+  }, []);
 
   return { peers, localInfo, isStarted, send, broadcast };
 }

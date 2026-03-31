@@ -52,10 +52,7 @@ export interface UseSyncedStoreResult<T> {
  * }
  * ```
  */
-export function useSyncedStore<T>(
-  node: NapiNode | null,
-  storeId: string,
-): UseSyncedStoreResult<T> {
+export function useSyncedStore<T>(node: NapiNode | null, storeId: string): UseSyncedStoreResult<T> {
   const [localData, setLocalData] = useState<T | null>(null);
   const [allSlices, setAllSlices] = useState<Map<string, Slice<T>>>(new Map());
   const [version, setVersion] = useState(0);

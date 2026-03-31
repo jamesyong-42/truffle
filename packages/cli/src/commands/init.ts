@@ -3,23 +3,14 @@ import { consola } from 'consola';
 import { writeFile, mkdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const TRUFFLE_CONFIG_TEMPLATE = `import type { NapiMeshNodeConfig } from '@vibecook/truffle';
+const TRUFFLE_CONFIG_TEMPLATE = `import type { NapiNodeConfig } from '@vibecook/truffle';
 
-const config: Partial<NapiMeshNodeConfig> = {
-  // Unique device ID (auto-generated at runtime if not set)
-  // deviceId: 'my-device',
+const config: Partial<NapiNodeConfig> = {
+  // Node name (becomes the Tailscale hostname prefix)
+  name: 'my-app',
 
-  // Human-readable device name
-  deviceName: 'my-device',
-
-  // Device type (e.g., 'desktop', 'mobile', 'server')
-  deviceType: 'desktop',
-
-  // Hostname prefix for peer discovery on the tailnet
-  hostnamePrefix: 'myapp',
-
-  // Path to the Truffle sidecar binary
-  sidecarPath: './sidecar',
+  // Path to the Truffle sidecar binary (auto-resolved if omitted)
+  // sidecarPath: './sidecar',
 
   // Directory to store Tailscale state
   stateDir: './.truffle-state',
