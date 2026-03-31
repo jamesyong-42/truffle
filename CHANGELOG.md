@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.15](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.14...truffle-v0.3.15) (2026-03-31)
+
+
+### Features
+
+* add SyncedStore and request/reply primitives (RFC 016) ([88f5ea4](https://github.com/jamesyong-42/truffle/commit/88f5ea4b83f3f82834e96ea387cfe4e61bd2ea94))
+
 ## [0.3.14](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.13...truffle-v0.3.14) (2026-03-30)
 
 
