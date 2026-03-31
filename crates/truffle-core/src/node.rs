@@ -340,6 +340,26 @@ impl<N: NetworkProvider + 'static> Node<N> {
         crate::synced_store::SyncedStore::new(self.clone(), store_id)
     }
 
+    /// Create a synchronized store with a custom persistence backend.
+    ///
+    /// Same as [`synced_store`](Self::synced_store) but restores persisted
+    /// data on startup and writes through to the backend on every change.
+    pub fn synced_store_with_backend<T>(
+        self: &Arc<Self>,
+        store_id: &str,
+        backend: std::sync::Arc<dyn crate::synced_store::StoreBackend>,
+    ) -> Arc<crate::synced_store::SyncedStore<T>>
+    where
+        T: serde::Serialize
+            + serde::de::DeserializeOwned
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        crate::synced_store::SyncedStore::new_with_backend(self.clone(), store_id, backend)
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     /// Stop the node and all underlying layers.

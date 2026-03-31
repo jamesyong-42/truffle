@@ -73,4 +73,4 @@ pub use file_transfer::{
     FtMessage,
 };
 pub use request_reply::{send_and_wait, RequestError};
-pub use synced_store::{SyncedStore, Slice, StoreEvent, StoreBackend, MemoryBackend, SyncMessage};
+pub use synced_store::{SyncedStore, Slice, StoreEvent, StoreBackend, MemoryBackend, FileBackend, SyncMessage};

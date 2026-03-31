@@ -197,7 +197,7 @@ async fn apply_remote_slice<T>(
     version: u64,
     updated_at: u64,
 ) where
-    T: DeserializeOwned + Clone + Send + Sync + 'static,
+    T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     // Don't apply our own data back.
     if device_id == inner.device_id {
@@ -240,6 +240,11 @@ async fn apply_remote_slice<T>(
     };
 
     remotes.insert(device_id.to_string(), slice);
+
+    // Persist remote slice to backend.
+    if let Ok(serialized) = serde_json::to_vec(&typed_data) {
+        inner.backend.save(&inner.store_id, device_id, &serialized, version);
+    }
 
     let _ = inner.event_tx.send(StoreEvent::PeerUpdated {
         device_id: device_id.to_string(),
@@ -302,6 +307,9 @@ where
 {
     let mut remotes = inner.remotes.write().await;
     if remotes.remove(peer_id).is_some() {
+        // Remove persisted slice for departed peer.
+        inner.backend.remove(&inner.store_id, peer_id);
+
         let _ = inner.event_tx.send(StoreEvent::PeerRemoved {
             device_id: peer_id.to_string(),
         });

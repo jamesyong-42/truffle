@@ -11,6 +11,7 @@ use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::Node;
 
 use crate::file_transfer::NapiFileTransfer;
+use crate::synced_store::NapiSyncedStore;
 use crate::types::{
     NapiHealthInfo, NapiNamespacedMessage, NapiNodeConfig, NapiNodeIdentity, NapiPeer,
     NapiPeerEvent, NapiPingResult,
@@ -279,6 +280,16 @@ impl NapiNode {
     pub fn file_transfer(&self) -> Result<NapiFileTransfer> {
         let node = self.require_node()?;
         Ok(NapiFileTransfer::new(node))
+    }
+
+    /// Get a `NapiSyncedStore` handle for synchronized state operations.
+    ///
+    /// Each call creates a new store instance with the given `store_id`.
+    /// Multiple stores can coexist with different IDs.
+    #[napi]
+    pub fn synced_store(&self, store_id: String) -> Result<NapiSyncedStore> {
+        let node = self.require_node()?;
+        Ok(NapiSyncedStore::new(node, &store_id))
     }
 
     // -- Internal helpers ----------------------------------------------------

@@ -25,7 +25,7 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-pub use backend::{MemoryBackend, StoreBackend};
+pub use backend::{FileBackend, MemoryBackend, StoreBackend};
 pub use types::{Slice, StoreEvent, SyncMessage};
 
 use std::collections::HashMap;
@@ -60,6 +60,8 @@ pub(crate) struct StoreInner<T> {
     pub(crate) version: AtomicU64,
     /// Event broadcast channel.
     pub(crate) event_tx: broadcast::Sender<StoreEvent<T>>,
+    /// Persistence backend.
+    pub(crate) backend: Arc<dyn StoreBackend>,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +86,9 @@ pub struct SyncedStore<T> {
 impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStore<T> {
     /// Create a new SyncedStore and start the background sync task.
     ///
+    /// Uses the default [`MemoryBackend`] (no persistence). For durable
+    /// storage across restarts, use [`new_with_backend`](Self::new_with_backend).
+    ///
     /// The store syncs on namespace `"ss:{store_id}"`. The caller must hold
     /// an `Arc<Node<N>>` because the background task needs to outlive this
     /// constructor call.
@@ -91,17 +96,66 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         node: Arc<Node<N>>,
         store_id: &str,
     ) -> Arc<Self> {
+        Self::new_with_backend(node, store_id, Arc::new(MemoryBackend))
+    }
+
+    /// Create a new SyncedStore with a custom persistence backend.
+    ///
+    /// On startup, attempts to load the local device's persisted slice. If
+    /// found, the in-memory state and version counter are restored so the
+    /// store picks up where it left off.
+    pub fn new_with_backend<N: NetworkProvider + 'static>(
+        node: Arc<Node<N>>,
+        store_id: &str,
+        backend: Arc<dyn StoreBackend>,
+    ) -> Arc<Self> {
         let device_id = node.local_info().id;
         let (event_tx, _) = broadcast::channel(256);
         let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
 
+        // Attempt to restore persisted local slice.
+        let (local, initial_version) =
+            match backend.load(store_id, &device_id) {
+                Some((data, version)) => {
+                    match serde_json::from_slice::<T>(&data) {
+                        Ok(typed) => {
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let slice = Slice {
+                                device_id: device_id.clone(),
+                                data: typed,
+                                version,
+                                updated_at: now,
+                            };
+                            tracing::info!(
+                                store = store_id,
+                                version = version,
+                                "synced_store: restored local slice from backend"
+                            );
+                            (Some(slice), version)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                store = store_id,
+                                "synced_store: failed to deserialize persisted data, starting fresh: {e}"
+                            );
+                            (None, 0)
+                        }
+                    }
+                }
+                None => (None, 0),
+            };
+
         let inner = Arc::new(StoreInner {
             store_id: store_id.to_string(),
             device_id,
-            local: RwLock::new(None),
+            local: RwLock::new(local),
             remotes: RwLock::new(HashMap::new()),
-            version: AtomicU64::new(0),
+            version: AtomicU64::new(initial_version),
             event_tx,
+            backend,
         });
 
         let task_handle = sync::spawn_sync_task(node, inner.clone(), broadcast_rx);
@@ -133,6 +187,16 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         {
             let mut local = self.inner.local.write().await;
             *local = Some(slice);
+        }
+
+        // Persist to backend.
+        if let Ok(serialized) = serde_json::to_vec(&data) {
+            self.inner.backend.save(
+                &self.inner.store_id,
+                &self.inner.device_id,
+                &serialized,
+                version,
+            );
         }
 
         // Request the sync task to broadcast.

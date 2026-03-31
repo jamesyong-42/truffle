@@ -8,7 +8,7 @@ use crate::envelope::codec::JsonCodec;
 use crate::envelope::EnvelopeCodec;
 use crate::network::*;
 use crate::session::PeerRegistry;
-use crate::synced_store::{Slice, StoreEvent, SyncedStore};
+use crate::synced_store::{FileBackend, Slice, StoreBackend, StoreEvent, SyncedStore};
 use crate::transport::websocket::WebSocketTransport;
 use crate::transport::WsConfig;
 
@@ -457,4 +457,149 @@ async fn test_stop_cancels_task() {
 
     // Calling stop again should be a no-op.
     store.stop().await;
+}
+
+// ── FileBackend tests ──────────────────────────────────────────────
+
+#[test]
+fn test_file_backend_save_load_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+
+    let data = serde_json::to_vec(&TestState {
+        value: 42,
+        label: "hello".into(),
+    })
+    .unwrap();
+
+    // Save and load back.
+    backend.save("my-store", "device-a", &data, 5);
+    let (loaded_data, loaded_version) = backend.load("my-store", "device-a").unwrap();
+
+    assert_eq!(loaded_version, 5);
+    let loaded: TestState = serde_json::from_slice(&loaded_data).unwrap();
+    assert_eq!(loaded.value, 42);
+    assert_eq!(loaded.label, "hello");
+
+    // Overwrite with a newer version.
+    let data2 = serde_json::to_vec(&TestState {
+        value: 99,
+        label: "updated".into(),
+    })
+    .unwrap();
+    backend.save("my-store", "device-a", &data2, 10);
+    let (loaded_data2, loaded_version2) = backend.load("my-store", "device-a").unwrap();
+
+    assert_eq!(loaded_version2, 10);
+    let loaded2: TestState = serde_json::from_slice(&loaded_data2).unwrap();
+    assert_eq!(loaded2.value, 99);
+
+    // Non-existent device returns None.
+    assert!(backend.load("my-store", "device-z").is_none());
+    assert!(backend.load("no-store", "device-a").is_none());
+}
+
+#[test]
+fn test_file_backend_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+
+    let data = serde_json::to_vec(&TestState {
+        value: 1,
+        label: "tmp".into(),
+    })
+    .unwrap();
+
+    backend.save("store", "device-x", &data, 1);
+    assert!(backend.load("store", "device-x").is_some());
+
+    backend.remove("store", "device-x");
+    assert!(backend.load("store", "device-x").is_none());
+
+    // Removing a non-existent file should not panic.
+    backend.remove("store", "device-x");
+    backend.remove("no-store", "no-device");
+}
+
+#[test]
+fn test_file_backend_path_traversal_sanitization() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+
+    let data = serde_json::to_vec(&TestState {
+        value: 1,
+        label: "safe".into(),
+    })
+    .unwrap();
+
+    // Malicious store/device IDs should be sanitized, not escape base_dir.
+    backend.save("../etc", "../../passwd", &data, 1);
+
+    // Round-trip should succeed (same sanitization applied on load).
+    let result = backend.load("../etc", "../../passwd");
+    assert!(result.is_some(), "round-trip through sanitized path should work");
+
+    let (loaded, ver) = result.unwrap();
+    assert_eq!(ver, 1);
+    let loaded: TestState = serde_json::from_slice(&loaded).unwrap();
+    assert_eq!(loaded.value, 1);
+
+    // Verify no file was created outside base_dir.
+    assert!(
+        !dir.path().join("..").join("etc").exists(),
+        "path traversal should be prevented"
+    );
+}
+
+#[tokio::test]
+async fn test_persistence_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_port = random_port().await;
+
+    let state = TestState {
+        value: 77,
+        label: "persisted".into(),
+    };
+
+    // First "session": create store, set data, then drop.
+    {
+        let (node, _event_tx) = make_test_node("device-a", ws_port).await;
+        let backend = Arc::new(FileBackend::new(dir.path()));
+        let store: Arc<SyncedStore<TestState>> =
+            SyncedStore::new_with_backend(node, "persist-test", backend);
+
+        store.set(state.clone()).await;
+        assert_eq!(store.version(), 1);
+        assert_eq!(store.local().await.unwrap(), state);
+
+        store.stop().await;
+    }
+
+    // Second "session": create a new store with the same backend dir.
+    {
+        let ws_port2 = random_port().await;
+        let (node, _event_tx) = make_test_node("device-a", ws_port2).await;
+        let backend = Arc::new(FileBackend::new(dir.path()));
+        let store: Arc<SyncedStore<TestState>> =
+            SyncedStore::new_with_backend(node, "persist-test", backend);
+
+        // Data should be restored from disk.
+        let restored = store.local().await;
+        assert!(restored.is_some(), "local data should be restored from disk");
+        assert_eq!(restored.unwrap(), state);
+
+        // Version should be restored.
+        assert_eq!(store.version(), 1);
+
+        // Setting new data should continue from version 1.
+        store
+            .set(TestState {
+                value: 88,
+                label: "v2".into(),
+            })
+            .await;
+        assert_eq!(store.version(), 2);
+
+        store.stop().await;
+    }
 }

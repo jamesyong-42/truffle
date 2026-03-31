@@ -190,6 +190,40 @@ pub struct NapiTransferProgress {
     pub speed_bps: f64,
 }
 
+// ---------------------------------------------------------------------------
+// Synced store types
+// ---------------------------------------------------------------------------
+
+/// A versioned slice of data owned by a single device.
+#[napi(object)]
+pub struct NapiSlice {
+    /// Device that owns this slice (stable node ID).
+    pub device_id: String,
+    /// The data (JSON value).
+    pub data: serde_json::Value,
+    /// Monotonically increasing version (per-device).
+    pub version: f64,
+    /// When this version was created (Unix milliseconds).
+    pub updated_at: f64,
+}
+
+/// A store change event delivered to JS.
+#[napi(object)]
+pub struct NapiStoreEvent {
+    /// Event type: "local_changed", "peer_updated", "peer_removed".
+    pub event_type: String,
+    /// Device ID (present for peer_updated/peer_removed events).
+    pub device_id: Option<String>,
+    /// Data payload (present for local_changed/peer_updated events).
+    pub data: Option<serde_json::Value>,
+    /// Version number (present for peer_updated events).
+    pub version: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// File transfer types
+// ---------------------------------------------------------------------------
+
 /// Events emitted by the file transfer subsystem.
 #[napi(object)]
 pub struct NapiFileTransferEvent {

@@ -9,3 +9,4 @@
 pub mod types;
 pub mod node;
 pub mod file_transfer;
+pub mod synced_store;
