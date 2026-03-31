@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.17](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.16...truffle-v0.3.17) (2026-03-31)
+
+
+### Features
+
+* complete RFC 016 — FileBackend persistence + NAPI SyncedStore bindings ([56cabc7](https://github.com/jamesyong-42/truffle/commit/56cabc7b65c275979f3c1cf33c2f252ae4a9ab60))
+* rewrite React hooks for new Node API (RFC 015 Phase 4) ([b35a3b0](https://github.com/jamesyong-42/truffle/commit/b35a3b043e72ebf3be549e96aea12035882a5883))
+
+
+### Bug Fixes
+
+* add @vibecook/truffle-react to npm publish pipeline ([c799293](https://github.com/jamesyong-42/truffle/commit/c799293fc3f13e83a5dcd05588cb757189f73c52))
+* add actions:write permission to release-please workflow ([c21f1de](https://github.com/jamesyong-42/truffle/commit/c21f1def23899d2059f12b7f4e854bb98a562249))
+* add crates.io publish to release-please dispatch steps ([f9724bb](https://github.com/jamesyong-42/truffle/commit/f9724bbdc15fa9f20f990fb7b63b618ba20f6ea1))
+* add truffle-napi to pnpm workspace and update lockfile ([fbd68b8](https://github.com/jamesyong-42/truffle/commit/fbd68b8570d8e56b5806df52819bffa56ded6338))
+* enable Node.js publishing pipeline ([eb249c6](https://github.com/jamesyong-42/truffle/commit/eb249c611fd82b59866aec033ed006f5b42ec0b9))
+* smart runtime sidecar resolution instead of build-time path only ([749c8db](https://github.com/jamesyong-42/truffle/commit/749c8db091cbc691edaf32a3c634925a3c2968d4))
+* update remaining TS packages for new NAPI API ([7a6b510](https://github.com/jamesyong-42/truffle/commit/7a6b510ee979b048e1e7df7148fc84bc19cd3da2))
+* update TS exports and helpers for new NAPI API ([2fa5509](https://github.com/jamesyong-42/truffle/commit/2fa550979e1ee464782bd68dc2e8ca1b636cca28))
+
 ## [0.3.16](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.15...truffle-v0.3.16) (2026-03-31)
 
 
