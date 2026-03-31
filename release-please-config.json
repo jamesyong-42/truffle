@@ -16,6 +16,14 @@
           "path": "crates/truffle-core/Cargo.toml"
         },
         {
+          "type": "generic",
+          "path": "crates/truffle-sidecar/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/truffle/Cargo.toml"
+        },
+        {
           "type": "json",
           "path": "npm/truffle-sidecar-darwin-arm64/package.json",
           "jsonpath": "$.version"
