@@ -49,7 +49,15 @@ jobs:
           done
           echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway (pnpm may resolve workspace:* differently)."
 
-      - name: Publish
+      - name: Publish @vibecook/truffle
         run: |
           cd packages/core
+          npm publish --provenance --access public --registry https://registry.npmjs.org
+
+      - name: Wait for @vibecook/truffle to be indexed
+        run: sleep 30
+
+      - name: Publish @vibecook/truffle-react
+        run: |
+          cd packages/react
           npm publish --provenance --access public --registry https://registry.npmjs.org
