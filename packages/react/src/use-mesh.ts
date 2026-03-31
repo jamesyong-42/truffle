@@ -4,7 +4,6 @@ import type {
   NapiPeer,
   NapiPeerEvent,
   NapiNodeIdentity,
-  NapiNamespacedMessage,
 } from '@vibecook/truffle';
 
 export interface UseMeshResult {

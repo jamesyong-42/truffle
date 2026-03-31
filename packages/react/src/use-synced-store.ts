@@ -164,7 +164,7 @@ export function useSyncedStore<T>(
       cancelled = true;
       nodeRef.current = null;
     };
-  }, [node, storeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [node, storeId]);
 
   const set = useCallback(
     (data: T) => {

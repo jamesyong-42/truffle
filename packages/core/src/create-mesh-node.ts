@@ -1,32 +1,20 @@
 import { execSync } from 'node:child_process';
-import {
-  NapiMeshNode,
-  type NapiMeshNodeConfig,
-  type NapiMeshEvent,
-} from '@vibecook/truffle-native';
+import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
 import { resolveSidecarPath } from './sidecar.js';
 
 export interface CreateMeshNodeOptions {
-  /** Unique device identifier. */
-  deviceId: string;
-  /** User-visible device name. */
-  deviceName: string;
-  /** Device type (e.g., "desktop", "mobile", "server"). */
-  deviceType: string;
-  /** Hostname prefix for Tailscale (default: "truffle"). */
-  hostnamePrefix?: string;
+  /** Node name (becomes the Tailscale hostname prefix). */
+  name: string;
   /** Override sidecar path. If omitted, auto-resolved. */
   sidecarPath?: string;
   /** State directory for Tailscale. */
   stateDir?: string;
   /** Tailscale auth key (for headless/CI setups). */
   authKey?: string;
-  /** Whether this device prefers to be primary. */
-  preferPrimary?: boolean;
-  /** Device capabilities. */
-  capabilities?: string[];
-  /** Timing configuration. */
-  timing?: NapiMeshNodeConfig['timing'];
+  /** Whether this node is ephemeral (removed from tailnet on stop). */
+  ephemeral?: boolean;
+  /** WebSocket listener port (0 = auto). */
+  wsPort?: number;
   /**
    * Auto-open the Tailscale auth URL in the default browser.
    * Defaults to true. Set to false to handle auth manually.
@@ -39,10 +27,8 @@ export interface CreateMeshNodeOptions {
   openUrl?: (url: string) => void;
   /** Called when Tailscale auth is required. Receives the auth URL. */
   onAuthRequired?: (url: string) => void;
-  /** Called when Tailscale auth completes. */
-  onAuthComplete?: () => void;
-  /** Called for all mesh events (devices, election, messages, etc.). */
-  onEvent?: (event: NapiMeshEvent) => void;
+  /** Called for peer change events (join, leave, update, ws_connected, etc.). */
+  onPeerChange?: (event: NapiPeerEvent) => void;
 }
 
 /**
@@ -63,63 +49,63 @@ function defaultOpenUrl(url: string): void {
 }
 
 /**
- * Create a MeshNode with sensible defaults.
+ * Create and start a Truffle node with sensible defaults.
  *
  * - Auto-resolves the sidecar binary path
  * - Auto-opens the Tailscale auth URL in the browser (configurable)
- * - Provides auth lifecycle callbacks
+ * - Provides auth and peer lifecycle callbacks
  *
  * @example
  * ```ts
- * const node = createMeshNode({
- *   deviceId: 'my-app',
- *   deviceName: 'My App',
- *   deviceType: 'desktop',
- *   onAuthRequired: (url) => console.log('Auth URL:', url),
- *   onEvent: (event) => console.log('Event:', event),
+ * const node = await createMeshNode({
+ *   name: 'my-app',
+ *   onPeerChange: (event) => console.log('Peer event:', event),
  * });
- * await node.start();
+ *
+ * const peers = await node.getPeers();
+ * await node.send('peer-id', 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
  * ```
  */
-export function createMeshNode(options: CreateMeshNodeOptions): NapiMeshNode {
+export async function createMeshNode(options: CreateMeshNodeOptions): Promise<NapiNode> {
   const {
+    name,
     autoAuth = true,
     openUrl: customOpenUrl,
     onAuthRequired,
-    onAuthComplete,
-    onEvent,
-    hostnamePrefix = 'truffle',
+    onPeerChange,
     sidecarPath,
-    ...rest
+    stateDir,
+    authKey,
+    ephemeral,
+    wsPort,
   } = options;
 
   const resolvedSidecarPath = sidecarPath ?? resolveSidecarPath();
 
-  const node = new NapiMeshNode({
-    ...rest,
-    hostnamePrefix,
+  const node = new NapiNode();
+
+  const config: NapiNodeConfig = {
+    name,
     sidecarPath: resolvedSidecarPath,
-  });
+    stateDir,
+    authKey,
+    ephemeral,
+    wsPort,
+  };
 
-  node.onEvent((_err: null | Error, event: NapiMeshEvent) => {
-    if (_err) return;
+  await node.start(config);
 
-    if (event.eventType === 'authRequired' && event.payload) {
-      const url = typeof event.payload === 'string' ? event.payload : String(event.payload);
-
+  // Subscribe to peer events for auth handling and user callback
+  node.onPeerChange((event: NapiPeerEvent) => {
+    if (event.eventType === 'auth_required' && event.authUrl) {
       if (autoAuth) {
         const opener = customOpenUrl ?? defaultOpenUrl;
-        opener(url);
+        opener(event.authUrl);
       }
-
-      onAuthRequired?.(url);
+      onAuthRequired?.(event.authUrl);
     }
 
-    if (event.eventType === 'authComplete') {
-      onAuthComplete?.();
-    }
-
-    onEvent?.(event);
+    onPeerChange?.(event);
   });
 
   return node;
