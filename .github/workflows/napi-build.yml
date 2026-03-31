@@ -158,7 +158,9 @@ jobs:
           path: crates/truffle-napi/artifacts
 
       - name: Move artifacts
-        run: npx napi artifacts --cwd crates/truffle-napi
+        run: |
+          cd crates/truffle-napi
+          npx napi artifacts
 
       - name: Publish
         run: |

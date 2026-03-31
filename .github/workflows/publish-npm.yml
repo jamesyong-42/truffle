@@ -21,6 +21,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Update npm for OIDC trusted publishing
         run: |
           npm install -g npm@latest
@@ -29,12 +32,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build TypeScript
-        run: pnpm --filter @vibecook/truffle run build
+      # Generate fresh index.d.ts and index.js from the Rust NAPI crate.
+      # This ensures TypeScript types match the current Rust code.
+      - name: Build NAPI types
+        run: |
+          cd crates/truffle-napi
+          npx napi build --platform --release
+          echo "Generated types:"
+          head -20 index.d.ts
+
+      - name: Build TypeScript packages
+        run: |
+          pnpm --filter @vibecook/truffle run build
+          pnpm --filter @vibecook/truffle-react run build
 
       # Wait for @vibecook/truffle-native to be available on npm.
       # The NAPI build workflow publishes it, but takes ~10 min.
-      # We retry for up to 15 minutes.
       - name: Wait for @vibecook/truffle-native
         run: |
           VERSION=$(node -p "require('./packages/core/package.json').version")
@@ -47,7 +60,7 @@ jobs:
             echo "Attempt $i/30 — not yet available, waiting 30s..."
             sleep 30
           done
-          echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway (pnpm may resolve workspace:* differently)."
+          echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway."
 
       - name: Publish @vibecook/truffle
         run: |
