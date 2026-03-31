@@ -1,0 +1,41 @@
+{
+  "name": "@vibecook/truffle-native-darwin-x64",
+  "version": "0.3.17",
+  "cpu": [
+    "x64"
+  ],
+  "main": "truffle.darwin-x64.node",
+  "files": [
+    "truffle.darwin-x64.node"
+  ],
+  "description": "Mesh networking for local-first apps, built on Tailscale (native addon)",
+  "keywords": [
+    "mesh",
+    "networking",
+    "tailscale",
+    "local-first",
+    "p2p",
+    "napi",
+    "rust"
+  ],
+  "author": "James Yong",
+  "homepage": "https://github.com/jamesyong-42/truffle#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamesyong-42/truffle.git",
+    "directory": "crates/truffle-napi"
+  },
+  "bugs": {
+    "url": "https://github.com/jamesyong-42/truffle/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ]
+}

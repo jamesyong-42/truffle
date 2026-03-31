@@ -1,0 +1,44 @@
+{
+  "name": "@vibecook/truffle-native-linux-arm64-gnu",
+  "version": "0.3.17",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "truffle.linux-arm64-gnu.node",
+  "files": [
+    "truffle.linux-arm64-gnu.node"
+  ],
+  "description": "Mesh networking for local-first apps, built on Tailscale (native addon)",
+  "keywords": [
+    "mesh",
+    "networking",
+    "tailscale",
+    "local-first",
+    "p2p",
+    "napi",
+    "rust"
+  ],
+  "author": "James Yong",
+  "homepage": "https://github.com/jamesyong-42/truffle#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jamesyong-42/truffle.git",
+    "directory": "crates/truffle-napi"
+  },
+  "bugs": {
+    "url": "https://github.com/jamesyong-42/truffle/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}
