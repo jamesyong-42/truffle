@@ -1,0 +1,55 @@
+name: Publish @vibecook/truffle to npm
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish @vibecook/truffle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Update npm for OIDC trusted publishing
+        run: |
+          npm install -g npm@latest
+          echo "npm version: $(npm --version)"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript
+        run: pnpm --filter @vibecook/truffle run build
+
+      # Wait for @vibecook/truffle-native to be available on npm.
+      # The NAPI build workflow publishes it, but takes ~10 min.
+      # We retry for up to 15 minutes.
+      - name: Wait for @vibecook/truffle-native
+        run: |
+          VERSION=$(node -p "require('./packages/core/package.json').version")
+          echo "Waiting for @vibecook/truffle-native@${VERSION} on npm..."
+          for i in $(seq 1 30); do
+            if npm view "@vibecook/truffle-native@${VERSION}" version 2>/dev/null; then
+              echo "Found @vibecook/truffle-native@${VERSION}"
+              exit 0
+            fi
+            echo "Attempt $i/30 — not yet available, waiting 30s..."
+            sleep 30
+          done
+          echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway (pnpm may resolve workspace:* differently)."
+
+      - name: Publish
+        run: |
+          cd packages/core
+          npm publish --provenance --access public --registry https://registry.npmjs.org

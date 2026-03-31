@@ -25,6 +25,16 @@
         },
         {
           "type": "json",
+          "path": "crates/truffle-napi/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/core/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "npm/truffle-sidecar-darwin-arm64/package.json",
           "jsonpath": "$.version"
         },
