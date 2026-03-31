@@ -204,9 +204,9 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
                 token: token.to_string(),
                 reason: reason.clone(),
             };
-            let reject_bytes = serde_json::to_vec(&reject)
+            let reject_payload = serde_json::to_value(&reject)
                 .map_err(|e| TransferError::Protocol(format!("Serialize error: {e}")))?;
-            node.send(from, "ft", &reject_bytes)
+            node.send_typed(from, "ft", "reject", &reject_payload)
                 .await
                 .map_err(|e| TransferError::Node(format!("Failed to send REJECT: {e}")))?;
 
@@ -252,9 +252,9 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         token: token.to_string(),
         tcp_port: listener.port,
     };
-    let accept_bytes = serde_json::to_vec(&accept)
+    let accept_payload = serde_json::to_value(&accept)
         .map_err(|e| TransferError::Protocol(format!("Serialize error: {e}")))?;
-    node.send(from, "ft", &accept_bytes)
+    node.send_typed(from, "ft", "accept", &accept_payload)
         .await
         .map_err(|e| TransferError::Node(format!("Failed to send ACCEPT: {e}")))?;
 
@@ -452,7 +452,7 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
 
     let offer_token = uuid::Uuid::new_v4().to_string();
 
-    // Send OFFER back
+    // Send OFFER and wait for ACCEPT
     let offer = FtMessage::Offer {
         file_name: file_name.clone(),
         size,
@@ -461,45 +461,47 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
         token: offer_token.clone(),
         tcp_port: 0,
     };
-    let offer_bytes = serde_json::to_vec(&offer)
+    let offer_payload = serde_json::to_value(&offer)
         .map_err(|e| TransferError::Protocol(format!("Serialize error: {e}")))?;
-    node.send(from, "ft", &offer_bytes)
-        .await
-        .map_err(|e| TransferError::Node(format!("Failed to send OFFER: {e}")))?;
 
-    // Wait for ACCEPT
-    let mut rx = node.subscribe("ft");
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-
-    let _accept_port = loop {
-        let msg = tokio::time::timeout(
-            deadline.duration_since(tokio::time::Instant::now()),
-            rx.recv(),
-        )
-        .await
-        .map_err(|_| TransferError::Timeout)?
-        .map_err(|e| TransferError::Protocol(format!("Channel error: {e}")))?;
-
-        if msg.from != from {
-            continue;
-        }
-
-        let ft_msg: FtMessage = serde_json::from_value(msg.payload)
-            .map_err(|e| TransferError::Protocol(format!("Bad message: {e}")))?;
-
-        match ft_msg {
-            FtMessage::Accept {
-                token: at,
-                tcp_port,
-            } if at == offer_token => {
-                break tcp_port;
+    let _accept_port = crate::request_reply::send_and_wait(
+        node,
+        from,
+        "ft",
+        "offer",
+        &offer_payload,
+        std::time::Duration::from_secs(30),
+        |msg| {
+            if msg.from != from {
+                return None;
             }
-            FtMessage::Reject { reason, .. } => {
-                return Err(TransferError::Rejected(format!("Peer rejected: {reason}")));
+            let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone()).ok()?;
+            match ft_msg {
+                FtMessage::Accept {
+                    token: ref t,
+                    tcp_port,
+                } if *t == offer_token => Some(Ok(tcp_port)),
+                FtMessage::Reject {
+                    token: ref t,
+                    reason,
+                } if *t == offer_token => {
+                    Some(Err(TransferError::Rejected(format!("Peer rejected: {reason}"))))
+                }
+                _ => None,
             }
-            _ => continue,
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        crate::request_reply::RequestError::Timeout => TransferError::Timeout,
+        crate::request_reply::RequestError::Send(e) => {
+            TransferError::Node(format!("Failed to send OFFER: {e}"))
         }
-    };
+        crate::request_reply::RequestError::ChannelClosed => {
+            TransferError::Protocol("Channel closed".into())
+        }
+    })?
+    .map_err(|e| e)?;
 
     // Open TCP to peer and stream the file
     let mut stream = node

@@ -302,59 +302,58 @@ async fn pull_file<N: NetworkProvider + 'static>(
         .map_err(|e| TransferError::Node(e.to_string()))?;
     let peer_id = peer_id.as_str();
 
-    // 1. Send PULL_REQUEST
+    // 1. Send PULL_REQUEST and wait for OFFER from peer
     let pull_req = FtMessage::PullRequest {
         path: remote_path.to_string(),
         requester_id,
         token: token.clone(),
     };
 
-    let pull_bytes = serde_json::to_vec(&pull_req)
+    let pull_payload = serde_json::to_value(&pull_req)
         .map_err(|e| TransferError::Protocol(format!("Failed to serialize pull request: {e}")))?;
 
-    node.send(peer_id, "ft", &pull_bytes)
-        .await
-        .map_err(|e| TransferError::Node(e.to_string()))?;
+    tracing::info!(peer = peer_id, path = remote_path, "Sending PULL_REQUEST");
 
-    tracing::info!(peer = peer_id, path = remote_path, "Sent PULL_REQUEST");
-
-    // 2. Wait for OFFER from peer
-    let mut rx = node.subscribe("ft");
-    let offer_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-
-    let (offer_sha256, offer_size, offer_token, file_name) = loop {
-        let msg = tokio::time::timeout(
-            offer_deadline.duration_since(tokio::time::Instant::now()),
-            rx.recv(),
+    let (offer_sha256, offer_size, offer_token, file_name) =
+        crate::request_reply::send_and_wait(
+            node,
+            peer_id,
+            "ft",
+            "pull_request",
+            &pull_payload,
+            std::time::Duration::from_secs(30),
+            |msg| {
+                if msg.from != peer_id {
+                    return None;
+                }
+                let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone()).ok()?;
+                match ft_msg {
+                    FtMessage::Offer {
+                        file_name,
+                        sha256,
+                        size,
+                        token: offer_token,
+                        ..
+                    } => {
+                        tracing::info!(size = size, "Received OFFER from peer");
+                        Some(Ok((sha256, size, offer_token, file_name)))
+                    }
+                    FtMessage::Reject { reason, .. } => {
+                        Some(Err(TransferError::Rejected(reason)))
+                    }
+                    _ => None,
+                }
+            },
         )
         .await
-        .map_err(|_| TransferError::Timeout)?
-        .map_err(|e| TransferError::Protocol(format!("Channel error: {e}")))?;
-
-        if msg.from != peer_id {
-            continue;
-        }
-
-        let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone())
-            .map_err(|e| TransferError::Protocol(format!("Bad FT message: {e}")))?;
-
-        match ft_msg {
-            FtMessage::Offer {
-                file_name,
-                sha256,
-                size,
-                token: offer_token,
-                ..
-            } => {
-                tracing::info!(size = size, sha256 = sha256.as_str(), "Received OFFER from peer");
-                break (sha256, size, offer_token, file_name);
+        .map_err(|e| match e {
+            crate::request_reply::RequestError::Timeout => TransferError::Timeout,
+            crate::request_reply::RequestError::Send(e) => TransferError::Node(e.to_string()),
+            crate::request_reply::RequestError::ChannelClosed => {
+                TransferError::Protocol("Channel closed".into())
             }
-            FtMessage::Reject { reason, .. } => {
-                return Err(TransferError::Rejected(reason));
-            }
-            _ => continue,
-        }
-    };
+        })?
+        .map_err(|e| e)?;
 
     // 3. Start TCP listener, then send ACCEPT with our port
     let mut listener = node
@@ -367,10 +366,10 @@ async fn pull_file<N: NetworkProvider + 'static>(
         tcp_port: listener.port,
     };
 
-    let accept_bytes = serde_json::to_vec(&accept)
+    let accept_payload = serde_json::to_value(&accept)
         .map_err(|e| TransferError::Protocol(format!("Failed to serialize accept: {e}")))?;
 
-    node.send(peer_id, "ft", &accept_bytes)
+    node.send_typed(peer_id, "ft", "accept", &accept_payload)
         .await
         .map_err(|e| TransferError::Node(e.to_string()))?;
 

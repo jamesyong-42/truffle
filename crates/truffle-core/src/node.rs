@@ -317,6 +317,29 @@ impl<N: NetworkProvider + 'static> Node<N> {
         file_transfer::FileTransfer::new(self)
     }
 
+    /// Create a synchronized store for device-owned state.
+    ///
+    /// Returns an `Arc<SyncedStore<T>>` that syncs data across the mesh on
+    /// namespace `"ss:{store_id}"`. The caller owns the returned Arc;
+    /// the background sync task also holds one.
+    ///
+    /// Requires `self` to be wrapped in an `Arc` because the sync task
+    /// needs to outlive this call.
+    pub fn synced_store<T>(
+        self: &Arc<Self>,
+        store_id: &str,
+    ) -> Arc<crate::synced_store::SyncedStore<T>>
+    where
+        T: serde::Serialize
+            + serde::de::DeserializeOwned
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+    {
+        crate::synced_store::SyncedStore::new(self.clone(), store_id)
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────
 
     /// Stop the node and all underlying layers.
@@ -429,6 +452,45 @@ impl<N: NetworkProvider + 'static> Node<N> {
         let encoded = self.codec.encode(&envelope)?;
         self.session.send(peer_id, &encoded).await?;
         Ok(())
+    }
+
+    /// Send a namespaced message with an explicit `msg_type` and JSON payload.
+    ///
+    /// Unlike [`send`](Self::send), this method takes a pre-built
+    /// [`serde_json::Value`] payload and a caller-chosen `msg_type` instead
+    /// of raw bytes with a hardcoded `"message"` type. Used by subsystems
+    /// (file transfer, synced store, request/reply) that define their own
+    /// wire protocol message types.
+    pub async fn send_typed(
+        &self,
+        peer_id: &str,
+        namespace: &str,
+        msg_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), NodeError> {
+        let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
+        let encoded = self.codec.encode(&envelope)?;
+        self.session.send(peer_id, &encoded).await?;
+        Ok(())
+    }
+
+    /// Broadcast a namespaced message with an explicit `msg_type` and JSON
+    /// payload to all connected peers.
+    pub async fn broadcast_typed(
+        &self,
+        namespace: &str,
+        msg_type: &str,
+        payload: &serde_json::Value,
+    ) {
+        let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
+        match self.codec.encode(&envelope) {
+            Ok(encoded) => {
+                self.session.broadcast(&encoded).await;
+            }
+            Err(e) => {
+                tracing::error!("node: failed to encode broadcast envelope: {e}");
+            }
+        }
     }
 
     /// Broadcast a namespaced message to all connected peers.

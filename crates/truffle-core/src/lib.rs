@@ -61,6 +61,8 @@ pub mod session;
 pub mod envelope;
 pub mod node;
 pub mod file_transfer;
+pub mod request_reply;
+pub mod synced_store;
 
 // Re-export the main public types for convenience.
 pub use node::{Node, NodeBuilder, Peer, NamespacedMessage, NodeError};
@@ -70,3 +72,5 @@ pub use file_transfer::{
     TransferResult, TransferError, TransferProgress, TransferDirection,
     FtMessage,
 };
+pub use request_reply::{send_and_wait, RequestError};
+pub use synced_store::{SyncedStore, Slice, StoreEvent, StoreBackend, MemoryBackend, SyncMessage};

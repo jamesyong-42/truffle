@@ -110,7 +110,7 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         total_bytes: file_size,
     });
 
-    // 3. Send OFFER via WS
+    // 3. Send OFFER and wait for ACCEPT/REJECT
     let offer = FtMessage::Offer {
         file_name: file_name.clone(),
         size: file_size,
@@ -120,14 +120,10 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         tcp_port: 0,
     };
 
-    let offer_bytes = serde_json::to_vec(&offer)
+    let offer_payload = serde_json::to_value(&offer)
         .map_err(|e| TransferError::Protocol(format!("Failed to serialize offer: {e}")))?;
 
-    node.send(peer_id, "ft", &offer_bytes)
-        .await
-        .map_err(|e| TransferError::Node(e.to_string()))?;
-
-    info!(peer = peer_id, file = file_name.as_str(), size = file_size, "Sent OFFER");
+    info!(peer = peer_id, file = file_name.as_str(), size = file_size, "Sending OFFER");
 
     // Notify UI that we're waiting for the receiver's decision
     let _ = event_tx.send(FileTransferEvent::WaitingForAccept {
@@ -135,45 +131,42 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         file_name: file_name.clone(),
     });
 
-    // 4. Wait for ACCEPT (extract tcp_port)
-    let mut rx = node.subscribe("ft");
-    let accept_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
-    let accept_port;
-
-    loop {
-        let msg = tokio::time::timeout(
-            accept_deadline.duration_since(tokio::time::Instant::now()),
-            rx.recv(),
-        )
-        .await
-        .map_err(|_| TransferError::Timeout)?
-        .map_err(|e| TransferError::Protocol(format!("Channel error: {e}")))?;
-
-        if msg.from != peer_id {
-            continue;
-        }
-
-        let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone())
-            .map_err(|e| TransferError::Protocol(format!("Bad FT message: {e}")))?;
-
-        match ft_msg {
-            FtMessage::Accept {
-                token: accept_token,
-                tcp_port,
-            } if accept_token == token => {
-                accept_port = tcp_port;
-                info!(tcp_port = tcp_port, "Received ACCEPT from peer");
-                break;
+    let accept_port = crate::request_reply::send_and_wait(
+        node,
+        peer_id,
+        "ft",
+        "offer",
+        &offer_payload,
+        std::time::Duration::from_secs(60),
+        |msg| {
+            if msg.from != peer_id {
+                return None;
             }
-            FtMessage::Reject {
-                token: reject_token,
-                reason,
-            } if reject_token == token => {
-                return Err(TransferError::Rejected(reason));
+            let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone()).ok()?;
+            match ft_msg {
+                FtMessage::Accept {
+                    token: ref t,
+                    tcp_port,
+                } if *t == token => Some(Ok(tcp_port)),
+                FtMessage::Reject {
+                    token: ref t,
+                    reason,
+                } if *t == token => Some(Err(TransferError::Rejected(reason))),
+                _ => None,
             }
-            _ => continue,
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        crate::request_reply::RequestError::Timeout => TransferError::Timeout,
+        crate::request_reply::RequestError::Send(e) => TransferError::Node(e.to_string()),
+        crate::request_reply::RequestError::ChannelClosed => {
+            TransferError::Protocol("Channel closed".into())
         }
-    }
+    })?
+    .map_err(|e| e)?;
+
+    info!(tcp_port = accept_port, "Received ACCEPT from peer");
 
     // 5. Open raw TCP stream to the port advertised in ACCEPT
     info!(accept_port = accept_port, peer = peer_id, "Opening TCP stream to peer");

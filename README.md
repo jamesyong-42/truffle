@@ -9,7 +9,7 @@
 Truffle lets your devices discover each other, exchange messages, and transfer files over Tailscale's encrypted WireGuard tunnels. No central server. Run `truffle` to launch an interactive TUI, or use one-shot commands for scripts and AI agents.
 
 ```
-╭─── truffle v0.3.12 ──────────────────────────────────────────────╮
+╭─── truffle ──────────────────────────────────────────────────╮
 │                                         │ Devices                │
 │  ▀█▀ █▀█ █ █ █▀▀ █▀▀ █   █▀▀          │ ● server (direct)      │
 │   █  █▀▄ █ █ █▀  █▀  █   █▀           │ ● laptop (relay)       │
@@ -18,14 +18,14 @@ Truffle lets your devices discover each other, exchange messages, and transfer f
 │  mesh networking for your devices       │                        │
 │  jamess-mbp · 100.64.0.5               │                        │
 │  ● online · 2 peers · 15m              │                        │
-╰───────────────────────────────────────────────────────────────────╯
+╰───────────────────────────────────────────────────────────────╯
   14:02  ● server joined (direct)
   14:03  You → server: Hello!
   14:03  server → You: Hey there!
   14:05  ⬇ report.pdf from server ████████████████ 100% ✓
-─────────────────────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────────────
 ❯ /send how are things? @server
-─────────────────────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────────────
   truffle · ● online · 2 peers
 ```
 
@@ -88,23 +88,29 @@ All commands support `--json` for structured output with versioned envelopes.
 - **File transfer** — SHA-256 verified, progress bars, interactive accept/reject modal, streaming to disk (constant memory)
 - **Peer discovery** — automatic via Tailscale WatchIPNBus, ~30s offline detection
 - **Smart naming** — auto-generates clean device names from OS hostname (`Jamess-MBP-6.ts.net lan` → `jamess-mbp`)
-- **Agent mode** — `--json` on all 13 commands, structured exit codes, `NO_COLOR`, `truffle watch/wait/recv` for scripting
+- **Agent mode** — `--json` on all commands, structured exit codes, `NO_COLOR`, `truffle watch/wait/recv` for scripting
 - **Cross-platform** — macOS, Linux (musl static), Windows
 - **First-run onboarding** — name picker + Tailscale auth wizard
 
 ## Architecture
 
-Clean 7-layer architecture (RFC 012), with file transfer as a first-class core feature (RFC 014):
+Layered architecture (RFC 012) with file transfer as a first-class core feature (RFC 014):
 
 ```
 Layer 7: Applications   ── CLI commands, TUI, daemon handler
-         Node API       ── 15-method public API + FileTransfer manager
-Layer 6: Envelope       ── namespace-routed message framing
-Layer 5: Session        ── PeerRegistry, lazy connections, event broadcast
-Layer 4: Transport      ── WebSocket, TCP, UDP, QUIC
-Layer 3: Network        ── TailscaleProvider, WatchIPNBus
+         Node API       ── 16-method public API + FileTransfer manager
+Layer 6: Envelope       ── namespace-routed message framing (JSON codec)
+Layer 5: Session        ── PeerRegistry, lazy WS connections, event broadcast
+Layer 4: Transport      ── WebSocket, TCP, UDP, QUIC transports
+Layer 3: Network        ── TailscaleProvider (peer discovery via WatchIPNBus)
          Go Sidecar     ── tsnet integration, WireGuard tunnels
 ```
+
+**Key design principles:**
+- **Layer 3 is the source of truth for peers** — peers exist because Tailscale reports them, not because of transport connections
+- **Lazy connections** — WebSocket connections are established on first `send()`, not eagerly
+- **Layer separation** — each layer has a trait boundary; e.g., `NetworkProvider` can be swapped without touching upper layers
+- **File transfer uses Node primitives** — signaling over WS namespace `"ft"`, data over raw TCP, no special infrastructure
 
 ### File Transfer (RFC 014)
 
@@ -115,6 +121,9 @@ let ft = node.file_transfer();
 
 // Send a file
 ft.send_file("peer-id", "/path/to/file.txt", "/dest/").await?;
+
+// Pull a file from a remote peer
+ft.pull_file("peer-id", "/remote/file.txt", "/local/path.txt").await?;
 
 // Receive with interactive accept/reject
 let mut offers = ft.offer_channel(node.clone()).await;
@@ -133,11 +142,11 @@ let mut events = ft.subscribe();
 
 | Crate / Package | Status | Description |
 |-----------------|--------|-------------|
-| [`truffle-core`](crates/truffle-core) | **Active** | Rust library — Layers 3-6, Node API, file transfer (~14k LOC) |
-| [`truffle-cli`](crates/truffle-cli) | **Active** | CLI + TUI — 13 commands, interactive terminal UI (~5k LOC) |
-| [`sidecar-slim`](packages/sidecar-slim/) | **Active** | Go sidecar — tsnet, WatchIPNBus, TCP bridge (~1.8k LOC) |
-| [`truffle-napi`](crates/truffle-napi) | Pending | NAPI-RS native addon for Node.js |
-| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Pending | Tauri v2 plugin for desktop apps |
+| [`truffle-core`](crates/truffle-core) | **Active** | Rust library — Layers 3-6, Node API, file transfer (~12k LOC) |
+| [`truffle-cli`](crates/truffle-cli) | **Active** | CLI + TUI — 13 one-shot commands, interactive terminal UI (~10k LOC) |
+| [`sidecar-slim`](packages/sidecar-slim/) | **Active** | Go sidecar — tsnet, WatchIPNBus, TCP bridge (~1.9k LOC) |
+| [`truffle-napi`](crates/truffle-napi) | Bindings | NAPI-RS native addon for Node.js (rewritten in RFC 015) |
+| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Bindings | Tauri v2 plugin for desktop apps (rewritten in RFC 015) |
 
 **npm:** `@vibecook/truffle` + platform-specific sidecar packages
 
@@ -145,7 +154,7 @@ let mut events = ft.subscribe();
 
 ```bash
 cargo build --workspace       # build all Rust crates
-cargo test --workspace        # run tests (~190 tests)
+cargo test --workspace        # run tests (~187 tests)
 ```
 
 ### Prerequisites
@@ -158,9 +167,10 @@ cargo test --workspace        # run tests (~190 tests)
 
 | RFC | Status | Description |
 |-----|--------|-------------|
-| [RFC 012](docs/rfcs/012-layered-architecture-redesign.md) | Implemented | Clean 7-layer architecture redesign |
+| [RFC 012](docs/rfcs/012-layered-architecture-redesign.md) | Implemented | Clean layered architecture redesign |
 | [RFC 013](docs/rfcs/013-tui-redesign.md) | Implemented | Dual-mode TUI + agent CLI redesign |
 | [RFC 014](docs/rfcs/014-file-transfer-core.md) | Implemented | File transfer as core feature with accept/reject API |
+| [RFC 015](docs/rfcs/015-binding-rewrite.md) | Implemented | NAPI-RS and Tauri plugin rewrite |
 
 ## Documentation
 
