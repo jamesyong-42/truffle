@@ -3,7 +3,7 @@
 //! All event sources (crossterm, peer events, tick timer) funnel into
 //! a single mpsc channel so the main loop can process them sequentially.
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEvent};
+use crossterm::event::{Event as CtEvent, EventStream, KeyEvent, KeyEventKind};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use truffle_core::file_transfer::types::{FileOffer, FileTransferEvent, OfferResponder};
@@ -70,7 +70,11 @@ pub fn spawn_event_collectors(
             let mut reader = EventStream::new();
             while let Some(Ok(event)) = reader.next().await {
                 let app_event = match event {
-                    CtEvent::Key(key) => Some(AppEvent::Key(key)),
+                    // On Windows, crossterm emits both Press and Release
+                    // events. Only handle Press to avoid double input.
+                    CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                        Some(AppEvent::Key(key))
+                    }
                     CtEvent::Resize(w, h) => Some(AppEvent::Resize(w, h)),
                     _ => None,
                 };

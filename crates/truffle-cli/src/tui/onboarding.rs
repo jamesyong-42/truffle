@@ -6,7 +6,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
@@ -74,6 +74,9 @@ pub async fn run(
 
         if event::poll(Duration::from_millis(100)).map_err(|e| format!("Poll error: {e}"))? {
             if let Event::Key(key) = event::read().map_err(|e| format!("Read error: {e}"))? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         restore_terminal();
@@ -205,6 +208,9 @@ pub async fn run(
         // Handle Ctrl+C during startup
         if event::poll(Duration::from_millis(200)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     restore_terminal();
                     std::process::exit(0);
