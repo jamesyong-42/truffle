@@ -162,7 +162,19 @@ jobs:
           cd crates/truffle-napi
           npx napi artifacts
 
-      - name: Publish
+      # Publish each platform package individually with --provenance.
+      # We skip the main package's prepublishOnly hook (napi prepublish)
+      # because it runs child npm publish calls that don't inherit OIDC context.
+      - name: Publish platform packages
+        run: |
+          for pkg in crates/truffle-napi/npm/*/; do
+            echo "Publishing $(basename $pkg)..."
+            cd "$pkg"
+            npm publish --provenance --access public --registry https://registry.npmjs.org
+            cd -
+          done
+
+      - name: Publish main package
         run: |
           cd crates/truffle-napi
-          npm publish --provenance --access public --registry https://registry.npmjs.org
+          npm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts
