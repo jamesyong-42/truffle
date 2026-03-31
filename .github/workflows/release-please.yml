@@ -37,3 +37,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run release-sidecar.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
+
+      - name: Trigger crates.io publish
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run publish-crates.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
