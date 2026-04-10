@@ -1,0 +1,19 @@
+{
+  "name": "@vibecook/example-playground",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Interactive kitchen-sink REPL showcasing every @vibecook/truffle feature",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vibecook/truffle": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0"
+  }
+}
