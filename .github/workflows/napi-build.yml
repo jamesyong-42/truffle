@@ -58,12 +58,15 @@ jobs:
 
       # pnpm must be on PATH before setup-node@v5, which auto-validates
       # the `packageManager` field in package.json and fails if the named
-      # manager is missing.
+      # manager is missing. We also disable `package-manager-cache` because
+      # this job uses `npm install`, not pnpm — leaving the auto-cache on
+      # causes the post-step to fail when the pnpm store path doesn't exist.
       - uses: pnpm/action-setup@v5
 
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -115,6 +118,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          package-manager-cache: false
 
       - name: Install dependencies
         run: |
@@ -147,7 +151,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
+          # This job uses `npm install` under crates/truffle-napi, not pnpm,
+          # so disable auto-cache to avoid post-step path validation errors.
+          package-manager-cache: false
 
       - name: Print npm version
         run: |
