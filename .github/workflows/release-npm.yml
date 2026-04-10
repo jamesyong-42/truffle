@@ -61,10 +61,15 @@ jobs:
           done
           echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway."
 
+      # Use `pnpm publish`, not `npm publish`, so that `workspace:*`
+      # dependency specifiers get rewritten to concrete version ranges in
+      # the published package.json. `npm publish` leaves them as literal
+      # "workspace:*", which makes the package uninstallable outside the
+      # monorepo (npm/yarn can't resolve that protocol).
       - name: Publish @vibecook/truffle
         run: |
           cd packages/core
-          npm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts
+          pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks
 
       - name: Wait for @vibecook/truffle to be indexed
         run: sleep 30
@@ -72,4 +77,4 @@ jobs:
       - name: Publish @vibecook/truffle-react
         run: |
           cd packages/react
-          npm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts
+          pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks

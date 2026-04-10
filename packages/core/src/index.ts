@@ -1,5 +1,10 @@
 // Re-export classes (values) from the native Rust addon
-export { NapiNode, NapiFileTransfer } from '@vibecook/truffle-native';
+export {
+  NapiNode,
+  NapiFileTransfer,
+  NapiOfferResponder,
+  NapiSyncedStore,
+} from '@vibecook/truffle-native';
 
 // Re-export interfaces/types from the native Rust addon
 export type {
@@ -14,6 +19,8 @@ export type {
   NapiTransferResult,
   NapiTransferProgress,
   NapiFileTransferEvent,
+  NapiSlice,
+  NapiStoreEvent,
 } from '@vibecook/truffle-native';
 
 // Sidecar binary resolution
