@@ -12,15 +12,24 @@ import { FilesPanel } from '@/components/panels/FilesPanel';
 import { HealthPanel } from '@/components/panels/HealthPanel';
 import { Button } from '@/components/ui/button';
 
-function StartingSpinner() {
+/**
+ * Spinner shown while the sidecar is coming up but before any peer
+ * events, auth URLs, or errors have been emitted.
+ */
+function StartingSpinner({ phase }: { phase: string }) {
   return (
     <div className="flex h-full w-full items-center justify-center">
-      <div className="flex flex-col items-center gap-3 text-[12px] text-[var(--color-text-secondary)]">
+      <div className="flex flex-col items-center gap-4 text-center">
         <div
           aria-hidden="true"
-          className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--color-border-subtle)] border-t-[var(--color-accent)]"
+          className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--color-border-subtle)] border-t-[var(--color-accent)]"
         />
-        Starting Truffle node…
+        <div className="text-[13px] text-[var(--color-text-primary)]">
+          Starting Truffle node
+        </div>
+        <div className="text-[11px] text-[var(--color-text-secondary)]">
+          {phase}
+        </div>
       </div>
     </div>
   );
@@ -38,7 +47,7 @@ function ErrorState({ error, onRetry }: ErrorStateProps) {
         <h3 className="mb-2 text-[14px] font-semibold text-[var(--color-status-red)]">
           Failed to start Truffle node
         </h3>
-        <p className="mono mb-4 text-[11.5px] text-[var(--color-text-secondary)] selectable">
+        <p className="mono mb-4 text-[11.5px] text-[var(--color-text-secondary)] selectable whitespace-pre-wrap">
           {error}
         </p>
         <Button onClick={onRetry} variant="secondary">
@@ -49,63 +58,42 @@ function ErrorState({ error, onRetry }: ErrorStateProps) {
   );
 }
 
-function AppInner() {
+/**
+ * The main UI shell rendered once the node is running. Hooks are
+ * intentionally scoped to this component so they don't fire IPC calls
+ * (like `getPeers()` and `health()`) before the main process has a
+ * live `NapiNode` — those calls would otherwise throw "Node not started"
+ * on every mount.
+ */
+function RunningShell() {
   const [activePanel, setActivePanel] = useState<PanelId>('peers');
-  const {
-    nodeIdentity,
-    isStarted,
-    isStarting,
-    authUrl,
-    startError,
-    health,
-    startNode,
-  } = useTruffle();
-
-  // These hooks are shared across the shell (sidebar badges, status bar)
-  // AND the panels. Both call sites subscribe to the same events; duplication
-  // is cheap because each hook maintains its own copy and the event handlers
-  // are pure. Alternatively we could hoist them into the context; keeping
-  // them co-located with their consumers is simpler.
+  const { nodeIdentity, health } = useTruffle();
   const { peers } = usePeers();
   const { pendingOffers, transfers } = useFileTransfer();
+
   const activeTransferCount = transfers.filter(
     (t) => t.status === 'active',
   ).length;
 
-  const openAuth = (url: string) => window.truffle.openAuthUrl(url);
-
-  const retry = () => {
-    void startNode({
-      name: `playground-${Math.random().toString(36).slice(2, 8)}`,
-      ephemeral: true,
-    });
-  };
-
   let content: React.ReactNode;
-  if (startError && !isStarting) {
-    content = <ErrorState error={startError} onRetry={retry} />;
-  } else if (!isStarted && (isStarting || !nodeIdentity)) {
-    content = <StartingSpinner />;
-  } else {
-    switch (activePanel) {
-      case 'peers':
-        content = <PeersPanel />;
-        break;
-      case 'chat':
-        content = <ChatPanel />;
-        break;
-      case 'store':
-        content = <StorePanel />;
-        break;
-      case 'files':
-        content = <FilesPanel />;
-        break;
-      case 'health':
-        content = <HealthPanel />;
-        break;
-      default:
-        content = null;
-    }
+  switch (activePanel) {
+    case 'peers':
+      content = <PeersPanel />;
+      break;
+    case 'chat':
+      content = <ChatPanel />;
+      break;
+    case 'store':
+      content = <StorePanel />;
+      break;
+    case 'files':
+      content = <FilesPanel />;
+      break;
+    case 'health':
+      content = <HealthPanel />;
+      break;
+    default:
+      content = null;
   }
 
   return (
@@ -125,9 +113,69 @@ function AppInner() {
         health={health}
         peerCount={peers.length}
       />
-      {authUrl ? <AuthGate authUrl={authUrl} onOpen={openAuth} /> : null}
     </div>
   );
+}
+
+/**
+ * Chromeless shell used during the pre-running lifecycle phases
+ * (starting, auth required, error). It provides the same window
+ * background + layout as RunningShell so the transition is seamless.
+ */
+function StartupShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex h-screen w-screen flex-col bg-[var(--color-bg)] text-[var(--color-text-primary)]">
+      <main className="min-w-0 flex-1 overflow-hidden">{children}</main>
+    </div>
+  );
+}
+
+function AppInner() {
+  const { isStarted, isStarting, authUrl, startError, startNode } =
+    useTruffle();
+
+  const openAuth = (url: string) => window.truffle.openAuthUrl(url);
+
+  const retry = () => {
+    void startNode({
+      name: `playground-${Math.random().toString(36).slice(2, 8)}`,
+      ephemeral: true,
+    });
+  };
+
+  // Error supersedes every other state.
+  if (startError && !isStarting) {
+    return (
+      <StartupShell>
+        <ErrorState error={startError} onRetry={retry} />
+      </StartupShell>
+    );
+  }
+
+  // Auth URL is the most actionable thing — promote it to the primary
+  // screen instead of overlaying a spinner behind a modal.
+  if (!isStarted && authUrl) {
+    return (
+      <StartupShell>
+        <AuthGate authUrl={authUrl} onOpen={openAuth} />
+      </StartupShell>
+    );
+  }
+
+  // Still booting the sidecar and no auth URL yet — pure progress state.
+  if (!isStarted) {
+    const phase = isStarting
+      ? 'Launching Tailscale sidecar and connecting to control plane…'
+      : 'Initializing…';
+    return (
+      <StartupShell>
+        <StartingSpinner phase={phase} />
+      </StartupShell>
+    );
+  }
+
+  // Node is running — mount the real shell with hooks.
+  return <RunningShell />;
 }
 
 export default function App() {
