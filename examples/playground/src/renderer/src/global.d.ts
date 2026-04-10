@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 /**
  * Global type augmentations for the Electron renderer process.
  *
@@ -5,6 +7,7 @@
  * - Electron extends the HTML5 `File` interface with a `.path` property that
  *   yields the absolute filesystem path of a dropped file. This is an
  *   Electron-only extension and is not present in browser TypeScript lib defs.
+ * - `import.meta.env.VITE_*` reads custom Vite env vars, typed below.
  */
 
 import type { TruffleAPI } from '@shared/ipc';
@@ -21,6 +24,14 @@ declare global {
   interface File {
     readonly path?: string;
   }
+}
+
+interface ImportMetaEnv {
+  readonly VITE_TRUFFLE_NAME?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
 }
 
 export {};

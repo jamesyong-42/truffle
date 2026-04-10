@@ -112,6 +112,29 @@ samp,
   font-weight: 600;
 }
 
+/* ─── Window drag regions (Electron `titleBarStyle: hiddenInset`) ─────── */
+/*
+ * With hiddenInset the native title bar is removed, so we need a CSS
+ * drag region for the user to move the window. Apply `.drag-region` to
+ * any strip that should grab the window, and `.no-drag` to interactive
+ * elements inside that strip (buttons, links, inputs) so clicks still
+ * work. -webkit-app-region is the long-standing property; `app-region`
+ * is the future-facing spec name.
+ */
+.drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.no-drag,
+.drag-region button,
+.drag-region a,
+.drag-region input,
+.drag-region select,
+.drag-region textarea {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
 /* ─── Animations ──────────────────────────────────────────────────────── */
 @keyframes flash-highlight {
   0% {

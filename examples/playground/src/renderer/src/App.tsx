@@ -13,6 +13,49 @@ import { HealthPanel } from '@/components/panels/HealthPanel';
 import { Button } from '@/components/ui/button';
 
 /**
+ * True on macOS. The window uses `titleBarStyle: hiddenInset` on mac,
+ * which overlays the native traffic lights in the top-left — the drag
+ * bar needs extra left padding so the nav/logo doesn't collide with them.
+ */
+const isMac =
+  typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform);
+
+/**
+ * Draggable strip at the top of the window. Required because
+ * `titleBarStyle: hiddenInset` removes the native title bar and leaves
+ * no way to move the window without a CSS drag region. On macOS it
+ * leaves 72px of clearance for the native traffic light buttons.
+ */
+function TitleBar() {
+  return (
+    <div
+      className="drag-region flex h-9 shrink-0 items-center border-b border-[var(--color-border-subtle)] bg-[var(--color-bg)]"
+      style={{ paddingLeft: isMac ? 80 : 12, paddingRight: 12 }}
+    >
+      <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+          className="text-[var(--color-accent-hover)]"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3v18" />
+          <path d="M3 12h18" />
+        </svg>
+        Truffle Playground
+      </div>
+    </div>
+  );
+}
+
+/**
  * Spinner shown while the sidecar is coming up but before any peer
  * events, auth URLs, or errors have been emitted.
  */
@@ -98,6 +141,7 @@ function RunningShell() {
 
   return (
     <div className="flex h-screen w-screen flex-col bg-[var(--color-bg)] text-[var(--color-text-primary)]">
+      <TitleBar />
       <div className="flex min-h-0 flex-1">
         <Sidebar
           activePanel={activePanel}
@@ -125,6 +169,7 @@ function RunningShell() {
 function StartupShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen w-screen flex-col bg-[var(--color-bg)] text-[var(--color-text-primary)]">
+      <TitleBar />
       <main className="min-w-0 flex-1 overflow-hidden">{children}</main>
     </div>
   );
