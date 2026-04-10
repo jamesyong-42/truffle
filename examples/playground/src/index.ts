@@ -24,8 +24,9 @@
  *     NAME=alice npm start   # device 1
  *     NAME=bob   npm start   # device 2
  *
- * Using this example outside the monorepo? Replace `"workspace:*"` in
- * package.json with the latest version from npm, e.g. `"^0.3.23"`.
+ * This example installs `@vibecook/truffle` from the npm registry, not
+ * from the workspace, so it's a faithful reproduction of what an
+ * external consumer would run.
  *
  * Prerequisites:
  *   - Tailscale installed and signed in on each device
