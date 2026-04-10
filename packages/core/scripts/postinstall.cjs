@@ -50,6 +50,16 @@ function main() {
     const pkgJson = require.resolve(`${pkg}/package.json`);
     const binPath = join(dirname(pkgJson), 'bin', binName);
     if (existsSync(binPath)) {
+      // Ensure the binary is executable. Historically our tarballs were
+      // published with mode 0644 because actions/upload-artifact dropped
+      // POSIX bits in CI, so fix it here. No-op on Windows.
+      if (process.platform !== 'win32') {
+        try {
+          chmodSync(binPath, 0o755);
+        } catch {
+          // Might already be correct, or filesystem is read-only; ignore.
+        }
+      }
       return; // All good
     }
   } catch {
