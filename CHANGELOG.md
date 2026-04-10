@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.25](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.24...truffle-v0.3.25) (2026-04-10)
+
+
+### Features
+
+* **examples:** rewrite playground as Electron desktop app ([c97956a](https://github.com/jamesyong-42/truffle/commit/c97956a16eaca2af3ce57da290ffd77224a6039a))
+
+
+### Bug Fixes
+
+* **core:** route NAPI-layer Tokio spawns through napi-rs managed runtime ([203939b](https://github.com/jamesyong-42/truffle/commit/203939b12b8f0d6d170e6c78a7eb4fe2b6169bfa))
+* **examples:** add draggable title bar strip to Electron playground ([26b6a86](https://github.com/jamesyong-42/truffle/commit/26b6a86406311b60d4c5a6a21dcff752fad601b2))
+* **examples:** preload path mismatch — main expected .js, electron-vite emits .mjs ([bc05574](https://github.com/jamesyong-42/truffle/commit/bc05574eed88f3a74222e1ffd290817b1c610f5e))
+* **examples:** upgrade playground to truffle 0.3.24 and fix startup UX ([92e4e5b](https://github.com/jamesyong-42/truffle/commit/92e4e5bfb4dce02c070e878b5a2d120efc5029dd))
+
 ## [0.3.24](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.23...truffle-v0.3.24) (2026-04-10)
 
 
