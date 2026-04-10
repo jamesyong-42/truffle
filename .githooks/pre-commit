@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Truffle pre-commit hook
+#
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+#
+# Catches issues that would otherwise only surface in CI:
+#   1. NAPI binding drift — if crates/truffle-napi/src/ changed but
+#      index.d.ts / index.js weren't regenerated (caused 0.3.17 pipeline
+#      to ship stale types)
+#   2. Rustfmt violations on staged Rust files
+#
+# Skip with: git commit --no-verify
+
+set -euo pipefail
+
+RED=$'\033[0;31m'
+YELLOW=$'\033[0;33m'
+GREEN=$'\033[0;32m'
+NC=$'\033[0m'
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Collect staged files (added, copied, modified) — not deleted.
+# Uses a single `git diff` call and parses inline so we stay compatible
+# with macOS's default bash 3.2 (no `mapfile`).
+staged_files="$(git diff --cached --name-only --diff-filter=ACM)"
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+fail=0
+
+# ───────────────────────────────────────────────────────────────
+# Check 1: NAPI binding drift
+# ───────────────────────────────────────────────────────────────
+napi_src_changed=0
+while IFS= read -r f; do
+  case "$f" in
+    crates/truffle-napi/src/*.rs|crates/truffle-napi/Cargo.toml|crates/truffle-napi/build.rs)
+      napi_src_changed=1
+      break
+      ;;
+  esac
+done <<< "$staged_files"
+
+if [ "$napi_src_changed" -eq 1 ]; then
+  echo "${YELLOW}[pre-commit] NAPI source changed — regenerating bindings...${NC}"
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "${RED}[pre-commit] pnpm not found — install it or skip with --no-verify${NC}"
+    exit 1
+  fi
+
+  if ! (cd crates/truffle-napi && pnpm run build >/dev/null 2>&1); then
+    echo "${RED}[pre-commit] NAPI build failed — run 'cd crates/truffle-napi && pnpm run build' to see errors${NC}"
+    exit 1
+  fi
+
+  # If index.d.ts or index.js changed after regen, the commit is missing them
+  if ! git diff --quiet -- crates/truffle-napi/index.d.ts crates/truffle-napi/index.js; then
+    echo "${RED}[pre-commit] NAPI bindings are out of date.${NC}"
+    echo "${RED}            Stage the regenerated files and commit again:${NC}"
+    echo "            git add crates/truffle-napi/index.d.ts crates/truffle-napi/index.js"
+    fail=1
+  else
+    echo "${GREEN}[pre-commit] NAPI bindings up to date.${NC}"
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────
+# Check 2: Rustfmt on staged .rs files
+# ───────────────────────────────────────────────────────────────
+rust_files=""
+rust_count=0
+while IFS= read -r f; do
+  case "$f" in
+    *.rs)
+      rust_files="$rust_files $f"
+      rust_count=$((rust_count + 1))
+      ;;
+  esac
+done <<< "$staged_files"
+
+if [ "$rust_count" -gt 0 ]; then
+  if ! command -v rustfmt >/dev/null 2>&1; then
+    echo "${YELLOW}[pre-commit] rustfmt not found — skipping format check${NC}"
+  else
+    # --check returns non-zero if any file needs formatting
+    # shellcheck disable=SC2086
+    if ! rustfmt --edition 2021 --check $rust_files >/dev/null 2>&1; then
+      echo "${RED}[pre-commit] Rust formatting issues. Run:${NC}"
+      echo "            cargo fmt"
+      fail=1
+    else
+      echo "${GREEN}[pre-commit] Rustfmt clean ($rust_count file(s)).${NC}"
+    fi
+  fi
+fi
+
+exit "$fail"

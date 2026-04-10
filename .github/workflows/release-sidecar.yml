@@ -48,9 +48,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache-dependency-path: packages/sidecar-slim/go.sum
@@ -80,7 +80,7 @@ jobs:
           chmod +x npm/${{ matrix.npm_pkg }}/bin/${{ matrix.bin_name }} || true
 
       - name: Upload npm package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.npm_pkg }}
           path: npm/${{ matrix.npm_pkg }}
@@ -95,19 +95,17 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
 
-      - name: Update npm for OIDC trusted publishing
-        run: |
-          npm install -g npm@latest
-          echo "npm version: $(npm --version)"
+      - name: Print npm version
+        run: echo "npm version: $(npm --version)"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 

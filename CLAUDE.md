@@ -42,6 +42,18 @@ cargo build --workspace
 cargo test --workspace        # ~199 tests, all in truffle-core
 ```
 
+## Pre-commit Hook (one-time setup per clone)
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Enables `.githooks/pre-commit`, which catches issues before they reach CI:
+- **NAPI binding drift**: if `crates/truffle-napi/src/` changed, auto-regenerates `index.d.ts` / `index.js` and blocks the commit if they're not staged (this is what went wrong in 0.3.17 → shipped stale types).
+- **Rustfmt** on staged `.rs` files.
+
+Skip with `git commit --no-verify` when you need to (rare).
+
 ## Release Workflow
 
 1. Push `feat:` or `fix:` commit to main
