@@ -41,14 +41,23 @@ interface TruffleContextValue {
 const TruffleContext = createContext<TruffleContextValue | null>(null);
 
 /**
- * Build a default start config. Random suffix keeps multiple dev launches
- * from colliding in the Tailscale admin UI.
+ * Build a default start config.
+ *
+ * Uses a **stable name + persistent state directory** on purpose:
+ *   - First run → Tailscale auth URL appears, user authenticates once
+ *   - Subsequent runs → the cached tailnet credentials are reused and the
+ *     app lands straight in the running shell with no re-auth
+ *
+ * The `NAME` env var (surfaced via the renderer at build time by Vite)
+ * can override the stable name if you want to run multiple playgrounds
+ * on the same machine side-by-side.
  */
 function makeDefaultConfig(): StartConfig {
-  const rand = Math.random().toString(36).slice(2, 8);
+  const envName = import.meta.env.VITE_TRUFFLE_NAME as string | undefined;
   return {
-    name: `playground-${rand}`,
-    ephemeral: true,
+    name: envName ?? 'playground',
+    // Non-ephemeral: keep the tailnet entry around so auth persists.
+    ephemeral: false,
   };
 }
 

@@ -77,8 +77,8 @@ importers:
   examples/playground:
     dependencies:
       '@vibecook/truffle':
-        specifier: ^0.3.24
-        version: 0.3.24
+        specifier: workspace:*
+        version: link:../../packages/core
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.1.0
@@ -1990,10 +1990,6 @@ packages:
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
 
-  '@vibecook/truffle-native@0.3.24':
-    resolution: {integrity: sha512-QI05X/e9SBxtEurZg2unEK6egD66CoSI1/JLEjUYdvBCaMWi8lpuQtDUv0ER1XTcAooSPnkTn+zAWnxeR8/pOQ==}
-    engines: {node: '>=18'}
-
   '@vibecook/truffle-sidecar-darwin-arm64@0.3.23':
     resolution: {integrity: sha512-ZGXIpriOrZrcoY4Tv4LLKscQ5is+YGAzjXk0OjCOgAvI3kX4/u+z43MMIop2CACqsxqe3Hr4eHYr6PqeFS824A==}
     engines: {node: '>=18'}
@@ -2023,10 +2019,6 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
-
-  '@vibecook/truffle@0.3.24':
-    resolution: {integrity: sha512-e5/yQy/kwXLcJjhgl6Cj5Ed9DHIFTGOVB+VdqK4SGyajL72iXHdV14c2tos8K/dgm5xmRIGaw4MMXShnLuMYug==}
-    engines: {node: '>=18'}
 
   '@vitejs/plugin-react@4.7.0':
     resolution: {integrity: sha512-gUu9hwfWvvEDBBmgtAowQCojwZmJ5mcLn3aufeCsitijs3+f2NsrPtlAWIR6OPiqljl96GVCUbLe0HyqIpVaoA==}
@@ -6214,8 +6206,6 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@vibecook/truffle-native@0.3.24': {}
-
   '@vibecook/truffle-sidecar-darwin-arm64@0.3.23':
     optional: true
 
@@ -6230,16 +6220,6 @@ snapshots:
 
   '@vibecook/truffle-sidecar-win32-x64@0.3.23':
     optional: true
-
-  '@vibecook/truffle@0.3.24':
-    dependencies:
-      '@vibecook/truffle-native': 0.3.24
-    optionalDependencies:
-      '@vibecook/truffle-sidecar-darwin-arm64': 0.3.23
-      '@vibecook/truffle-sidecar-darwin-x64': 0.3.23
-      '@vibecook/truffle-sidecar-linux-arm64': 0.3.23
-      '@vibecook/truffle-sidecar-linux-x64': 0.3.23
-      '@vibecook/truffle-sidecar-win32-x64': 0.3.23
 
   '@vitejs/plugin-react@4.7.0(vite@6.4.2(@types/node@22.19.17)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0))':
     dependencies:
