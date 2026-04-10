@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.19](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.18...truffle-v0.3.19) (2026-04-10)
+
+
+### Bug Fixes
+
+* **ci:** quote colon in npm version echo + add YAML check to pre-commit ([d861188](https://github.com/jamesyong-42/truffle/commit/d861188623eec4e80a6da9e22e117eae6baabe96))
+
 ## [0.3.18](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.17...truffle-v0.3.18) (2026-04-10)
 
 
