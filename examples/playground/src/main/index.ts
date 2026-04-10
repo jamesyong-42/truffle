@@ -29,7 +29,8 @@ function createWindow(): BrowserWindow {
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     show: false,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      // electron-vite emits the preload as `.mjs` (ESM), not `.js`
+      preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
       sandbox: false,
       nodeIntegration: false,
