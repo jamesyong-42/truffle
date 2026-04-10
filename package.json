@@ -33,7 +33,7 @@
     "release": "pnpm run build && changeset publish"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["@vibecook/truffle", "esbuild"]
+    "onlyBuiltDependencies": ["@vibecook/truffle", "electron", "esbuild"]
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",
