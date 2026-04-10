@@ -1,6 +1,6 @@
 [package]
 name = "truffle"
-version = "0.3.17" # x-release-please-version
+version = "0.3.18" # x-release-please-version
 edition = "2021"
 description = "P2P mesh networking for your devices, built on Tailscale"
 license = "MIT"

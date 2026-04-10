@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.18](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.17...truffle-v0.3.18) (2026-04-10)
+
+
+### Bug Fixes
+
+* add NAPI platform npm directories for napi artifacts ([b3897e2](https://github.com/jamesyong-42/truffle/commit/b3897e25a5e6a886a82fa54a743af2735142e01a))
+* fix NAPI build and npm publish workflows ([18a9389](https://github.com/jamesyong-42/truffle/commit/18a9389cfe4d1a112182ce06f0d364c42ef241de))
+* publish NAPI packages individually with --provenance ([cbd9225](https://github.com/jamesyong-42/truffle/commit/cbd9225b9c10222f016326569c8a6ea5ba396bab))
+* regenerate NAPI bindings and sync Cargo.lock ([6e859b6](https://github.com/jamesyong-42/truffle/commit/6e859b6876336b0caaf9d955e9d116910d21c3f2))
+* rename publish-npm.yml to release-npm.yml to match npm OIDC trust ([2717b62](https://github.com/jamesyong-42/truffle/commit/2717b622ddada41eba071da4f09487b09be237ee))
+* trim NAPI targets to match build matrix (5 platforms) ([9478ceb](https://github.com/jamesyong-42/truffle/commit/9478ceb8488511b2b8878e61ed57149b7db7aeb0))
+
 ## [0.3.17](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.16...truffle-v0.3.17) (2026-03-31)
 
 
