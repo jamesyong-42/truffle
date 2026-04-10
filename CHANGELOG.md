@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.22](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.21...truffle-v0.3.22) (2026-04-10)
+
+
+### Bug Fixes
+
+* **ci:** bump NAPI platform package versions at publish time ([03299c5](https://github.com/jamesyong-42/truffle/commit/03299c51345ce3e4fa38fef847f417fb32971ec0))
+
 ## [0.3.21](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.20...truffle-v0.3.21) (2026-04-10)
 
 
