@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Status, Unknown};
 use napi_derive::napi;
 use tokio::task::JoinHandle;
 
@@ -43,6 +44,16 @@ pub struct NapiNode {
     node: Option<Arc<Node<TailscaleProvider>>>,
     /// Handles to spawned event-forwarding tasks (cancelled on stop).
     task_handles: Vec<JoinHandle<()>>,
+    /// Pre-start auth-required callback. Installed via `on_auth_required()`
+    /// and consumed by `start()`, which wires it into
+    /// `NodeBuilder::build_with_auth_handler`. Necessary because auth fires
+    /// during `start()` — before a post-start `on_peer_change` subscription
+    /// could possibly exist.
+    ///
+    /// `CalleeHandled = false` so the JS callback receives `(url)` directly
+    /// rather than `(err, url)` — there's no async error path here.
+    pending_auth_callback:
+        Option<ThreadsafeFunction<String, Unknown<'static>, String, Status, false>>,
 }
 
 #[napi]
@@ -53,7 +64,25 @@ impl NapiNode {
         Self {
             node: None,
             task_handles: Vec::new(),
+            pending_auth_callback: None,
         }
+    }
+
+    /// Install a callback to receive the Tailscale auth URL.
+    ///
+    /// Must be called BEFORE `start()`. During startup the Tailscale
+    /// provider may require interactive authentication; if so, this
+    /// callback is invoked with the auth URL while `start()` is still
+    /// waiting. If no callback is installed, `start()` uses the plain
+    /// build path and may reject with "timed out waiting for
+    /// authentication" after 5 minutes.
+    #[napi(ts_args_type = "callback: (url: string) => void")]
+    pub fn on_auth_required(
+        &mut self,
+        callback: ThreadsafeFunction<String, Unknown<'static>, String, Status, false>,
+    ) -> Result<()> {
+        self.pending_auth_callback = Some(callback);
+        Ok(())
     }
 
     /// Start the node with the given configuration.
@@ -82,10 +111,23 @@ impl NapiNode {
             builder = builder.ws_port(port);
         }
 
-        let node = builder
-            .build()
-            .await
-            .map_err(|e| Error::from_reason(format!("Failed to start node: {e}")))?;
+        // If the caller installed a pre-start auth handler via
+        // `on_auth_required()`, use `build_with_auth_handler` so the auth
+        // URL is forwarded to JS while the provider is still waiting for
+        // login. Otherwise fall back to the plain build path.
+        let node = match self.pending_auth_callback.take() {
+            Some(cb) => builder
+                .build_with_auth_handler(move |url| {
+                    // Fatal error strategy: pass the value directly.
+                    cb.call(url, ThreadsafeFunctionCallMode::NonBlocking);
+                })
+                .await
+                .map_err(|e| Error::from_reason(format!("Failed to start node: {e}")))?,
+            None => builder
+                .build()
+                .await
+                .map_err(|e| Error::from_reason(format!("Failed to start node: {e}")))?,
+        };
 
         self.node = Some(Arc::new(node));
         Ok(())
@@ -169,12 +211,7 @@ impl NapiNode {
 
     /// Send a namespaced message to a specific peer.
     #[napi]
-    pub async fn send(
-        &self,
-        peer_id: String,
-        namespace: String,
-        data: Buffer,
-    ) -> Result<()> {
+    pub async fn send(&self, peer_id: String, namespace: String, data: Buffer) -> Result<()> {
         let node = self.require_node()?;
         node.send(&peer_id, &namespace, data.as_ref())
             .await
@@ -193,13 +230,8 @@ impl NapiNode {
     ///
     /// The callback receives `NapiPeerEvent` objects whenever peers
     /// join, leave, connect, disconnect, or update.
-    #[napi(
-        ts_args_type = "callback: (event: PeerEvent) => void"
-    )]
-    pub fn on_peer_change(
-        &mut self,
-        callback: ThreadsafeFunction<NapiPeerEvent>,
-    ) -> Result<()> {
+    #[napi(ts_args_type = "callback: (event: PeerEvent) => void")]
+    pub fn on_peer_change(&mut self, callback: ThreadsafeFunction<NapiPeerEvent>) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
 
@@ -208,10 +240,8 @@ impl NapiNode {
                 match rx.recv().await {
                     Ok(event) => {
                         let napi_event = convert_peer_event(&event);
-                        let status = callback.call(
-                            Ok(napi_event),
-                            ThreadsafeFunctionCallMode::NonBlocking,
-                        );
+                        let status =
+                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }
@@ -232,9 +262,7 @@ impl NapiNode {
     /// Subscribe to messages on a specific namespace.
     ///
     /// The callback receives `NapiNamespacedMessage` objects.
-    #[napi(
-        ts_args_type = "namespace: string, callback: (msg: NamespacedMessage) => void"
-    )]
+    #[napi(ts_args_type = "namespace: string, callback: (msg: NamespacedMessage) => void")]
     pub fn on_message(
         &mut self,
         namespace: String,
@@ -254,10 +282,8 @@ impl NapiNode {
                             payload: msg.payload,
                             timestamp: msg.timestamp.map(|t| t as f64),
                         };
-                        let status = callback.call(
-                            Ok(napi_msg),
-                            ThreadsafeFunctionCallMode::NonBlocking,
-                        );
+                        let status =
+                            callback.call(Ok(napi_msg), ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }

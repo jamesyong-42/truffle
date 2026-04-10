@@ -123,12 +123,13 @@ const localState: PlaygroundState = {
 
 // ─── Peer event handler ─────────────────────────────────────────────────
 
+function handleAuthRequired(url: string): void {
+  log(cyan('[auth]'), `Tailscale login required → ${url}`);
+  log(cyan('[auth]'), 'Your browser should open automatically.');
+}
+
 function handlePeerEvent(event: NapiPeerEvent): void {
   switch (event.eventType) {
-    case 'auth_required':
-      log(cyan('[auth]'), `Tailscale login required → ${event.authUrl}`);
-      log(cyan('[auth]'), 'Your browser should open automatically.');
-      break;
     case 'joined':
       if (event.peer) log(green('[peer]'), `joined: ${formatPeer(event.peer)}`);
       break;
@@ -438,6 +439,7 @@ async function main(): Promise<void> {
     stateDir: `./.truffle-state/${NODE_NAME}`,
     // Clean up on quit so we don't leave stale tailnet entries around.
     ephemeral: true,
+    onAuthRequired: handleAuthRequired,
     onPeerChange: handlePeerEvent,
   });
 

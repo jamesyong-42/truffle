@@ -61,6 +61,17 @@ export declare class NapiNode {
   /** Create a new (unstarted) NapiNode. */
   constructor()
   /**
+   * Install a callback to receive the Tailscale auth URL.
+   *
+   * Must be called BEFORE `start()`. During startup the Tailscale
+   * provider may require interactive authentication; if so, this
+   * callback is invoked with the auth URL while `start()` is still
+   * waiting. If no callback is installed, `start()` uses the plain
+   * build path and may reject with "timed out waiting for
+   * authentication" after 5 minutes.
+   */
+  onAuthRequired(callback: (url: string) => void): void
+  /**
    * Start the node with the given configuration.
    *
    * Resolves when the Tailscale sidecar is connected and the node is ready.

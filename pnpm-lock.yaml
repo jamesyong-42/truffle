@@ -77,8 +77,8 @@ importers:
   examples/playground:
     dependencies:
       '@vibecook/truffle':
-        specifier: ^0.3.23
-        version: 0.3.23
+        specifier: workspace:*
+        version: link:../../packages/core
     devDependencies:
       '@types/node':
         specifier: ^20.0.0
@@ -1508,10 +1508,6 @@ packages:
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
 
-  '@vibecook/truffle-native@0.3.23':
-    resolution: {integrity: sha512-FcKegVVZlQbXRMCFrEY6LKKNdd3bLwum7oASYLYzycMVgigsKaCpaB2/4aNa5RNmCVXlcPVvcW0PxfvMsih8sw==}
-    engines: {node: '>=18'}
-
   '@vibecook/truffle-sidecar-darwin-arm64@0.3.23':
     resolution: {integrity: sha512-ZGXIpriOrZrcoY4Tv4LLKscQ5is+YGAzjXk0OjCOgAvI3kX4/u+z43MMIop2CACqsxqe3Hr4eHYr6PqeFS824A==}
     engines: {node: '>=18'}
@@ -1541,10 +1537,6 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
-
-  '@vibecook/truffle@0.3.23':
-    resolution: {integrity: sha512-rPDqM6ljqteXRG3+Ydly6zB0JM5kNOpnthYdQa/RUseeLIZzbA47V/lTPekgLKoxdVlA+Lt6ij5inW+YInCTRw==}
-    engines: {node: '>=18'}
 
   '@vitejs/plugin-vue@5.2.4':
     resolution: {integrity: sha512-7Yx/SXSOcQq5HiiV3orevHUFn+pmMB4cgbEkDYgnkUWb0WfeQ/wa2yFv6D5ICiCQOVpjA7vYDXrC7AGO8yjDHA==}
@@ -4033,8 +4025,6 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@vibecook/truffle-native@0.3.23': {}
-
   '@vibecook/truffle-sidecar-darwin-arm64@0.3.23':
     optional: true
 
@@ -4049,16 +4039,6 @@ snapshots:
 
   '@vibecook/truffle-sidecar-win32-x64@0.3.23':
     optional: true
-
-  '@vibecook/truffle@0.3.23':
-    dependencies:
-      '@vibecook/truffle-native': 0.3.23
-    optionalDependencies:
-      '@vibecook/truffle-sidecar-darwin-arm64': 0.3.23
-      '@vibecook/truffle-sidecar-darwin-x64': 0.3.23
-      '@vibecook/truffle-sidecar-linux-arm64': 0.3.23
-      '@vibecook/truffle-sidecar-linux-x64': 0.3.23
-      '@vibecook/truffle-sidecar-win32-x64': 0.3.23
 
   '@vitejs/plugin-vue@5.2.4(vite@5.4.21(@types/node@22.19.17))(vue@3.5.32(typescript@5.9.3))':
     dependencies:

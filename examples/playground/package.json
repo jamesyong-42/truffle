@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vibecook/truffle": "^0.3.23"
+    "@vibecook/truffle": "^0.3.24"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

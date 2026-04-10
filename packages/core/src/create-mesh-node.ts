@@ -84,6 +84,22 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
 
   const node = new NapiNode();
 
+  // IMPORTANT: install the auth-required callback BEFORE calling `start()`.
+  // `start()` blocks waiting for Tailscale authentication to complete, so
+  // an `onPeerChange` subscription installed afterwards misses the
+  // `auth_required` event entirely and `start()` hangs until its internal
+  // 5-minute timeout with "timed out waiting for authentication".
+  //
+  // `onAuthRequired` is a distinct, pre-start hook on NapiNode that bridges
+  // to `NodeBuilder::build_with_auth_handler` under the hood.
+  node.onAuthRequired((url: string) => {
+    if (autoAuth) {
+      const opener = customOpenUrl ?? defaultOpenUrl;
+      opener(url);
+    }
+    onAuthRequired?.(url);
+  });
+
   const config: NapiNodeConfig = {
     name,
     sidecarPath: resolvedSidecarPath,
@@ -95,18 +111,10 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
 
   await node.start(config);
 
-  // Subscribe to peer events for auth handling and user callback
-  node.onPeerChange((event: NapiPeerEvent) => {
-    if (event.eventType === 'auth_required' && event.authUrl) {
-      if (autoAuth) {
-        const opener = customOpenUrl ?? defaultOpenUrl;
-        opener(event.authUrl);
-      }
-      onAuthRequired?.(event.authUrl);
-    }
-
-    onPeerChange?.(event);
-  });
+  // Post-start: forward ongoing peer lifecycle events to the user callback.
+  if (onPeerChange) {
+    node.onPeerChange(onPeerChange);
+  }
 
   return node;
 }
