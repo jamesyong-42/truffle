@@ -1,6 +1,6 @@
 [package]
 name = "truffle-sidecar"
-version = "0.3.17" # x-release-please-version
+version = "0.3.18" # x-release-please-version
 edition = "2021"
 description = "Auto-downloads the truffle mesh networking sidecar binary at build time"
 license = "MIT"
