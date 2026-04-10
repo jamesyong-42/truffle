@@ -148,7 +148,7 @@ impl NapiFileTransfer {
     ) -> Result<()> {
         let node = self.node.clone();
 
-        tokio::spawn(async move {
+        napi::bindgen_prelude::spawn(async move {
             let ft = node.file_transfer();
             let mut rx = ft.offer_channel(node.clone()).await;
 
@@ -189,7 +189,7 @@ impl NapiFileTransfer {
         let ft = self.node.file_transfer();
         let mut rx = ft.subscribe();
 
-        tokio::spawn(async move {
+        napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {

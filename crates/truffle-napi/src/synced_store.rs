@@ -26,8 +26,16 @@ pub struct NapiSyncedStore {
 
 impl NapiSyncedStore {
     pub(crate) fn new(node: Arc<Node<TailscaleProvider>>, store_id: &str) -> Self {
+        // `SyncedStore::new` in truffle-core kicks off a background sync task
+        // via `tokio::spawn`, which panics if invoked from outside a Tokio
+        // runtime context. This NAPI method is sync and is called from the
+        // Node.js main thread, which has no runtime. Enter the napi-rs
+        // managed runtime for the duration of the constructor so the spawn
+        // hits a live reactor.
+        let inner =
+            napi::bindgen_prelude::within_runtime_if_available(|| SyncedStore::new(node, store_id));
         Self {
-            inner: SyncedStore::new(node, store_id),
+            inner,
             task_handles: Vec::new(),
         }
     }
@@ -100,7 +108,7 @@ impl NapiSyncedStore {
     pub fn on_change(&mut self, callback: ThreadsafeFunction<NapiStoreEvent>) -> Result<()> {
         let mut rx = self.inner.subscribe();
 
-        let handle = tokio::spawn(async move {
+        let handle = napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {

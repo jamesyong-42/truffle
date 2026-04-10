@@ -235,7 +235,11 @@ impl NapiNode {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
 
-        let handle = tokio::spawn(async move {
+        // Use napi-rs's managed Tokio runtime. Bare `tokio::spawn` panics
+        // with "there is no reactor running" because this is a sync NAPI
+        // method invoked on the Node.js main thread, which has no Tokio
+        // runtime in context.
+        let handle = napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -271,7 +275,11 @@ impl NapiNode {
         let node = self.require_node()?;
         let mut rx = node.subscribe(&namespace);
 
-        let handle = tokio::spawn(async move {
+        // Use napi-rs's managed Tokio runtime. Bare `tokio::spawn` panics
+        // with "there is no reactor running" because this is a sync NAPI
+        // method invoked on the Node.js main thread, which has no Tokio
+        // runtime in context.
+        let handle = napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(msg) => {
