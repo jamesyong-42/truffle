@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.24](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.23...truffle-v0.3.24) (2026-04-10)
+
+
+### Bug Fixes
+
+* **core:** add NapiNode.onAuthRequired so createMeshNode surfaces the auth URL ([14fb7be](https://github.com/jamesyong-42/truffle/commit/14fb7bee36baac6e5442f9f78048a0c9b38aeacb))
+* **core:** make sidecar binary executable on install ([f3c8077](https://github.com/jamesyong-42/truffle/commit/f3c8077072d47cae5dc52d5386d59844781d1348))
+
 ## [0.3.23](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.22...truffle-v0.3.23) (2026-04-10)
 
 
