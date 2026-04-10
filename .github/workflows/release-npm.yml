@@ -25,7 +25,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Print npm version
-        run: echo "npm version: $(npm --version)"
+        run: |
+          echo "npm version: $(npm --version)"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
