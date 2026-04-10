@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.23](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.22...truffle-v0.3.23) (2026-04-10)
+
+
+### Bug Fixes
+
+* **core:** re-export SyncedStore types and publish via pnpm ([bb612e7](https://github.com/jamesyong-42/truffle/commit/bb612e7440d136b29c89d24a52e188aa31c0f0a7))
+
 ## [0.3.22](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.21...truffle-v0.3.22) (2026-04-10)
 
 
