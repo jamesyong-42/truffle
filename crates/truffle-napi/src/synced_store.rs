@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Status, Unknown};
 use napi_derive::napi;
 use tokio::task::JoinHandle;
 
@@ -105,7 +106,16 @@ impl NapiSyncedStore {
     /// The callback receives `NapiStoreEvent` objects whenever local data
     /// changes, a peer's data is updated, or a peer is removed.
     #[napi(ts_args_type = "callback: (event: StoreEvent) => void")]
-    pub fn on_change(&mut self, callback: ThreadsafeFunction<NapiStoreEvent>) -> Result<()> {
+    pub fn on_change(
+        &mut self,
+        callback: ThreadsafeFunction<
+            NapiStoreEvent,
+            Unknown<'static>,
+            NapiStoreEvent,
+            Status,
+            false,
+        >,
+    ) -> Result<()> {
         let mut rx = self.inner.subscribe();
 
         let handle = napi::bindgen_prelude::spawn(async move {
@@ -114,7 +124,7 @@ impl NapiSyncedStore {
                     Ok(event) => {
                         let napi_event = convert_store_event(&event);
                         let status =
-                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
+                            callback.call(napi_event, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }

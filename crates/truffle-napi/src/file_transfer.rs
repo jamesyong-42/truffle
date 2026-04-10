@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Status, Unknown};
 use napi_derive::napi;
 use tokio::sync::Mutex;
 
@@ -144,7 +145,13 @@ impl NapiFileTransfer {
     #[napi(ts_args_type = "callback: (offer: FileOffer, responder: NapiOfferResponder) => void")]
     pub fn on_offer(
         &self,
-        callback: ThreadsafeFunction<(NapiFileOffer, NapiOfferResponder)>,
+        callback: ThreadsafeFunction<
+            (NapiFileOffer, NapiOfferResponder),
+            Unknown<'static>,
+            (NapiFileOffer, NapiOfferResponder),
+            Status,
+            false,
+        >,
     ) -> Result<()> {
         let node = self.node.clone();
 
@@ -168,7 +175,7 @@ impl NapiFileTransfer {
                 };
 
                 let status = callback.call(
-                    Ok((napi_offer, napi_responder)),
+                    (napi_offer, napi_responder),
                     ThreadsafeFunctionCallMode::NonBlocking,
                 );
                 if status != Status::Ok {
@@ -185,7 +192,16 @@ impl NapiFileTransfer {
     /// The callback receives `NapiFileTransferEvent` objects for all
     /// transfer lifecycle events (hashing, progress, completed, failed, etc.).
     #[napi(ts_args_type = "callback: (event: FileTransferEvent) => void")]
-    pub fn on_event(&self, callback: ThreadsafeFunction<NapiFileTransferEvent>) -> Result<()> {
+    pub fn on_event(
+        &self,
+        callback: ThreadsafeFunction<
+            NapiFileTransferEvent,
+            Unknown<'static>,
+            NapiFileTransferEvent,
+            Status,
+            false,
+        >,
+    ) -> Result<()> {
         let ft = self.node.file_transfer();
         let mut rx = ft.subscribe();
 
@@ -195,7 +211,7 @@ impl NapiFileTransfer {
                     Ok(event) => {
                         let napi_event = convert_ft_event(&event);
                         let status =
-                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
+                            callback.call(napi_event, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }

@@ -231,7 +231,10 @@ impl NapiNode {
     /// The callback receives `NapiPeerEvent` objects whenever peers
     /// join, leave, connect, disconnect, or update.
     #[napi(ts_args_type = "callback: (event: PeerEvent) => void")]
-    pub fn on_peer_change(&mut self, callback: ThreadsafeFunction<NapiPeerEvent>) -> Result<()> {
+    pub fn on_peer_change(
+        &mut self,
+        callback: ThreadsafeFunction<NapiPeerEvent, Unknown<'static>, NapiPeerEvent, Status, false>,
+    ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
 
@@ -245,7 +248,7 @@ impl NapiNode {
                     Ok(event) => {
                         let napi_event = convert_peer_event(&event);
                         let status =
-                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
+                            callback.call(napi_event, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }
@@ -270,7 +273,13 @@ impl NapiNode {
     pub fn on_message(
         &mut self,
         namespace: String,
-        callback: ThreadsafeFunction<NapiNamespacedMessage>,
+        callback: ThreadsafeFunction<
+            NapiNamespacedMessage,
+            Unknown<'static>,
+            NapiNamespacedMessage,
+            Status,
+            false,
+        >,
     ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.subscribe(&namespace);
@@ -291,7 +300,7 @@ impl NapiNode {
                             timestamp: msg.timestamp.map(|t| t as f64),
                         };
                         let status =
-                            callback.call(Ok(napi_msg), ThreadsafeFunctionCallMode::NonBlocking);
+                            callback.call(napi_msg, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }
