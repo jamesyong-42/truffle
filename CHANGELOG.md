@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.21](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.20...truffle-v0.3.21) (2026-04-10)
+
+
+### Bug Fixes
+
+* **ci:** disable package-manager-cache on setup-node@v5 for npm-only jobs ([cdbb79a](https://github.com/jamesyong-42/truffle/commit/cdbb79a06d507cb7ae347583988d9d097a064fe7))
+
 ## [0.3.20](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.19...truffle-v0.3.20) (2026-04-10)
 
 
