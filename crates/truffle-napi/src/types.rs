@@ -253,4 +253,3 @@ pub struct NapiFileTransferEvent {
     /// Total bytes to hash (present for "hashing" events).
     pub total_bytes: Option<f64>,
 }
-

@@ -6,7 +6,7 @@
 //! - [`NapiNode`] — peer discovery, messaging, diagnostics
 //! - [`NapiFileTransfer`] — file send/receive/pull
 
-pub mod types;
-pub mod node;
 pub mod file_transfer;
+pub mod node;
 pub mod synced_store;
+pub mod types;

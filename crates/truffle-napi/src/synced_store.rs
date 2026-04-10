@@ -97,10 +97,7 @@ impl NapiSyncedStore {
     /// The callback receives `NapiStoreEvent` objects whenever local data
     /// changes, a peer's data is updated, or a peer is removed.
     #[napi(ts_args_type = "callback: (event: StoreEvent) => void")]
-    pub fn on_change(
-        &mut self,
-        callback: ThreadsafeFunction<NapiStoreEvent>,
-    ) -> Result<()> {
+    pub fn on_change(&mut self, callback: ThreadsafeFunction<NapiStoreEvent>) -> Result<()> {
         let mut rx = self.inner.subscribe();
 
         let handle = tokio::spawn(async move {
@@ -108,10 +105,8 @@ impl NapiSyncedStore {
                 match rx.recv().await {
                     Ok(event) => {
                         let napi_event = convert_store_event(&event);
-                        let status = callback.call(
-                            Ok(napi_event),
-                            ThreadsafeFunctionCallMode::NonBlocking,
-                        );
+                        let status =
+                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }

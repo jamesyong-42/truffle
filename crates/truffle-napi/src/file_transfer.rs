@@ -29,9 +29,12 @@ impl NapiOfferResponder {
     /// Accept the file offer, saving to the specified path.
     #[napi]
     pub async fn accept(&self, save_path: String) -> Result<()> {
-        let responder = self.inner.lock().await.take().ok_or_else(|| {
-            Error::from_reason("Offer already responded to")
-        })?;
+        let responder = self
+            .inner
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| Error::from_reason("Offer already responded to"))?;
         responder.accept(&save_path);
         Ok(())
     }
@@ -39,9 +42,12 @@ impl NapiOfferResponder {
     /// Reject the file offer with a reason.
     #[napi]
     pub async fn reject(&self, reason: String) -> Result<()> {
-        let responder = self.inner.lock().await.take().ok_or_else(|| {
-            Error::from_reason("Offer already responded to")
-        })?;
+        let responder = self
+            .inner
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| Error::from_reason("Offer already responded to"))?;
         responder.reject(&reason);
         Ok(())
     }
@@ -135,9 +141,7 @@ impl NapiFileTransfer {
     /// The callback receives `(offer, responder)` — call `responder.accept(path)`
     /// or `responder.reject(reason)` to handle the offer. If neither is called
     /// within 60 seconds, the offer is auto-rejected.
-    #[napi(
-        ts_args_type = "callback: (offer: FileOffer, responder: NapiOfferResponder) => void"
-    )]
+    #[napi(ts_args_type = "callback: (offer: FileOffer, responder: NapiOfferResponder) => void")]
     pub fn on_offer(
         &self,
         callback: ThreadsafeFunction<(NapiFileOffer, NapiOfferResponder)>,
@@ -180,13 +184,8 @@ impl NapiFileTransfer {
     ///
     /// The callback receives `NapiFileTransferEvent` objects for all
     /// transfer lifecycle events (hashing, progress, completed, failed, etc.).
-    #[napi(
-        ts_args_type = "callback: (event: FileTransferEvent) => void"
-    )]
-    pub fn on_event(
-        &self,
-        callback: ThreadsafeFunction<NapiFileTransferEvent>,
-    ) -> Result<()> {
+    #[napi(ts_args_type = "callback: (event: FileTransferEvent) => void")]
+    pub fn on_event(&self, callback: ThreadsafeFunction<NapiFileTransferEvent>) -> Result<()> {
         let ft = self.node.file_transfer();
         let mut rx = ft.subscribe();
 
@@ -195,10 +194,8 @@ impl NapiFileTransfer {
                 match rx.recv().await {
                     Ok(event) => {
                         let napi_event = convert_ft_event(&event);
-                        let status = callback.call(
-                            Ok(napi_event),
-                            ThreadsafeFunctionCallMode::NonBlocking,
-                        );
+                        let status =
+                            callback.call(Ok(napi_event), ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
                             break;
                         }
