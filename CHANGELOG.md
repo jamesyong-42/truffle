@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.20](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.19...truffle-v0.3.20) (2026-04-10)
+
+
+### Bug Fixes
+
+* **ci:** install pnpm before setup-node@v5 in napi-build & release-sidecar ([04f7657](https://github.com/jamesyong-42/truffle/commit/04f7657dd72e2721e25a3e67a3b4ecbf259a19cb))
+
 ## [0.3.19](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.18...truffle-v0.3.19) (2026-04-10)
 
 
