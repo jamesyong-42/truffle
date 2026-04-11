@@ -8,20 +8,24 @@
 //! **Client (connect)**:
 //! 1. `NetworkProvider::dial_tcp(addr, port)` -> raw `TcpStream`
 //! 2. WebSocket client handshake (`tokio_tungstenite::client_async_with_config`)
-//! 3. Send [`Handshake`] as a text frame (JSON)
-//! 4. Receive peer's [`Handshake`], validate protocol version
+//! 3. Send a [`HelloEnvelope`] (RFC 017 §8) as a text frame (JSON)
+//! 4. Receive peer's [`HelloEnvelope`], validate `app_id` and version
 //! 5. Split stream into read/write halves, return [`WsFramedStream`]
 //!
 //! **Server (listen)**:
 //! 1. `NetworkProvider::listen_tcp(port)` -> incoming `TcpStream`s
 //! 2. For each: WebSocket server handshake (`tokio_tungstenite::accept_async_with_config`)
-//! 3. Receive peer's [`Handshake`], validate, send own [`Handshake`]
+//! 3. Receive peer's [`HelloEnvelope`], validate, send own [`HelloEnvelope`]
 //! 4. Split stream into read/write halves, yield [`WsFramedStream`] via [`StreamListener`]
+//!
+//! The `app_id` check happens during the hello exchange: a mismatch closes
+//! the socket with close code 4001 so the remote sees a specific reason. A
+//! missing or malformed hello closes with code 4002.
 //!
 //! # Heartbeat
 //!
-//! After the handshake, a background task sends WebSocket Ping frames at
-//! `WsConfig::ping_interval` on the write half. The read half updates a
+//! After the hello exchange, a background task sends WebSocket Ping frames
+//! at `WsConfig::ping_interval` on the write half. The read half updates a
 //! shared `last_pong` timestamp when it receives a Pong. The heartbeat task
 //! checks this timestamp on each ping cycle and closes the connection if
 //! `pong_timeout` has been exceeded.
@@ -35,19 +39,20 @@ use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::network::{NetworkProvider, PeerAddr};
-
-use super::{
-    resolve_dial_addr, FramedStream, Handshake, StreamListener, StreamTransport, TransportError,
-    WsConfig, PROTOCOL_VERSION,
+use crate::session::hello::{
+    HelloEnvelope, HelloKind, PeerIdentity, CLOSE_APP_MISMATCH, CLOSE_HELLO_PROTOCOL, HELLO_TIMEOUT,
 };
 
-/// Handshake timeout — maximum time to wait for handshake exchange.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use super::{
+    resolve_dial_addr, FramedStream, StreamListener, StreamTransport, TransportError, WsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // WebSocketTransport
@@ -84,19 +89,21 @@ impl<N: NetworkProvider + 'static> WebSocketTransport<N> {
         Self { network, config }
     }
 
-    /// Build the local handshake message using the network provider's identity.
+    /// Build the local hello envelope from the network provider's identity.
     ///
-    /// Phase 1 of RFC 017: the WebSocket handshake still identifies the
-    /// local endpoint by its Tailscale stable ID (what the session layer
-    /// uses as `PeerState.id`). Phase 2 will introduce a v2 hello envelope
-    /// that carries `app_id` + `device_id` + `device_name`.
-    fn local_handshake(&self) -> Handshake {
+    /// RFC 017 Phase 2: the transport handshake is now a [`HelloEnvelope`]
+    /// carrying `app_id` + `device_id` + `device_name` + `os` + an escape
+    /// hatch `tailscale_id` used by the session layer to correlate the
+    /// link with its Layer 3 peer entry.
+    fn local_hello(&self) -> HelloEnvelope {
         let identity = self.network.local_identity();
-        Handshake {
-            peer_id: identity.tailscale_id,
-            capabilities: vec!["ws".to_string(), "binary".to_string()],
-            protocol_version: PROTOCOL_VERSION,
-        }
+        HelloEnvelope::new(PeerIdentity {
+            app_id: identity.app_id,
+            device_id: identity.device_id,
+            device_name: identity.device_name,
+            os: std::env::consts::OS.to_string(),
+            tailscale_id: identity.tailscale_id,
+        })
     }
 
     /// Build a tungstenite `WebSocketConfig` from our `WsConfig`.
@@ -106,51 +113,205 @@ impl<N: NetworkProvider + 'static> WebSocketTransport<N> {
         config.max_frame_size = Some(self.config.max_message_size);
         config
     }
+}
 
-    /// Perform the client-side handshake: send our handshake, receive theirs.
-    async fn client_handshake(
-        ws: &mut WebSocketStream<TcpStream>,
-        local_hs: &Handshake,
-    ) -> Result<Handshake, TransportError> {
-        // Send our handshake as a text frame
-        let hs_json = serde_json::to_string(local_hs)
-            .map_err(|e| TransportError::Serialize(e.to_string()))?;
-        ws.send(Message::Text(hs_json.into()))
-            .await
-            .map_err(|e| TransportError::HandshakeFailed(format!("send handshake: {e}")))?;
+/// Send a close frame to the remote and drop the stream.
+///
+/// Tries to deliver the close code so the peer can log a specific reason for
+/// the drop. Errors from the close path are swallowed — at this point the
+/// connection is already doomed and the caller will propagate a richer
+/// [`TransportError`].
+async fn close_ws_with_code(ws: &mut WebSocketStream<TcpStream>, code: u16, reason: &str) {
+    let close_frame = CloseFrame {
+        code: CloseCode::from(code),
+        reason: reason.to_string().into(),
+    };
+    let _ = ws.send(Message::Close(Some(close_frame))).await;
+    let _ = ws.close(None).await;
+}
 
-        // Receive peer's handshake
-        let remote_hs = receive_handshake(ws).await?;
-
-        // Validate protocol version
-        if remote_hs.protocol_version != PROTOCOL_VERSION {
-            return Err(TransportError::VersionMismatch {
-                local: PROTOCOL_VERSION,
-                remote: remote_hs.protocol_version,
-            });
+/// Receive and parse a [`HelloEnvelope`] from a WebSocket stream, applying a
+/// 5 second timeout.
+///
+/// Consumes frames from the stream until the first application-level message
+/// (Text or Binary) arrives. Control frames (Ping, Pong, Close) are handled
+/// transparently. Returns a specific `TransportError` for each failure mode
+/// so the caller can emit the right close code.
+async fn receive_hello(
+    ws: &mut WebSocketStream<TcpStream>,
+) -> Result<HelloEnvelope, TransportError> {
+    let fut = async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    return serde_json::from_str::<HelloEnvelope>(&text)
+                        .map_err(|e| TransportError::HelloMalformed(format!("parse hello: {e}")));
+                }
+                Some(Ok(Message::Binary(data))) => {
+                    return serde_json::from_slice::<HelloEnvelope>(&data)
+                        .map_err(|e| TransportError::HelloMalformed(format!("parse hello: {e}")));
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                Some(Ok(Message::Close(_))) => {
+                    return Err(TransportError::HelloMalformed(
+                        "peer closed connection before hello".to_string(),
+                    ));
+                }
+                Some(Err(e)) => {
+                    return Err(TransportError::HelloMalformed(format!(
+                        "receive hello: {e}"
+                    )));
+                }
+                None => {
+                    return Err(TransportError::HelloMalformed(
+                        "connection closed before hello".to_string(),
+                    ));
+                }
+            }
         }
+    };
 
-        Ok(remote_hs)
+    match tokio::time::timeout(HELLO_TIMEOUT, fut).await {
+        Ok(inner) => inner,
+        Err(_) => Err(TransportError::HelloTimeout),
     }
 }
 
-/// Receive and parse a handshake message from a WebSocket stream.
-async fn receive_handshake(
-    ws: &mut WebSocketStream<TcpStream>,
-) -> Result<Handshake, TransportError> {
-    match ws.next().await {
-        Some(Ok(Message::Text(text))) => serde_json::from_str::<Handshake>(&text)
-            .map_err(|e| TransportError::HandshakeFailed(format!("parse handshake: {e}"))),
-        Some(Ok(other)) => Err(TransportError::HandshakeFailed(format!(
-            "expected text frame for handshake, got: {other:?}"
-        ))),
-        Some(Err(e)) => Err(TransportError::HandshakeFailed(format!(
-            "receive handshake: {e}"
-        ))),
-        None => Err(TransportError::HandshakeFailed(
-            "connection closed before handshake".to_string(),
-        )),
+/// Validate a received hello against our own. Returns the remote identity
+/// on success, or a classified error that maps to an RFC 017 close code.
+fn validate_hello(
+    remote: HelloEnvelope,
+    local_app_id: &str,
+) -> Result<PeerIdentity, TransportError> {
+    if remote.kind != HelloKind::Hello {
+        return Err(TransportError::HelloMalformed(format!(
+            "unexpected hello kind: {:?}",
+            remote.kind
+        )));
     }
+    if remote.version < HelloEnvelope::MIN_SUPPORTED_VERSION {
+        return Err(TransportError::HelloMalformed(format!(
+            "unsupported hello version {} (minimum supported: {})",
+            remote.version,
+            HelloEnvelope::MIN_SUPPORTED_VERSION
+        )));
+    }
+    if remote.identity.app_id != local_app_id {
+        return Err(TransportError::AppMismatch {
+            local: local_app_id.to_string(),
+            remote: remote.identity.app_id.clone(),
+        });
+    }
+    Ok(remote.identity)
+}
+
+/// Serialise and send a [`HelloEnvelope`] as a text frame.
+async fn send_hello(
+    ws: &mut WebSocketStream<TcpStream>,
+    hello: &HelloEnvelope,
+) -> Result<(), TransportError> {
+    let payload =
+        serde_json::to_string(hello).map_err(|e| TransportError::Serialize(e.to_string()))?;
+    ws.send(Message::Text(payload.into()))
+        .await
+        .map_err(|e| TransportError::HandshakeFailed(format!("send hello: {e}")))
+}
+
+/// Client-side hello exchange: send ours first, read theirs, validate, then
+/// return the remote identity. On error, close the socket with the matching
+/// RFC 017 close code before returning the error.
+async fn client_hello_exchange(
+    ws: &mut WebSocketStream<TcpStream>,
+    local_hello: &HelloEnvelope,
+) -> Result<PeerIdentity, TransportError> {
+    // Step 1: send our hello first — this is envelope zero.
+    if let Err(e) = send_hello(ws, local_hello).await {
+        close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "local send failed").await;
+        return Err(e);
+    }
+
+    // Step 2: read remote hello (timed).
+    let remote = match receive_hello(ws).await {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            match &e {
+                TransportError::HelloTimeout => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "hello timeout").await;
+                }
+                TransportError::HelloMalformed(_) => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "malformed hello").await;
+                }
+                _ => {}
+            }
+            return Err(e);
+        }
+    };
+
+    // Step 3: validate against our expectations.
+    match validate_hello(remote, &local_hello.identity.app_id) {
+        Ok(identity) => Ok(identity),
+        Err(e) => {
+            match &e {
+                TransportError::AppMismatch { .. } => {
+                    close_ws_with_code(ws, CLOSE_APP_MISMATCH, "app mismatch").await;
+                }
+                TransportError::HelloMalformed(_) => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "bad hello").await;
+                }
+                _ => {}
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Server-side hello exchange: read theirs first, validate, then send ours.
+/// On error, close the socket with the matching RFC 017 close code.
+async fn server_hello_exchange(
+    ws: &mut WebSocketStream<TcpStream>,
+    local_hello: &HelloEnvelope,
+) -> Result<PeerIdentity, TransportError> {
+    // Step 1: read remote hello (timed).
+    let remote = match receive_hello(ws).await {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            match &e {
+                TransportError::HelloTimeout => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "hello timeout").await;
+                }
+                TransportError::HelloMalformed(_) => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "malformed hello").await;
+                }
+                _ => {}
+            }
+            return Err(e);
+        }
+    };
+
+    // Step 2: validate against our expectations.
+    let identity = match validate_hello(remote, &local_hello.identity.app_id) {
+        Ok(identity) => identity,
+        Err(e) => {
+            match &e {
+                TransportError::AppMismatch { .. } => {
+                    close_ws_with_code(ws, CLOSE_APP_MISMATCH, "app mismatch").await;
+                }
+                TransportError::HelloMalformed(_) => {
+                    close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "bad hello").await;
+                }
+                _ => {}
+            }
+            return Err(e);
+        }
+    };
+
+    // Step 3: reply with our hello.
+    if let Err(e) = send_hello(ws, local_hello).await {
+        close_ws_with_code(ws, CLOSE_HELLO_PROTOCOL, "local send failed").await;
+        return Err(e);
+    }
+
+    Ok(identity)
 }
 
 impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
@@ -175,25 +336,43 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                 .await
                 .map_err(|e| TransportError::ConnectFailed(format!("ws upgrade: {e}")))?;
 
-        // Step 3: Exchange handshake (with timeout)
-        let local_hs = self.local_handshake();
-        let remote_hs = tokio::time::timeout(
-            HANDSHAKE_TIMEOUT,
-            Self::client_handshake(&mut ws, &local_hs),
-        )
-        .await
-        .map_err(|_| TransportError::Timeout("handshake timed out".to_string()))??;
+        // Step 3: Hello exchange (RFC 017 §8)
+        let local_hello = self.local_hello();
+        let remote_identity = match client_hello_exchange(&mut ws, &local_hello).await {
+            Ok(identity) => identity,
+            Err(e) => {
+                match &e {
+                    TransportError::AppMismatch { local, remote } => {
+                        tracing::info!(
+                            local_app_id = %local,
+                            remote_app_id = %remote,
+                            "ws: closing connection — app_id mismatch"
+                        );
+                    }
+                    TransportError::HelloTimeout => {
+                        tracing::warn!("ws: hello timeout on outgoing connection");
+                    }
+                    TransportError::HelloMalformed(msg) => {
+                        tracing::warn!(error = %msg, "ws: malformed hello on outgoing connection");
+                    }
+                    _ => {}
+                }
+                return Err(e);
+            }
+        };
 
         tracing::info!(
-            remote_peer = %remote_hs.peer_id,
-            remote_version = remote_hs.protocol_version,
-            "ws: connected"
+            remote_device_id = %remote_identity.device_id,
+            remote_device_name = %remote_identity.device_name,
+            remote_tailscale_id = %remote_identity.tailscale_id,
+            "ws: connected (hello exchanged)"
         );
 
         // Step 4: Build framed stream with split read/write halves
         Ok(WsFramedStream::new(
             ws,
-            remote_hs.peer_id,
+            remote_identity.tailscale_id.clone(),
+            Some(remote_identity),
             dial_addr,
             self.config.ping_interval,
             self.config.pong_timeout,
@@ -213,7 +392,7 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
 
         // Step 2: Spawn accept loop that upgrades each connection to WS
         let (tx, rx) = tokio::sync::mpsc::channel::<WsFramedStream>(64);
-        let local_hs = self.local_handshake();
+        let local_hello = self.local_hello();
         let ping_interval = self.config.ping_interval;
         let pong_timeout = self.config.pong_timeout;
         let ws_config = self.ws_protocol_config();
@@ -223,7 +402,7 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                 match tcp_listener.incoming.recv().await {
                     Some(incoming) => {
                         let tx = tx.clone();
-                        let local_hs = local_hs.clone();
+                        let local_hello = local_hello.clone();
                         let remote_addr = incoming.remote_addr.clone();
                         let ws_config = ws_config;
 
@@ -245,39 +424,57 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                                 }
                             };
 
-                            // Server-side handshake (with timeout)
-                            let remote_hs = match tokio::time::timeout(
-                                HANDSHAKE_TIMEOUT,
-                                server_handshake_standalone(&mut ws, &local_hs),
-                            )
-                            .await
+                            // Server-side hello exchange (with timeout)
+                            let remote_identity = match server_hello_exchange(&mut ws, &local_hello)
+                                .await
                             {
-                                Ok(Ok(hs)) => hs,
-                                Ok(Err(e)) => {
-                                    tracing::warn!(
-                                        remote = %remote_addr,
-                                        "ws: handshake failed: {e}"
-                                    );
-                                    return;
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        remote = %remote_addr,
-                                        "ws: handshake timed out"
-                                    );
+                                Ok(identity) => identity,
+                                Err(e) => {
+                                    match &e {
+                                        TransportError::AppMismatch { local, remote } => {
+                                            tracing::info!(
+                                                remote_addr = %remote_addr,
+                                                local_app_id = %local,
+                                                remote_app_id = %remote,
+                                                "ws: closing incoming connection — app_id mismatch"
+                                            );
+                                        }
+                                        TransportError::HelloTimeout => {
+                                            tracing::warn!(
+                                                remote_addr = %remote_addr,
+                                                "ws: hello timeout on incoming connection"
+                                            );
+                                        }
+                                        TransportError::HelloMalformed(msg) => {
+                                            tracing::warn!(
+                                                remote_addr = %remote_addr,
+                                                error = %msg,
+                                                "ws: malformed hello on incoming connection"
+                                            );
+                                        }
+                                        _ => {
+                                            tracing::warn!(
+                                                remote_addr = %remote_addr,
+                                                "ws: hello exchange failed: {e}"
+                                            );
+                                        }
+                                    }
                                     return;
                                 }
                             };
 
                             tracing::info!(
-                                remote_peer = %remote_hs.peer_id,
+                                remote_device_id = %remote_identity.device_id,
+                                remote_device_name = %remote_identity.device_name,
+                                remote_tailscale_id = %remote_identity.tailscale_id,
                                 remote_addr = %remote_addr,
-                                "ws: accepted connection"
+                                "ws: accepted connection (hello exchanged)"
                             );
 
                             let stream = WsFramedStream::new(
                                 ws,
-                                remote_hs.peer_id,
+                                remote_identity.tailscale_id.clone(),
+                                Some(remote_identity),
                                 remote_addr,
                                 ping_interval,
                                 pong_timeout,
@@ -298,32 +495,6 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
 
         Ok(StreamListener::new(rx, port))
     }
-}
-
-/// Standalone server-side handshake (non-generic, used in spawned tasks).
-async fn server_handshake_standalone(
-    ws: &mut WebSocketStream<TcpStream>,
-    local_hs: &Handshake,
-) -> Result<Handshake, TransportError> {
-    // Receive peer's handshake first
-    let remote_hs = receive_handshake(ws).await?;
-
-    // Validate protocol version
-    if remote_hs.protocol_version != PROTOCOL_VERSION {
-        return Err(TransportError::VersionMismatch {
-            local: PROTOCOL_VERSION,
-            remote: remote_hs.protocol_version,
-        });
-    }
-
-    // Send our handshake
-    let hs_json =
-        serde_json::to_string(local_hs).map_err(|e| TransportError::Serialize(e.to_string()))?;
-    ws.send(Message::Text(hs_json.into()))
-        .await
-        .map_err(|e| TransportError::HandshakeFailed(format!("send handshake: {e}")))?;
-
-    Ok(remote_hs)
 }
 
 // ---------------------------------------------------------------------------
@@ -347,8 +518,11 @@ pub struct WsFramedStream {
     write: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
     /// Read half of the WebSocket stream, owned exclusively by recv().
     read: SplitStream<WebSocketStream<TcpStream>>,
-    /// Remote peer ID (from handshake).
+    /// Remote peer's Tailscale stable ID — the session layer routes by this.
+    /// Derived from the hello envelope's `identity.tailscale_id`.
     remote_peer_id: String,
+    /// Remote peer identity from the hello envelope (RFC 017 §8).
+    remote_identity: Option<PeerIdentity>,
     /// Remote address string.
     remote_addr: String,
     /// Handle to the heartbeat task (aborted on close/drop).
@@ -389,6 +563,7 @@ impl WsFramedStream {
     fn new(
         ws: WebSocketStream<TcpStream>,
         remote_peer_id: String,
+        remote_identity: Option<PeerIdentity>,
         remote_addr: String,
         ping_interval: Duration,
         pong_timeout: Duration,
@@ -419,6 +594,7 @@ impl WsFramedStream {
             write,
             read,
             remote_peer_id,
+            remote_identity,
             remote_addr,
             heartbeat_handle: Some(heartbeat_handle),
             last_pong,
@@ -426,9 +602,20 @@ impl WsFramedStream {
         }
     }
 
-    /// Get the remote peer ID (from the transport handshake).
+    /// Get the remote peer's Tailscale stable ID (from the hello envelope).
+    ///
+    /// This is the session layer's routing key. For the application-visible
+    /// device identifier, use [`remote_identity().device_id`](Self::remote_identity).
     pub fn remote_peer_id(&self) -> &str {
         &self.remote_peer_id
+    }
+
+    /// Get the full remote [`PeerIdentity`] advertised in the hello envelope.
+    ///
+    /// Returns `None` only in test fixtures that synthesise a stream without
+    /// running the hello exchange — production streams always have this.
+    pub fn remote_identity(&self) -> Option<&PeerIdentity> {
+        self.remote_identity.as_ref()
     }
 }
 

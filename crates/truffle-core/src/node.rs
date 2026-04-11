@@ -78,12 +78,33 @@ pub struct NamespacedMessage {
 /// This is a simplified projection of the internal [`PeerState`] that hides
 /// session-layer internals. Applications use this to display peer lists and
 /// resolve peer IDs for `send()` / `open_tcp()`.
+///
+/// RFC 017 introduced `device_id` and `device_name` derived from the hello
+/// envelope — these are populated once the WebSocket link comes up. Before
+/// that, they fall back to the legacy Tailscale ID / hostname pair so
+/// application code has something to display even for not-yet-connected
+/// peers.
 #[derive(Debug, Clone)]
 pub struct Peer {
-    /// Stable node ID.
+    /// Legacy per-peer ID. Kept for back-compat with call sites that
+    /// destructure `peer.id`; new code should prefer [`device_id`](Self::device_id)
+    /// directly. Equal to `device_id` once the hello has landed; equal to
+    /// the Tailscale stable ID beforehand.
     pub id: String,
-    /// Human-readable name (hostname).
+    /// Legacy name (the Layer 3 Tailscale hostname — the *slug*). New code
+    /// should prefer [`device_name`](Self::device_name).
     pub name: String,
+    /// Stable per-device ULID (RFC 017 §5.4) from the hello envelope.
+    /// Falls back to the Tailscale stable ID until the hello handshake
+    /// completes.
+    pub device_id: String,
+    /// Human-readable device name from the hello envelope (original
+    /// Unicode form, NOT the slug). Falls back to the hostname until the
+    /// hello completes.
+    pub device_name: String,
+    /// Tailscale stable node ID — escape hatch for diagnostics and the
+    /// transport routing key.
+    pub tailscale_id: String,
     /// Network IP address.
     pub ip: IpAddr,
     /// Whether the peer is online (from Layer 3).
@@ -92,7 +113,8 @@ pub struct Peer {
     pub ws_connected: bool,
     /// Connection type description (e.g., `"direct"` or `"relay:ord"`).
     pub connection_type: String,
-    /// Operating system, if known.
+    /// Operating system, if known. Prefers the hello envelope's value
+    /// and falls back to Layer 3.
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
@@ -100,14 +122,30 @@ pub struct Peer {
 
 impl From<PeerState> for Peer {
     fn from(s: PeerState) -> Self {
+        let (device_id, device_name, os) = match s.identity.as_ref() {
+            Some(identity) => (
+                identity.device_id.clone(),
+                identity.device_name.clone(),
+                Some(identity.os.clone()),
+            ),
+            None => (s.id.clone(), s.name.clone(), s.os.clone()),
+        };
+        let legacy_id = s
+            .identity
+            .as_ref()
+            .map(|i| i.device_id.clone())
+            .unwrap_or_else(|| s.id.clone());
         Self {
-            id: s.id,
+            id: legacy_id,
             name: s.name,
+            device_id,
+            device_name,
+            tailscale_id: s.id,
             ip: s.ip,
             online: s.online,
             ws_connected: s.ws_connected,
             connection_type: s.connection_type,
-            os: s.os,
+            os,
             last_seen: s.last_seen,
         }
     }
@@ -394,30 +432,84 @@ impl<N: NetworkProvider + 'static> Node<N> {
         self.session.on_peer_change()
     }
 
-    /// Resolve a peer identifier (name or Tailscale ID) to the canonical
-    /// Tailscale stable node ID.
+    /// Resolve a peer identifier to the canonical per-device ULID
+    /// (`device_id`) from the RFC 017 hello envelope.
     ///
-    /// Returns the input unchanged if it already matches a peer's `id`.
-    /// Falls back to searching by `name` (hostname).
+    /// Accepts any of:
+    /// - the stable `device_id` (full ULID)
+    /// - a unique prefix of the `device_id` (at least 4 characters; must
+    ///   match exactly one known peer)
+    /// - the human-readable `device_name` from the hello
+    /// - the Layer 3 Tailscale hostname (the sanitised slug) — legacy
+    /// - the Tailscale stable ID — escape hatch for diagnostics
+    ///
+    /// The returned string is always a `device_id`, so it is safe to feed
+    /// back into `Node::send` or any other method that takes a peer
+    /// identifier.
     pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
         let peers = self.session.peers().await;
-        peers
-            .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
-            .map(|p| p.id.clone())
-            .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))
+
+        // Direct matches first — device_id, device_name, hostname,
+        // tailscale_id — so deterministic inputs always take the fast path.
+        for p in &peers {
+            if let Some(identity) = p.identity.as_ref() {
+                if identity.device_id == peer_id || identity.device_name == peer_id {
+                    return Ok(identity.device_id.clone());
+                }
+            }
+            if p.id == peer_id || p.name == peer_id {
+                // `p.id` is the tailscale_id. If we have a richer identity,
+                // return its device_id; otherwise fall back to the routing
+                // key so the caller still has something usable.
+                return Ok(p
+                    .identity
+                    .as_ref()
+                    .map(|i| i.device_id.clone())
+                    .unwrap_or_else(|| p.id.clone()));
+            }
+        }
+
+        // Prefix match on device_id (require at least 4 chars and a single
+        // unambiguous hit). This matches the CLI affordance of typing just
+        // the first few characters of a ULID.
+        if peer_id.len() >= 4 {
+            let prefix_hits: Vec<&PeerState> = peers
+                .iter()
+                .filter(|p| {
+                    p.identity
+                        .as_ref()
+                        .map(|i| i.device_id.starts_with(peer_id))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if prefix_hits.len() == 1 {
+                if let Some(identity) = prefix_hits[0].identity.as_ref() {
+                    return Ok(identity.device_id.clone());
+                }
+            }
+        }
+
+        Err(NodeError::PeerNotFound(peer_id.to_string()))
     }
 
     // ── Diagnostics ──────────────────────────────────────────────────────
 
     /// Ping a peer via the network layer.
     ///
-    /// Resolves the peer ID to an IP address and pings via Layer 3.
+    /// Resolves the peer ID to an IP address and pings via Layer 3. Accepts
+    /// the same identifier forms as [`resolve_peer_id`](Self::resolve_peer_id).
     pub async fn ping(&self, peer_id: &str) -> Result<PingResult, NodeError> {
         let peers = self.session.peers().await;
         let peer = peers
             .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
+            .find(|p| {
+                p.id == peer_id
+                    || p.name == peer_id
+                    || p.identity
+                        .as_ref()
+                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                        .unwrap_or(false)
+            })
             .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
 
         let addr = peer.ip.to_string();
@@ -545,13 +637,21 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Open a raw TCP stream to a peer on the given port.
     ///
     /// Resolves the peer ID to an IP address via the session's peer list,
-    /// then dials via the network layer. Returns a plain `TcpStream` for
-    /// byte-oriented I/O.
+    /// then dials via the network layer. Accepts the same identifier
+    /// forms as [`resolve_peer_id`](Self::resolve_peer_id). Returns a
+    /// plain `TcpStream` for byte-oriented I/O.
     pub async fn open_tcp(&self, peer_id: &str, port: u16) -> Result<TcpStream, NodeError> {
         let peers = self.session.peers().await;
         let peer = peers
             .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
+            .find(|p| {
+                p.id == peer_id
+                    || p.name == peer_id
+                    || p.identity
+                        .as_ref()
+                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                        .unwrap_or(false)
+            })
             .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
 
         let addr = peer.ip.to_string();
@@ -969,7 +1069,9 @@ mod tests {
             Self {
                 identity: NodeIdentity {
                     app_id: "test".to_string(),
-                    device_id: format!("device-{id}"),
+                    // RFC 017: align `device_id` with fixture input so
+                    // tests can reason about a single identifier.
+                    device_id: id.to_string(),
                     device_name: format!("Test Node {id}"),
                     tailscale_hostname: format!("truffle-test-{id}"),
                     tailscale_id: id.to_string(),
@@ -1146,7 +1248,7 @@ mod tests {
 
         let identity = node.local_info();
         assert_eq!(identity.tailscale_id, "node-1");
-        assert_eq!(identity.device_id, "device-node-1");
+        assert_eq!(identity.device_id, "node-1");
         assert!(identity.tailscale_hostname.contains("node-1"));
     }
 
@@ -1425,5 +1527,124 @@ mod tests {
         }
         // If send fails due to loopback WS peer-id mismatch, that's expected
         // in unit tests. The important thing is no panics.
+    }
+
+    // ── RFC 017 Phase 2: resolve_peer_id ─────────────────────────────
+
+    /// Helper: inject a peer entry into the session registry and then
+    /// stamp a synthetic RFC 017 identity on it so `resolve_peer_id`
+    /// has something to look up. This skips the real hello exchange.
+    async fn inject_peer_with_identity(
+        node: &Node<MockNetworkProvider>,
+        event_tx: &broadcast::Sender<NetworkPeerEvent>,
+        tailscale_id: &str,
+        device_id: &str,
+        device_name: &str,
+    ) {
+        let peer = make_loopback_peer(tailscale_id);
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let identity = crate::session::PeerIdentity {
+            app_id: "test".into(),
+            device_id: device_id.into(),
+            device_name: device_name.into(),
+            os: "linux".into(),
+            tailscale_id: tailscale_id.into(),
+        };
+        assert!(
+            node.session
+                .test_stamp_identity(tailscale_id, identity)
+                .await,
+            "peer {tailscale_id} should exist in session registry before stamping identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_id() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+            "Alice MacBook",
+        )
+        .await;
+
+        let resolved = node
+            .resolve_peer_id("01HZZZZZZZZZZZZZZZZZZZZZZZ")
+            .await
+            .unwrap();
+        assert_eq!(resolved, "01HZZZZZZZZZZZZZZZZZZZZZZZ");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_name() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HXYZXYZXYZXYZXYZXYZXYZXY",
+            "Bob's Mac",
+        )
+        .await;
+
+        let resolved = node.resolve_peer_id("Bob's Mac").await.unwrap();
+        assert_eq!(resolved, "01HXYZXYZXYZXYZXYZXYZXYZXY");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_id_prefix() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HXYZXYZXYZXYZXYZXYZXYZXY",
+            "laptop",
+        )
+        .await;
+
+        // Prefix match — 4 chars is the minimum the implementation
+        // accepts.
+        let resolved = node.resolve_peer_id("01HX").await.unwrap();
+        assert_eq!(resolved, "01HXYZXYZXYZXYZXYZXYZXYZXY");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_tailscale_id_legacy() {
+        // Escape hatch: resolving by the Tailscale stable ID should
+        // still work and return the device_id (or the tailscale_id as
+        // fallback when no identity is populated).
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-legacy",
+            "01HLEGACY0000000000000000X",
+            "legacy box",
+        )
+        .await;
+
+        let resolved = node.resolve_peer_id("tailscale-legacy").await.unwrap();
+        assert_eq!(resolved, "01HLEGACY0000000000000000X");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_unknown() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
+        let result = node.resolve_peer_id("nope").await;
+        assert!(matches!(result, Err(NodeError::PeerNotFound(_))));
     }
 }

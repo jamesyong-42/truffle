@@ -130,7 +130,8 @@ mod tests {
             Self {
                 identity: NodeIdentity {
                     app_id: "test".to_string(),
-                    device_id: format!("device-{id}"),
+                    // RFC 017: align `device_id` with fixture input.
+                    device_id: id.to_string(),
                     device_name: format!("Test Node {id}"),
                     tailscale_hostname: format!("truffle-test-{id}"),
                     tailscale_id: id.to_string(),

@@ -257,13 +257,15 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
 
     /// Build the local handshake message using the network provider's identity.
     ///
-    /// Phase 1 of RFC 017: QUIC handshake identifies the local endpoint by
-    /// its Tailscale stable ID (what the session layer uses). Phase 2 will
-    /// migrate to a v2 hello envelope carrying `device_id`.
+    /// RFC 017 Phase 2: the QUIC handshake now identifies the local endpoint
+    /// by its stable `device_id` (ULID) rather than the Tailscale stable ID.
+    /// The WebSocket transport carries a richer [`HelloEnvelope`] — QUIC is
+    /// not yet plumbed through the session layer, so it keeps the old
+    /// [`Handshake`] shape and just swaps the ID.
     fn local_handshake(&self) -> Handshake {
         let identity = self.network.local_identity();
         Handshake {
-            peer_id: identity.tailscale_id,
+            peer_id: identity.device_id,
             capabilities: vec!["quic".to_string(), "binary".to_string()],
             protocol_version: PROTOCOL_VERSION,
         }

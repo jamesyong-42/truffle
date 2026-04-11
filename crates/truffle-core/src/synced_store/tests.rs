@@ -35,7 +35,10 @@ impl MockNetworkProvider {
         Self {
             identity: NodeIdentity {
                 app_id: "test".to_string(),
-                device_id: format!("device-{id}"),
+                // RFC 017: fixtures align `device_id` with the input `id`
+                // so tests that call `node.synced_store(...)` can reason
+                // about `store.device_id()` directly.
+                device_id: id.to_string(),
                 device_name: format!("Test Node {id}"),
                 tailscale_hostname: format!("truffle-test-{id}"),
                 tailscale_id: id.to_string(),

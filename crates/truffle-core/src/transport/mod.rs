@@ -378,6 +378,27 @@ pub enum TransportError {
         remote: u32,
     },
 
+    /// The remote peer did not produce a hello envelope within the timeout
+    /// (RFC 017 §8).
+    #[error("hello timeout: no envelope received within 5s")]
+    HelloTimeout,
+
+    /// The remote peer sent a hello envelope that did not parse as a valid
+    /// [`HelloEnvelope`](crate::session::HelloEnvelope), or used a version
+    /// we do not support (RFC 017 §8, close code 4002).
+    #[error("hello protocol error: {0}")]
+    HelloMalformed(String),
+
+    /// The remote peer advertised a different `app_id` in its hello envelope
+    /// than we did (RFC 017 §8, close code 4001).
+    #[error("app mismatch: local={local}, remote={remote}")]
+    AppMismatch {
+        /// Our local `app_id`.
+        local: String,
+        /// The `app_id` advertised by the remote peer.
+        remote: String,
+    },
+
     /// The connection was closed unexpectedly.
     #[error("connection closed: {0}")]
     ConnectionClosed(String),

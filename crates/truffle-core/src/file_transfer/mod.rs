@@ -289,10 +289,10 @@ async fn pull_file<N: NetworkProvider + 'static>(
 
     let start = Instant::now();
     let token = uuid::Uuid::new_v4().to_string();
-    // Phase 1 of RFC 017: file transfer still tags itself with the local
-    // Tailscale stable ID. Phase 2 will migrate to `device_id` once the
-    // hello handshake carries it between peers.
-    let requester_id = node.local_info().tailscale_id;
+    // RFC 017 §8: use the stable `device_id` (ULID) as the requester
+    // identifier. The hello handshake now carries this between peers so
+    // the receiving side can match requester to sender.
+    let requester_id = node.local_info().device_id;
 
     // 0. Resolve peer_id to the canonical Tailscale node ID.
     let peer_id = node

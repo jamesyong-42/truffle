@@ -106,10 +106,10 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         store_id: &str,
         backend: Arc<dyn StoreBackend>,
     ) -> Arc<Self> {
-        // Phase 1 of RFC 017: synced store still uses the Tailscale stable
-        // ID as the per-device key. Phase 2 will switch to `device_id`
-        // (the ULID) once it propagates via the hello handshake.
-        let device_id = node.local_info().tailscale_id;
+        // RFC 017 §8: synced store slices are keyed by the stable
+        // `device_id` (ULID), which is propagated between peers via the
+        // WebSocket hello handshake.
+        let device_id = node.local_info().device_id;
         let (event_tx, _) = broadcast::channel(256);
         let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
 
