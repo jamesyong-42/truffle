@@ -74,7 +74,9 @@ impl NapiFileTransfer {
 impl NapiFileTransfer {
     /// Send a file to a peer.
     ///
-    /// Resolves with transfer result on success.
+    /// `peer_id` is the recipient's stable `device_id` (RFC 017). The
+    /// underlying `resolve_peer_id` also accepts device names, prefixes,
+    /// and legacy Tailscale IDs. Resolves with transfer result on success.
     #[napi]
     pub async fn send_file(
         &self,

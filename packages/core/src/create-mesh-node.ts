@@ -2,12 +2,38 @@ import { execSync } from 'node:child_process';
 import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
 import { resolveSidecarPath } from './sidecar.js';
 
+/**
+ * Options for {@link createMeshNode}. RFC 017 shape — `appId` is required,
+ * `deviceName` / `deviceId` are optional overrides that the underlying
+ * `NodeBuilder` defaults when absent (OS hostname / auto-generated ULID).
+ */
 export interface CreateMeshNodeOptions {
-  /** Node name (becomes the Tailscale hostname prefix). */
-  name: string;
+  /**
+   * Required. Application namespace identifier. Two apps with different
+   * `appId`s cannot see each other as peers.
+   *
+   * Format: `^[a-z][a-z0-9-]{1,31}$` (lowercase letters, digits, hyphens,
+   * 2–32 characters, must start with a letter).
+   */
+  appId: string;
+  /**
+   * Optional human-readable device name. Defaults to the OS hostname.
+   * May contain any Unicode characters; truffle derives a Tailscale-safe
+   * hostname from this automatically.
+   */
+  deviceName?: string;
+  /**
+   * Optional stable per-device ULID. If omitted, one is generated on
+   * first run and persisted inside `stateDir`. Provide your own if you
+   * want to federate identity with an existing user system.
+   */
+  deviceId?: string;
   /** Override sidecar path. If omitted, auto-resolved. */
   sidecarPath?: string;
-  /** State directory for Tailscale. */
+  /**
+   * State directory for Tailscale. Defaults to
+   * `{userDataDir}/truffle/{appId}/{slug(deviceName)}`.
+   */
   stateDir?: string;
   /** Tailscale auth key (for headless/CI setups). */
   authKey?: string;
@@ -58,17 +84,20 @@ function defaultOpenUrl(url: string): void {
  * @example
  * ```ts
  * const node = await createMeshNode({
- *   name: 'my-app',
+ *   appId: 'playground',
+ *   deviceName: 'alice-mbp',
  *   onPeerChange: (event) => console.log('Peer event:', event),
  * });
  *
  * const peers = await node.getPeers();
- * await node.send('peer-id', 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
+ * await node.send(peers[0].deviceId, 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
  * ```
  */
 export async function createMeshNode(options: CreateMeshNodeOptions): Promise<NapiNode> {
   const {
-    name,
+    appId,
+    deviceName,
+    deviceId,
     autoAuth = true,
     openUrl: customOpenUrl,
     onAuthRequired,
@@ -101,7 +130,9 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
   });
 
   const config: NapiNodeConfig = {
-    name,
+    appId,
+    deviceName,
+    deviceId,
     sidecarPath: resolvedSidecarPath,
     stateDir,
     authKey,

@@ -48,10 +48,20 @@ pub async fn start<R: Runtime>(
         return Err("Node is already running. Call `stop` first.".to_string());
     }
 
+    // RFC 017: app_id is required and validated; device_name /
+    // device_id are optional overrides that the builder defaults when
+    // absent (OS hostname / auto-generated ULID).
     let mut builder = NodeBuilder::default()
-        .name(&config.name)
+        .app_id(&config.app_id)
+        .map_err(|e| e.to_string())?
         .sidecar_path(&config.sidecar_path);
 
+    if let Some(ref device_name) = config.device_name {
+        builder = builder.device_name(device_name);
+    }
+    if let Some(ref device_id) = config.device_id {
+        builder = builder.device_id(device_id).map_err(|e| e.to_string())?;
+    }
     if let Some(ref dir) = config.state_dir {
         builder = builder.state_dir(dir);
     }

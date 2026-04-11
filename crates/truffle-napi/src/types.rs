@@ -3,6 +3,11 @@
 //! All structs here use `#[napi(object)]` so they are passed as plain JS
 //! objects (not class instances). They mirror the public types from
 //! truffle-core but flatten/simplify for JS ergonomics.
+//!
+//! RFC 017 identity model: application code sees peers by `device_id`
+//! (stable ULID from the hello envelope) and `device_name` (human-readable
+//! Unicode). The Tailscale stable ID and hostname are still available as
+//! escape hatches for diagnostics.
 
 use napi_derive::napi;
 
@@ -10,15 +15,24 @@ use napi_derive::napi;
 // Node configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for starting a Node.
+/// Configuration for starting a Node (RFC 017 §7 shape).
 #[napi(object)]
 pub struct NapiNodeConfig {
-    /// Human-readable node name (used as Tailscale hostname).
-    pub name: String,
+    /// Application namespace identifier. Required. Must match
+    /// `^[a-z][a-z0-9-]{1,31}$`; validated on the Rust side.
+    pub app_id: String,
+    /// Optional human-readable device name. Defaults to the OS hostname.
+    /// May contain any Unicode characters; the Tailscale hostname is
+    /// derived automatically.
+    pub device_name: Option<String>,
+    /// Optional stable ULID override. Auto-generated (and persisted) when
+    /// omitted.
+    pub device_id: Option<String>,
+    /// Tailscale state directory. Defaults to
+    /// `{userDataDir}/truffle/{app_id}/{slug(device_name)}`.
+    pub state_dir: Option<String>,
     /// Path to the Go sidecar binary.
     pub sidecar_path: String,
-    /// Tailscale state directory. Defaults to `/tmp/truffle-{name}`.
-    pub state_dir: Option<String>,
     /// Tailscale auth key for headless authentication.
     pub auth_key: Option<String>,
     /// Whether the node is ephemeral (auto-removed from tailnet on shutdown).
@@ -31,15 +45,19 @@ pub struct NapiNodeConfig {
 // Node identity
 // ---------------------------------------------------------------------------
 
-/// Identity of the local node.
+/// Identity of the local node (RFC 017 §7.2).
 #[napi(object)]
 pub struct NapiNodeIdentity {
-    /// Stable node ID.
-    pub id: String,
-    /// Hostname on the network.
-    pub hostname: String,
-    /// Human-readable display name.
-    pub name: String,
+    /// Application namespace identifier.
+    pub app_id: String,
+    /// Stable per-device ULID. Primary key for device identity.
+    pub device_id: String,
+    /// Original (unsanitised) device name, as passed by the application.
+    pub device_name: String,
+    /// The Tailscale hostname (`truffle-{app_id}-{slug}`). Debug use only.
+    pub tailscale_hostname: String,
+    /// Tailscale stable node ID. Escape hatch for diagnostics.
+    pub tailscale_id: String,
     /// DNS name on the tailnet, if available.
     pub dns_name: Option<String>,
     /// Tailscale IP address as a string, if available.
@@ -50,13 +68,13 @@ pub struct NapiNodeIdentity {
 // Peer
 // ---------------------------------------------------------------------------
 
-/// A peer as seen by application code.
+/// A peer as seen by application code (RFC 017 §7.3).
 #[napi(object)]
 pub struct NapiPeer {
-    /// Stable node ID.
-    pub id: String,
-    /// Human-readable name (hostname).
-    pub name: String,
+    /// Stable per-device ULID from the remote node. Primary key.
+    pub device_id: String,
+    /// Human-readable device name from the remote node.
+    pub device_name: String,
     /// Network IP address as a string.
     pub ip: String,
     /// Whether the peer is online (from Layer 3).
@@ -69,6 +87,8 @@ pub struct NapiPeer {
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
+    /// Tailscale stable ID. Escape hatch; most code should use `deviceId`.
+    pub tailscale_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +132,8 @@ pub struct NapiHealthInfo {
 pub struct NapiPeerEvent {
     /// Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required".
     pub event_type: String,
-    /// Peer ID (present for peer events, empty for auth_required).
+    /// Stable `device_id` (ULID) of the affected peer. Empty string for
+    /// `auth_required` events (no associated peer).
     pub peer_id: String,
     /// Full peer info (present for joined/updated events).
     pub peer: Option<NapiPeer>,
@@ -127,7 +148,7 @@ pub struct NapiPeerEvent {
 /// A message received on a specific namespace.
 #[napi(object)]
 pub struct NapiNamespacedMessage {
-    /// Stable node ID of the sender.
+    /// Sender's stable `device_id` (ULID) from the RFC 017 hello envelope.
     pub from: String,
     /// Namespace the message was sent on.
     pub namespace: String,
@@ -146,9 +167,9 @@ pub struct NapiNamespacedMessage {
 /// An incoming file offer from a remote peer.
 #[napi(object)]
 pub struct NapiFileOffer {
-    /// Stable node ID of the sending peer.
+    /// Sender's stable `device_id` (ULID) from the RFC 017 hello envelope.
     pub from_peer: String,
-    /// Human-readable name of the sending peer.
+    /// Human-readable device name of the sending peer.
     pub from_name: String,
     /// File name being offered.
     pub file_name: String,
@@ -197,7 +218,8 @@ pub struct NapiTransferProgress {
 /// A versioned slice of data owned by a single device.
 #[napi(object)]
 pub struct NapiSlice {
-    /// Device that owns this slice (stable node ID).
+    /// Owning device's stable `device_id` (ULID) from the RFC 017 hello
+    /// envelope.
     pub device_id: String,
     /// The data (JSON value).
     pub data: serde_json::Value,
@@ -212,7 +234,8 @@ pub struct NapiSlice {
 pub struct NapiStoreEvent {
     /// Event type: "local_changed", "peer_updated", "peer_removed".
     pub event_type: String,
-    /// Device ID (present for peer_updated/peer_removed events).
+    /// Stable `device_id` (ULID) of the affected device (present for
+    /// peer_updated / peer_removed events).
     pub device_id: Option<String>,
     /// Data payload (present for local_changed/peer_updated events).
     pub data: Option<serde_json::Value>,

@@ -3,6 +3,10 @@
 //! These types wrap truffle-core's internal types with `#[derive(Serialize)]`
 //! so they can be returned from Tauri commands as JSON. Core types intentionally
 //! do not derive Serialize, so we map them here at the plugin boundary.
+//!
+//! RFC 017: identity is exposed as `appId` / `deviceId` / `deviceName`.
+//! The Tailscale stable ID and hostname remain available as escape hatches
+//! (`tailscaleId`, `tailscaleHostname`) for diagnostics.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +18,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
-    /// Node display name (used as Tailscale hostname).
-    pub name: String,
+    /// Application namespace identifier. Required. Matches
+    /// `^[a-z][a-z0-9-]{1,31}$`.
+    pub app_id: String,
+    /// Optional human-readable device name. Defaults to OS hostname.
+    pub device_name: Option<String>,
+    /// Optional ULID override for the stable `device_id`.
+    pub device_id: Option<String>,
     /// Path to the Go sidecar binary.
     pub sidecar_path: String,
     /// Optional Tailscale state directory.
@@ -37,9 +46,11 @@ pub struct StartConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeIdentityJs {
-    pub id: String,
-    pub hostname: String,
-    pub name: String,
+    pub app_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub tailscale_hostname: String,
+    pub tailscale_id: String,
     pub dns_name: Option<String>,
     pub ip: Option<String>,
 }
@@ -47,9 +58,11 @@ pub struct NodeIdentityJs {
 impl From<truffle_core::network::NodeIdentity> for NodeIdentityJs {
     fn from(i: truffle_core::network::NodeIdentity) -> Self {
         Self {
-            id: i.id,
-            hostname: i.hostname,
-            name: i.name,
+            app_id: i.app_id,
+            device_id: i.device_id,
+            device_name: i.device_name,
+            tailscale_hostname: i.tailscale_hostname,
+            tailscale_id: i.tailscale_id,
             dns_name: i.dns_name,
             ip: i.ip.map(|a| a.to_string()),
         }
@@ -64,27 +77,29 @@ impl From<truffle_core::network::NodeIdentity> for NodeIdentityJs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerJs {
-    pub id: String,
-    pub name: String,
+    pub device_id: String,
+    pub device_name: String,
     pub ip: String,
     pub online: bool,
     pub ws_connected: bool,
     pub connection_type: String,
     pub os: Option<String>,
     pub last_seen: Option<String>,
+    pub tailscale_id: String,
 }
 
 impl From<truffle_core::Peer> for PeerJs {
     fn from(p: truffle_core::Peer) -> Self {
         Self {
-            id: p.id,
-            name: p.name,
+            device_id: p.device_id,
+            device_name: p.device_name,
             ip: p.ip.to_string(),
             online: p.online,
             ws_connected: p.ws_connected,
             connection_type: p.connection_type,
             os: p.os,
             last_seen: p.last_seen,
+            tailscale_id: p.tailscale_id,
         }
     }
 }
@@ -208,30 +223,40 @@ pub enum PeerEventJs {
 }
 
 /// Internal peer state, serialized for the frontend (used in PeerEventJs).
+///
+/// Matches the `PeerJs` shape so the frontend only deals with one peer
+/// type shape. Built via the core `Peer::from(PeerState)` conversion, which
+/// applies the RFC 017 identity fallback (device_id from hello, or
+/// Tailscale stable ID before the hello lands).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerStateJs {
-    pub id: String,
-    pub name: String,
+    pub device_id: String,
+    pub device_name: String,
     pub ip: String,
     pub online: bool,
     pub ws_connected: bool,
     pub connection_type: String,
     pub os: Option<String>,
     pub last_seen: Option<String>,
+    pub tailscale_id: String,
 }
 
 impl From<truffle_core::session::PeerState> for PeerStateJs {
     fn from(s: truffle_core::session::PeerState) -> Self {
+        // Delegate to the core `Peer` conversion so the identity fallback
+        // logic lives in one place.
+        let peer: truffle_core::Peer = s.into();
         Self {
-            id: s.id,
-            name: s.name,
-            ip: s.ip.to_string(),
-            online: s.online,
-            ws_connected: s.ws_connected,
-            connection_type: s.connection_type,
-            os: s.os,
-            last_seen: s.last_seen,
+            device_id: peer.device_id,
+            device_name: peer.device_name,
+            ip: peer.ip.to_string(),
+            online: peer.online,
+            ws_connected: peer.ws_connected,
+            connection_type: peer.connection_type,
+            os: peer.os,
+            last_seen: peer.last_seen,
+            tailscale_id: peer.tailscale_id,
         }
     }
 }
