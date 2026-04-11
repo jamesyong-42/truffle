@@ -125,6 +125,11 @@ impl AppId {
                 return false;
             }
         }
+        // Trailing hyphen is reserved (would produce ambiguous
+        // `truffle-{app_id}-{slug}` hostnames with double separators).
+        if bytes[bytes.len() - 1] == b'-' {
+            return false;
+        }
         true
     }
 
@@ -529,6 +534,11 @@ mod tests {
             ("foo.bar", "dots not allowed"),
             ("", "empty rejected"),
             ("-foo", "leading hyphen (does not start with a letter)"),
+            ("foo-", "trailing hyphen rejected"),
+            (
+                "a-very-long-valid-chars-",
+                "trailing hyphen rejected even mid-length",
+            ),
         ];
         for (input, reason) in invalid {
             assert!(

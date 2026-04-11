@@ -33,9 +33,22 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+// `std::sync::RwLock` is aliased to `StdRwLock` so the namespace_filters
+// lock — which is held only briefly for pure HashMap ops with no `.await`
+// points underneath — can stay sync. Keeping it sync lets
+// `Node::subscribe` remain non-async (required by the NAPI bridge, which
+// is called from Node.js's sync main thread with no tokio runtime in
+// scope) without the `try_write`-panic footgun that the previous
+// `tokio::sync::RwLock` implementation suffered from (see RFC 017 fix K).
+use std::sync::RwLock as StdRwLock;
 
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
+// The tokio RwLock is only used by the in-file test `MockNetworkProvider`
+// (see `#[cfg(test)] mod tests`); production code now uses the std
+// RwLock alias above for `namespace_filters`.
+#[cfg(test)]
+use tokio::sync::RwLock;
 
 use crate::envelope::codec::{EnvelopeCodec, JsonCodec};
 use crate::envelope::{Envelope, EnvelopeError};
@@ -230,7 +243,13 @@ pub struct Node<N: NetworkProvider + 'static> {
     #[allow(dead_code)]
     incoming_tx: broadcast::Sender<NamespacedMessage>,
     /// Per-namespace subscription channels.
-    namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
+    ///
+    /// Guarded by a `std::sync::RwLock` (not tokio) because the lock is
+    /// held only for quick HashMap operations with no `.await` points
+    /// underneath, and the `subscribe()` API has to be callable from
+    /// synchronous contexts (the NAPI bridge, which runs on Node.js's
+    /// main thread with no tokio runtime in scope).
+    namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     /// File transfer subsystem state.
     pub(crate) file_transfer_state: FileTransferState,
 }
@@ -247,8 +266,9 @@ impl<N: NetworkProvider + 'static> Node<N> {
         codec: Arc<dyn EnvelopeCodec>,
     ) -> Self {
         let (incoming_tx, _) = broadcast::channel(1024);
-        let namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let namespace_filters: Arc<
+            StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>,
+        > = Arc::new(StdRwLock::new(HashMap::new()));
 
         let node = Self {
             network,
@@ -273,7 +293,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         session: Arc<PeerRegistry<N>>,
         codec: Arc<dyn EnvelopeCodec>,
         incoming_tx: broadcast::Sender<NamespacedMessage>,
-        namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
+        namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     ) {
         let mut rx = session.subscribe();
 
@@ -301,7 +321,11 @@ impl<N: NetworkProvider + 'static> Node<N> {
                             let _ = incoming_tx.send(namespaced.clone());
 
                             // Route to namespace-specific subscriber if present.
-                            let filters = namespace_filters.read().await;
+                            // Sync read on the std RwLock: the critical section
+                            // is a HashMap lookup with no `.await` points.
+                            let filters = namespace_filters
+                                .read()
+                                .expect("namespace_filters std RwLock poisoned");
                             let _has_subscriber = filters.contains_key(&namespaced.namespace);
                             if let Some(tx) = filters.get(&namespaced.namespace) {
                                 let send_result = tx.send(namespaced);
@@ -615,14 +639,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
     pub fn subscribe(&self, namespace: &str) -> broadcast::Receiver<NamespacedMessage> {
         // Fast path: check if subscriber already exists (read lock).
         {
-            let filters = self.namespace_filters.blocking_lock_read();
+            let filters = self
+                .namespace_filters
+                .read()
+                .expect("namespace_filters std RwLock poisoned");
             if let Some(tx) = filters.get(namespace) {
                 return tx.subscribe();
             }
         }
 
         // Slow path: create a new channel for this namespace (write lock).
-        let mut filters = self.namespace_filters.blocking_lock_write();
+        let mut filters = self
+            .namespace_filters
+            .write()
+            .expect("namespace_filters std RwLock poisoned");
         // Double-check after acquiring write lock.
         if let Some(tx) = filters.get(namespace) {
             return tx.subscribe();
@@ -693,35 +723,6 @@ impl<N: NetworkProvider + 'static> Node<N> {
 }
 
 // ---------------------------------------------------------------------------
-// Blocking lock helpers for RwLock (used in sync subscribe())
-// ---------------------------------------------------------------------------
-
-/// Extension trait for using tokio RwLock in synchronous contexts within
-/// the subscribe() method (which cannot be async because it returns a
-/// Receiver, not a Future).
-trait RwLockBlockingExt<T> {
-    fn blocking_lock_read(&self) -> tokio::sync::RwLockReadGuard<'_, T>;
-    fn blocking_lock_write(&self) -> tokio::sync::RwLockWriteGuard<'_, T>;
-}
-
-impl<T> RwLockBlockingExt<T> for RwLock<T> {
-    fn blocking_lock_read(&self) -> tokio::sync::RwLockReadGuard<'_, T> {
-        // In an async context, try_read is safe. If contended, fall back.
-        self.try_read().unwrap_or_else(|_| {
-            // Should not happen in practice since we hold locks briefly,
-            // but if it does we panic with a clear message.
-            panic!("node: namespace_filters read lock contended in sync context")
-        })
-    }
-
-    fn blocking_lock_write(&self) -> tokio::sync::RwLockWriteGuard<'_, T> {
-        self.try_write().unwrap_or_else(|_| {
-            panic!("node: namespace_filters write lock contended in sync context")
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // NodeBuilder
 // ---------------------------------------------------------------------------
 
@@ -751,6 +752,38 @@ pub struct NodeBuilder {
     auth_key: Option<String>,
     ephemeral: bool,
     ws_port: u16,
+}
+
+/// Atomically write a string to `path` by writing to a sibling `.tmp`
+/// file first and then renaming it over the destination.
+///
+/// On POSIX, `rename(2)` is atomic and replaces an existing destination
+/// in-place. On Windows, `std::fs::rename` refuses to overwrite, so we
+/// explicitly remove the destination first — the window between remove
+/// and rename is acceptable here because the caller (device-id.txt
+/// persistence) runs once at startup and is not racing itself.
+fn atomic_write_string(path: &Path, content: &str) -> std::io::Result<()> {
+    let _parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    #[cfg(unix)]
+    {
+        std::fs::rename(&tmp, path)?;
+    }
+    #[cfg(windows)]
+    {
+        // Windows: std::fs::rename errors if the destination exists, so
+        // remove the old file first. Best-effort — missing file is fine.
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp, path)?;
+    }
+    Ok(())
 }
 
 impl Default for NodeBuilder {
@@ -899,7 +932,7 @@ impl NodeBuilder {
         let device_id = match self.device_id.clone() {
             Some(id) => {
                 // Persist the override so later auto-generated calls see it.
-                std::fs::write(&device_id_file, id.as_str())?;
+                atomic_write_string(&device_id_file, id.as_str())?;
                 id
             }
             None => {
@@ -912,7 +945,7 @@ impl NodeBuilder {
                     })?
                 } else {
                     let id = DeviceId::generate();
-                    std::fs::write(&device_id_file, id.as_str())?;
+                    atomic_write_string(&device_id_file, id.as_str())?;
                     id
                 }
             }

@@ -60,7 +60,7 @@ pub async fn run(
         let rows: Vec<Vec<String>> = filtered
             .iter()
             .map(|p| {
-                let name = p["name"].as_str().unwrap_or("-");
+                let name = p["device_name"].as_str().unwrap_or("-");
                 let online = p["online"].as_bool().unwrap_or(false);
                 let ip = p["ip"].as_str().unwrap_or("-");
                 let conn_type = p["connection_type"].as_str().unwrap_or("-");
@@ -100,7 +100,7 @@ pub async fn run(
         let rows: Vec<Vec<String>> = filtered
             .iter()
             .map(|p| {
-                let name = p["name"].as_str().unwrap_or("-");
+                let name = p["device_name"].as_str().unwrap_or("-");
                 let online = p["online"].as_bool().unwrap_or(false);
                 let conn_type = p["connection_type"].as_str().unwrap_or("-");
 

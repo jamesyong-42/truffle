@@ -255,6 +255,7 @@ impl NapiNode {
     ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
+        let node_for_lookup = node.clone();
 
         // Use napi-rs's managed Tokio runtime. Bare `tokio::spawn` panics
         // with "there is no reactor running" because this is a sync NAPI
@@ -264,7 +265,7 @@ impl NapiNode {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let napi_event = convert_peer_event(&event);
+                        let napi_event = convert_peer_event(&event, Some(&node_for_lookup)).await;
                         let status =
                             callback.call(napi_event, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
@@ -367,7 +368,20 @@ impl NapiNode {
 // PeerEvent conversion
 // ---------------------------------------------------------------------------
 
-fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent {
+/// Convert a core `PeerEvent` into its NAPI shape.
+///
+/// For `joined` / `updated` events we derive `peer_id` from the
+/// RFC 017 device_id carried on the hello envelope (via `Peer::from`).
+/// For `left` / `ws_connected` / `ws_disconnected` the session layer
+/// only gives us a Tailscale stable ID; if a `node` is provided we
+/// attempt to resolve that to a `device_id` via the node's peer cache
+/// so JS callers can key every `peer_id` by the same identifier.
+/// If resolution fails (e.g. transient races during disconnect) we
+/// fall back to the Tailscale stable ID — callers should be aware.
+async fn convert_peer_event(
+    event: &truffle_core::session::PeerEvent,
+    node: Option<&Arc<Node<TailscaleProvider>>>,
+) -> NapiPeerEvent {
     use truffle_core::session::PeerEvent;
 
     // Helper: funnel through `Peer::from(PeerState)` so the `device_id`
@@ -378,6 +392,22 @@ fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent
         let peer: truffle_core::node::Peer = state.clone().into();
         peer_to_napi(&peer)
     };
+
+    // Resolve a Tailscale stable ID to the hello-advertised device_id by
+    // scanning the node's cached peer list. Returns the input on miss.
+    async fn resolve_device_id(
+        node: Option<&Arc<Node<TailscaleProvider>>>,
+        tailscale_id: &str,
+    ) -> String {
+        if let Some(node) = node {
+            for p in node.peers().await {
+                if p.tailscale_id == tailscale_id {
+                    return p.device_id.clone();
+                }
+            }
+        }
+        tailscale_id.to_string()
+    }
 
     match event {
         PeerEvent::Joined(state) => {
@@ -390,11 +420,8 @@ fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent
             }
         }
         PeerEvent::Left(id) => NapiPeerEvent {
-            // Layer 3 only knows the Tailscale ID here; we surface that
-            // directly. Callers that need a device_id should key off the
-            // `joined`/`updated` events they already received before this.
             event_type: "left".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },
@@ -409,13 +436,13 @@ fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent
         }
         PeerEvent::WsConnected(id) => NapiPeerEvent {
             event_type: "ws_connected".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },
         PeerEvent::WsDisconnected(id) => NapiPeerEvent {
             event_type: "ws_disconnected".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },

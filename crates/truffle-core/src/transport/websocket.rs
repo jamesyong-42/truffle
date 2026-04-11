@@ -130,17 +130,26 @@ async fn close_ws_with_code(ws: &mut WebSocketStream<TcpStream>, code: u16, reas
     let _ = ws.close(None).await;
 }
 
+/// Maximum number of control frames (Ping/Pong/Frame) we tolerate from a
+/// peer before the first application-level hello frame arrives. A well-
+/// behaved client sends at most one Pong here; anything higher is either a
+/// broken client or an active DoS against the 5s hello window.
+const MAX_CONTROL_FRAMES_BEFORE_HELLO: usize = 16;
+
 /// Receive and parse a [`HelloEnvelope`] from a WebSocket stream, applying a
 /// 5 second timeout.
 ///
 /// Consumes frames from the stream until the first application-level message
-/// (Text or Binary) arrives. Control frames (Ping, Pong, Close) are handled
-/// transparently. Returns a specific `TransportError` for each failure mode
-/// so the caller can emit the right close code.
+/// (Text or Binary) arrives. Control frames (Ping, Pong, Frame) are handled
+/// transparently, but we cap the number tolerated before the hello so a
+/// malicious peer can't flood Pings for the full timeout window. Returns a
+/// specific `TransportError` for each failure mode so the caller can emit
+/// the right close code.
 async fn receive_hello(
     ws: &mut WebSocketStream<TcpStream>,
 ) -> Result<HelloEnvelope, TransportError> {
     let fut = async {
+        let mut control_frame_count: usize = 0;
         loop {
             match ws.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -151,7 +160,15 @@ async fn receive_hello(
                     return serde_json::from_slice::<HelloEnvelope>(&data)
                         .map_err(|e| TransportError::HelloMalformed(format!("parse hello: {e}")));
                 }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {
+                    control_frame_count += 1;
+                    if control_frame_count > MAX_CONTROL_FRAMES_BEFORE_HELLO {
+                        return Err(TransportError::HelloMalformed(
+                            "too many control frames before hello".to_string(),
+                        ));
+                    }
+                    continue;
+                }
                 Some(Ok(Message::Close(_))) => {
                     return Err(TransportError::HelloMalformed(
                         "peer closed connection before hello".to_string(),
@@ -177,6 +194,15 @@ async fn receive_hello(
     }
 }
 
+// Maximum byte lengths for each string field in a received PeerIdentity.
+// Enforced BEFORE the app_id mismatch check so an oversized field can't
+// sneak past via a matched app_id. Sized ~2x the RFC 017 §5 soft caps.
+const MAX_APP_ID_LEN: usize = 32;
+const MAX_DEVICE_NAME_LEN: usize = 512;
+const MAX_DEVICE_ID_LEN: usize = 64;
+const MAX_TAILSCALE_ID_LEN: usize = 256;
+const MAX_OS_LEN: usize = 32;
+
 /// Validate a received hello against our own. Returns the remote identity
 /// on success, or a classified error that maps to an RFC 017 close code.
 fn validate_hello(
@@ -195,6 +221,18 @@ fn validate_hello(
             remote.version,
             HelloEnvelope::MIN_SUPPORTED_VERSION
         )));
+    }
+    // Length-bound each identity field BEFORE the app_id mismatch check
+    // so an oversized field can't sneak through on a matched app_id.
+    if remote.identity.app_id.len() > MAX_APP_ID_LEN
+        || remote.identity.device_name.len() > MAX_DEVICE_NAME_LEN
+        || remote.identity.device_id.len() > MAX_DEVICE_ID_LEN
+        || remote.identity.tailscale_id.len() > MAX_TAILSCALE_ID_LEN
+        || remote.identity.os.len() > MAX_OS_LEN
+    {
+        return Err(TransportError::HelloMalformed(
+            "identity field exceeds maximum allowed length".to_string(),
+        ));
     }
     if remote.identity.app_id != local_app_id {
         return Err(TransportError::AppMismatch {
@@ -797,5 +835,93 @@ mod unit_tests {
             dns_name: None,
         };
         assert_eq!(resolve_dial_addr(&addr), "peer");
+    }
+
+    // ── RFC 017 fix G: length-bound each hello identity field ─────────
+
+    fn valid_identity() -> crate::session::hello::PeerIdentity {
+        crate::session::hello::PeerIdentity {
+            app_id: "playground".to_string(),
+            device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+            device_name: "Alice's MacBook".to_string(),
+            os: "darwin".to_string(),
+            tailscale_id: "n1234567890.ts-node".to_string(),
+        }
+    }
+
+    #[test]
+    fn validate_hello_accepts_normal_identity() {
+        let envelope = crate::session::hello::HelloEnvelope::new(valid_identity());
+        let result = validate_hello(envelope, "playground");
+        assert!(result.is_ok(), "baseline valid hello should validate");
+    }
+
+    #[test]
+    fn validate_hello_rejects_oversized_app_id() {
+        let mut identity = valid_identity();
+        identity.app_id = "a".repeat(MAX_APP_ID_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        match result {
+            Err(TransportError::HelloMalformed(msg)) => {
+                assert!(
+                    msg.contains("maximum allowed length"),
+                    "unexpected error: {msg}"
+                );
+            }
+            other => panic!("expected HelloMalformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_hello_rejects_oversized_device_name() {
+        let mut identity = valid_identity();
+        identity.device_name = "x".repeat(MAX_DEVICE_NAME_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        assert!(matches!(result, Err(TransportError::HelloMalformed(_))));
+    }
+
+    #[test]
+    fn validate_hello_rejects_oversized_device_id() {
+        let mut identity = valid_identity();
+        identity.device_id = "x".repeat(MAX_DEVICE_ID_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        assert!(matches!(result, Err(TransportError::HelloMalformed(_))));
+    }
+
+    #[test]
+    fn validate_hello_rejects_oversized_tailscale_id() {
+        let mut identity = valid_identity();
+        identity.tailscale_id = "x".repeat(MAX_TAILSCALE_ID_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        assert!(matches!(result, Err(TransportError::HelloMalformed(_))));
+    }
+
+    #[test]
+    fn validate_hello_rejects_oversized_os() {
+        let mut identity = valid_identity();
+        identity.os = "x".repeat(MAX_OS_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        assert!(matches!(result, Err(TransportError::HelloMalformed(_))));
+    }
+
+    #[test]
+    fn validate_hello_length_check_runs_before_app_id_mismatch() {
+        // Even with a matching app_id, an oversized field still fails
+        // with HelloMalformed (not AppMismatch). This is the
+        // "oversized field on matched app_id" attack path from the
+        // review.
+        let mut identity = valid_identity();
+        identity.device_name = "x".repeat(MAX_DEVICE_NAME_LEN + 1);
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        let result = validate_hello(envelope, "playground");
+        assert!(
+            matches!(result, Err(TransportError::HelloMalformed(_))),
+            "matched app_id must not let an oversized field through"
+        );
     }
 }
