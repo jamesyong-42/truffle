@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.25...truffle-v0.4.0) (2026-04-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* RFC 017 — identity and app namespacing ([#31](https://github.com/jamesyong-42/truffle/issues/31))
+
+### Features
+
+* RFC 017 — identity and app namespacing ([#31](https://github.com/jamesyong-42/truffle/issues/31)) ([5fc15be](https://github.com/jamesyong-42/truffle/commit/5fc15bed3ee8340bbfda4f29df7d86342f0ab6e7))
+
 ## [0.3.25](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.24...truffle-v0.3.25) (2026-04-10)
 
 
