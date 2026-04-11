@@ -7,7 +7,7 @@ import type { NapiPeer, NapiPeerEvent } from '@vibecook/truffle';
 function formatPeer(peer: NapiPeer): string {
   const status = peer.online ? 'online' : 'offline';
   const ws = peer.wsConnected ? ', ws' : '';
-  return `  ${peer.name} (${peer.id}) - ${status}${ws}`;
+  return `  ${peer.deviceName} (${peer.deviceId}) - ${status}${ws}`;
 }
 
 export const devCommand = defineCommand({
@@ -16,9 +16,14 @@ export const devCommand = defineCommand({
     description: 'Start a dev mesh node with auto-discovery',
   },
   args: {
+    'app-id': {
+      type: 'string',
+      description: 'Application identifier (required, RFC 017)',
+      default: 'truffle-dev',
+    },
     name: {
       type: 'string',
-      description: 'Node name',
+      description: 'Device name',
       default: hostname(),
     },
     sidecar: {
@@ -41,14 +46,15 @@ export const devCommand = defineCommand({
     const node = new NapiNode();
 
     await node.start({
-      name: args.name,
+      appId: args['app-id'],
+      deviceName: args.name,
       sidecarPath: args.sidecar ?? resolveSidecarPath(),
       stateDir: args['state-dir'],
       authKey: args['auth-key'],
     });
 
     const info = node.getLocalInfo();
-    consola.success(`Node started: ${info.name} (${info.id})`);
+    consola.success(`Node started: ${info.deviceName} (${info.deviceId})`);
     consola.info('Waiting for peers...');
 
     // Subscribe to peer change events
