@@ -73,14 +73,7 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                     // Handle incoming OFFER (someone wants to push a file to us)
                     tokio::spawn(async move {
                         if let Err(e) = handle_incoming_offer(
-                            &node,
-                            &from,
-                            &file_name,
-                            size,
-                            &sha256,
-                            &save_path,
-                            &token,
-                            &offer_tx,
+                            &node, &from, &file_name, size, &sha256, &save_path, &token, &offer_tx,
                             &event_tx,
                         )
                         .await
@@ -186,13 +179,12 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
         .map_err(|_| TransferError::Protocol("Offer channel closed".to_string()))?;
 
     // Wait for decision with 60s timeout
-    let decision = tokio::time::timeout(
-        tokio::time::Duration::from_secs(60),
-        decision_rx,
-    )
-    .await
-    .map_err(|_| TransferError::Timeout)?
-    .map_err(|_| TransferError::Protocol("Offer responder dropped without decision".to_string()))?;
+    let decision = tokio::time::timeout(tokio::time::Duration::from_secs(60), decision_rx)
+        .await
+        .map_err(|_| TransferError::Timeout)?
+        .map_err(|_| {
+            TransferError::Protocol("Offer responder dropped without decision".to_string())
+        })?;
 
     match decision {
         OfferDecision::Accept { save_path: dest } => {
@@ -264,13 +256,10 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
     );
 
     // Wait for TCP connection with 30s timeout
-    let incoming = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        listener.accept(),
-    )
-    .await
-    .map_err(|_| TransferError::Timeout)?
-    .ok_or_else(|| TransferError::Protocol("Listener closed before accepting".to_string()))?;
+    let incoming = tokio::time::timeout(tokio::time::Duration::from_secs(30), listener.accept())
+        .await
+        .map_err(|_| TransferError::Timeout)?
+        .ok_or_else(|| TransferError::Protocol("Listener closed before accepting".to_string()))?;
 
     let mut stream = incoming.stream;
 
@@ -484,9 +473,9 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
                 FtMessage::Reject {
                     token: ref t,
                     reason,
-                } if *t == offer_token => {
-                    Some(Err(TransferError::Rejected(format!("Peer rejected: {reason}"))))
-                }
+                } if *t == offer_token => Some(Err(TransferError::Rejected(format!(
+                    "Peer rejected: {reason}"
+                )))),
                 _ => None,
             }
         },
@@ -504,14 +493,9 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
     .map_err(|e| e)?;
 
     // Open TCP to peer and stream the file
-    let mut stream = node
-        .open_tcp(from, _accept_port)
-        .await
-        .map_err(|e| {
-            TransferError::Node(format!(
-                "Failed to open TCP to {from}:{_accept_port}: {e}"
-            ))
-        })?;
+    let mut stream = node.open_tcp(from, _accept_port).await.map_err(|e| {
+        TransferError::Node(format!("Failed to open TCP to {from}:{_accept_port}: {e}"))
+    })?;
 
     let start = std::time::Instant::now();
 

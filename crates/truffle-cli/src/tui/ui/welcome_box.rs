@@ -5,7 +5,7 @@
 //!   Right half: device list with online/offline indicators
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, BorderType, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::tui::app::AppState;
 
@@ -33,10 +33,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     // Split inner into left (logo + info) and right (devices)
     let halves = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
     let left = halves[0];
@@ -69,7 +66,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
             height: 1,
         };
         frame.render_widget(
-            Paragraph::new(Span::styled("\u{2502}", Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                "\u{2502}",
+                Style::default().fg(Color::DarkGray),
+            )),
             cell_rect,
         );
     }
@@ -80,10 +80,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
     let info = app.node.local_info();
-    let node_name = info
-        .name
-        .trim_start_matches("truffle-")
-        .to_string();
+    let node_name = info.name.trim_start_matches("truffle-").to_string();
     let ip_str = info.ip.map(|ip| ip.to_string()).unwrap_or_default();
     let peer_count = app.online_peer_count();
     let uptime = app.uptime_str();
@@ -147,7 +144,10 @@ fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::styled(indicator, Style::default().fg(color)),
         Span::styled(format!(" {status_text}"), Style::default().fg(color)),
         Span::raw(format!(" \u{00b7} {peer_count} peers")),
-        Span::styled(format!(" \u{00b7} {uptime}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" \u{00b7} {uptime}"),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]));
 
     let paragraph = Paragraph::new(lines);
@@ -161,10 +161,7 @@ fn render_right(frame: &mut Frame, area: Rect, app: &AppState) {
     lines.push(Line::raw(""));
 
     // Section header
-    lines.push(Line::from(Span::styled(
-        "Devices",
-        Style::default().bold(),
-    )));
+    lines.push(Line::from(Span::styled("Devices", Style::default().bold())));
 
     // Sort: online first, then alphabetical
     let mut sorted_peers: Vec<_> = app.peers.iter().collect();

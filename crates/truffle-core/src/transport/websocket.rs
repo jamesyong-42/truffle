@@ -85,10 +85,15 @@ impl<N: NetworkProvider + 'static> WebSocketTransport<N> {
     }
 
     /// Build the local handshake message using the network provider's identity.
+    ///
+    /// Phase 1 of RFC 017: the WebSocket handshake still identifies the
+    /// local endpoint by its Tailscale stable ID (what the session layer
+    /// uses as `PeerState.id`). Phase 2 will introduce a v2 hello envelope
+    /// that carries `app_id` + `device_id` + `device_name`.
     fn local_handshake(&self) -> Handshake {
         let identity = self.network.local_identity();
         Handshake {
-            peer_id: identity.id,
+            peer_id: identity.tailscale_id,
             capabilities: vec!["ws".to_string(), "binary".to_string()],
             protocol_version: PROTOCOL_VERSION,
         }
@@ -172,9 +177,12 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
 
         // Step 3: Exchange handshake (with timeout)
         let local_hs = self.local_handshake();
-        let remote_hs = tokio::time::timeout(HANDSHAKE_TIMEOUT, Self::client_handshake(&mut ws, &local_hs))
-            .await
-            .map_err(|_| TransportError::Timeout("handshake timed out".to_string()))??;
+        let remote_hs = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            Self::client_handshake(&mut ws, &local_hs),
+        )
+        .await
+        .map_err(|_| TransportError::Timeout("handshake timed out".to_string()))??;
 
         tracing::info!(
             remote_peer = %remote_hs.peer_id,
@@ -221,22 +229,21 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
 
                         tokio::spawn(async move {
                             // WS server upgrade (with max_message_size config)
-                            let mut ws =
-                                match tokio_tungstenite::accept_async_with_config(
-                                    incoming.stream,
-                                    Some(ws_config),
-                                )
-                                .await
-                                {
-                                    Ok(ws) => ws,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            remote = %remote_addr,
-                                            "ws: upgrade failed: {e}"
-                                        );
-                                        return;
-                                    }
-                                };
+                            let mut ws = match tokio_tungstenite::accept_async_with_config(
+                                incoming.stream,
+                                Some(ws_config),
+                            )
+                            .await
+                            {
+                                Ok(ws) => ws,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        remote = %remote_addr,
+                                        "ws: upgrade failed: {e}"
+                                    );
+                                    return;
+                                }
+                            };
 
                             // Server-side handshake (with timeout)
                             let remote_hs = match tokio::time::timeout(
@@ -310,8 +317,8 @@ async fn server_handshake_standalone(
     }
 
     // Send our handshake
-    let hs_json = serde_json::to_string(local_hs)
-        .map_err(|e| TransportError::Serialize(e.to_string()))?;
+    let hs_json =
+        serde_json::to_string(local_hs).map_err(|e| TransportError::Serialize(e.to_string()))?;
     ws.send(Message::Text(hs_json.into()))
         .await
         .map_err(|e| TransportError::HandshakeFailed(format!("send handshake: {e}")))?;
@@ -397,8 +404,15 @@ impl WsFramedStream {
         let hb_closed = closed.clone();
         let hb_addr = remote_addr.clone();
         let heartbeat_handle = tokio::spawn(async move {
-            heartbeat_loop(hb_write, hb_last_pong, hb_closed, ping_interval, pong_timeout, &hb_addr)
-                .await;
+            heartbeat_loop(
+                hb_write,
+                hb_last_pong,
+                hb_closed,
+                ping_interval,
+                pong_timeout,
+                &hb_addr,
+            )
+            .await;
         });
 
         Self {

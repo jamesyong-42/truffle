@@ -51,11 +51,11 @@ use quinn::{RecvStream, SendStream};
 
 use crate::network::{NetworkProvider, PeerAddr};
 
+use super::quic_socket::TsnetUdpSocket;
 use super::{
     resolve_dial_addr, FramedStream, Handshake, StreamListener, StreamTransport, TransportError,
     PROTOCOL_VERSION,
 };
-use super::quic_socket::TsnetUdpSocket;
 
 /// Handshake timeout — maximum time to wait for QUIC handshake exchange.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -94,10 +94,18 @@ impl Default for QuicConfig {
 ///
 /// Since Tailscale already encrypts all traffic via WireGuard, this TLS layer
 /// is redundant but required by the QUIC protocol specification.
-fn generate_self_signed_cert() -> Result<(rustls::pki_types::CertificateDer<'static>, rustls::pki_types::PrivateKeyDer<'static>), TransportError> {
+fn generate_self_signed_cert() -> Result<
+    (
+        rustls::pki_types::CertificateDer<'static>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    TransportError,
+> {
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["truffle".to_string(), "localhost".to_string()])
-            .map_err(|e| TransportError::ConnectFailed(format!("generate self-signed cert: {e}")))?;
+            .map_err(|e| {
+                TransportError::ConnectFailed(format!("generate self-signed cert: {e}"))
+            })?;
 
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
     let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
@@ -248,10 +256,14 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
     }
 
     /// Build the local handshake message using the network provider's identity.
+    ///
+    /// Phase 1 of RFC 017: QUIC handshake identifies the local endpoint by
+    /// its Tailscale stable ID (what the session layer uses). Phase 2 will
+    /// migrate to a v2 hello envelope carrying `device_id`.
     fn local_handshake(&self) -> Handshake {
         let identity = self.network.local_identity();
         Handshake {
-            peer_id: identity.id,
+            peer_id: identity.tailscale_id,
             capabilities: vec!["quic".to_string(), "binary".to_string()],
             protocol_version: PROTOCOL_VERSION,
         }
@@ -274,9 +286,11 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
         })?;
 
         let tsnet_port = net_socket.tsnet_port();
-        let local_ip = self.network.local_addr().ip.unwrap_or_else(|| {
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-        });
+        let local_ip = self
+            .network
+            .local_addr()
+            .ip
+            .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
 
         let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
@@ -316,14 +330,17 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
         server_config: &quinn::ServerConfig,
     ) -> Result<(quinn::Endpoint, u16), TransportError> {
         let port = self.config.port;
-        let net_socket = self.network.bind_udp(port).await.map_err(|e| {
-            TransportError::ListenFailed(format!("bind_udp for tsnet server: {e}"))
-        })?;
+        let net_socket =
+            self.network.bind_udp(port).await.map_err(|e| {
+                TransportError::ListenFailed(format!("bind_udp for tsnet server: {e}"))
+            })?;
 
         let tsnet_port = net_socket.tsnet_port();
-        let local_ip = self.network.local_addr().ip.unwrap_or_else(|| {
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-        });
+        let local_ip = self
+            .network
+            .local_addr()
+            .ip
+            .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
 
         let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
@@ -371,8 +388,10 @@ impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
                     err = %tsnet_err,
                     "quic: tsnet client endpoint unavailable, falling back to direct socket"
                 );
-                let mut ep = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
-                    .map_err(|e| TransportError::ConnectFailed(format!("create quic endpoint: {e}")))?;
+                let mut ep =
+                    quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).map_err(|e| {
+                        TransportError::ConnectFailed(format!("create quic endpoint: {e}"))
+                    })?;
                 ep.set_default_client_config(client_config);
                 ep
             }
@@ -404,12 +423,10 @@ impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
 
         // Step 4: Exchange handshake (with timeout)
         let local_hs = self.local_handshake();
-        let remote_hs = tokio::time::timeout(
-            HANDSHAKE_TIMEOUT,
-            client_handshake(&mut stream, &local_hs),
-        )
-        .await
-        .map_err(|_| TransportError::Timeout("quic handshake timed out".to_string()))??;
+        let remote_hs =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut stream, &local_hs))
+                .await
+                .map_err(|_| TransportError::Timeout("quic handshake timed out".to_string()))??;
 
         // Store remote peer info
         stream.remote_peer_id = remote_hs.peer_id.clone();
@@ -432,31 +449,32 @@ impl<N: NetworkProvider + 'static> StreamTransport for QuicTransport<N> {
 
         // Step 2: Create server endpoint.
         // Try tsnet first (network provider UDP), fall back to direct socket.
-        let (endpoint, actual_port) = match self.try_create_tsnet_server_endpoint(&server_config).await {
-            Ok((ep, p)) => {
-                tracing::info!(port = p, "quic: using TsnetUdpSocket for server endpoint");
-                (ep, p)
-            }
-            Err(tsnet_err) => {
-                tracing::debug!(
-                    err = %tsnet_err,
-                    "quic: tsnet server endpoint unavailable, falling back to direct socket"
-                );
-                let bind_addr: SocketAddr = format!("0.0.0.0:{port}")
-                    .parse()
-                    .map_err(|e| TransportError::ListenFailed(format!("parse bind address: {e}")))?;
+        let (endpoint, actual_port) =
+            match self.try_create_tsnet_server_endpoint(&server_config).await {
+                Ok((ep, p)) => {
+                    tracing::info!(port = p, "quic: using TsnetUdpSocket for server endpoint");
+                    (ep, p)
+                }
+                Err(tsnet_err) => {
+                    tracing::debug!(
+                        err = %tsnet_err,
+                        "quic: tsnet server endpoint unavailable, falling back to direct socket"
+                    );
+                    let bind_addr: SocketAddr = format!("0.0.0.0:{port}").parse().map_err(|e| {
+                        TransportError::ListenFailed(format!("parse bind address: {e}"))
+                    })?;
 
-                let ep = quinn::Endpoint::server(server_config, bind_addr)
-                    .map_err(|e| TransportError::ListenFailed(format!("quic listen: {e}")))?;
+                    let ep = quinn::Endpoint::server(server_config, bind_addr)
+                        .map_err(|e| TransportError::ListenFailed(format!("quic listen: {e}")))?;
 
-                let actual = ep
-                    .local_addr()
-                    .map_err(|e| TransportError::ListenFailed(format!("local addr: {e}")))?
-                    .port();
+                    let actual = ep
+                        .local_addr()
+                        .map_err(|e| TransportError::ListenFailed(format!("local addr: {e}")))?
+                        .port();
 
-                (ep, actual)
-            }
-        };
+                    (ep, actual)
+                }
+            };
 
         tracing::debug!(actual_port, "quic: listener bound");
 
@@ -551,15 +569,14 @@ async fn client_handshake(
     local_hs: &Handshake,
 ) -> Result<Handshake, TransportError> {
     // Send our handshake
-    let hs_json = serde_json::to_vec(local_hs)
-        .map_err(|e| TransportError::Serialize(e.to_string()))?;
+    let hs_json =
+        serde_json::to_vec(local_hs).map_err(|e| TransportError::Serialize(e.to_string()))?;
     stream.send(&hs_json).await?;
 
     // Receive peer's handshake
-    let remote_data = stream
-        .recv()
-        .await?
-        .ok_or_else(|| TransportError::HandshakeFailed("connection closed before handshake".to_string()))?;
+    let remote_data = stream.recv().await?.ok_or_else(|| {
+        TransportError::HandshakeFailed("connection closed before handshake".to_string())
+    })?;
 
     let remote_hs: Handshake = serde_json::from_slice(&remote_data)
         .map_err(|e| TransportError::HandshakeFailed(format!("parse handshake: {e}")))?;
@@ -581,10 +598,9 @@ async fn server_handshake(
     local_hs: &Handshake,
 ) -> Result<Handshake, TransportError> {
     // Receive peer's handshake first
-    let remote_data = stream
-        .recv()
-        .await?
-        .ok_or_else(|| TransportError::HandshakeFailed("connection closed before handshake".to_string()))?;
+    let remote_data = stream.recv().await?.ok_or_else(|| {
+        TransportError::HandshakeFailed("connection closed before handshake".to_string())
+    })?;
 
     let remote_hs: Handshake = serde_json::from_slice(&remote_data)
         .map_err(|e| TransportError::HandshakeFailed(format!("parse handshake: {e}")))?;
@@ -598,8 +614,8 @@ async fn server_handshake(
     }
 
     // Send our handshake
-    let hs_json = serde_json::to_vec(local_hs)
-        .map_err(|e| TransportError::Serialize(e.to_string()))?;
+    let hs_json =
+        serde_json::to_vec(local_hs).map_err(|e| TransportError::Serialize(e.to_string()))?;
     stream.send(&hs_json).await?;
 
     Ok(remote_hs)

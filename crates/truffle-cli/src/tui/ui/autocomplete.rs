@@ -95,9 +95,7 @@ pub fn render(f: &mut Frame, input_area: Rect, state: &AppState) {
             };
 
             let right_style = if is_selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default().fg(Color::DarkGray)
             };

@@ -9,11 +9,13 @@ use std::time::Instant;
 use tokio::sync::Notify;
 use tracing::{debug, info};
 use truffle_core::file_transfer::types::FileTransferEvent;
-use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::node::Node;
 use truffle_core::session::PeerEvent;
 
-use super::protocol::{error_code, method, notification, DaemonNotification, DaemonRequest, DaemonResponse};
+use super::protocol::{
+    error_code, method, notification, DaemonNotification, DaemonRequest, DaemonResponse,
+};
 
 /// Context bundling all daemon-owned resources needed by request handlers.
 pub struct DaemonContext {
@@ -89,10 +91,7 @@ pub async fn dispatch(
 
 /// Parse subscribe request params, returning `SubscribeParams` or an error response.
 fn parse_subscribe_params(params: &serde_json::Value) -> Result<SubscribeParams, DaemonResponse> {
-    let events_arr = params["events"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let events_arr = params["events"].as_array().cloned().unwrap_or_default();
 
     let mut events = Vec::new();
     for v in &events_arr {
@@ -120,9 +119,7 @@ fn parse_subscribe_params(params: &serde_json::Value) -> Result<SubscribeParams,
         ];
     }
 
-    let peer_filter = params["filter"]["peer"]
-        .as_str()
-        .map(|s| s.to_lowercase());
+    let peer_filter = params["filter"]["peer"].as_str().map(|s| s.to_lowercase());
 
     Ok(SubscribeParams {
         events,
@@ -347,9 +344,7 @@ fn message_to_notification(
 }
 
 /// Convert a core `FileTransferEvent` into a daemon notification.
-fn ft_event_to_notification(
-    event: &FileTransferEvent,
-) -> Option<DaemonNotification> {
+fn ft_event_to_notification(event: &FileTransferEvent) -> Option<DaemonNotification> {
     let (event_type, params) = match event {
         FileTransferEvent::OfferReceived(offer) => (
             "transfer.offer_received",
@@ -364,7 +359,12 @@ fn ft_event_to_notification(
                 "time": chrono::Utc::now().to_rfc3339(),
             }),
         ),
-        FileTransferEvent::Hashing { token, file_name, bytes_hashed, total_bytes } => (
+        FileTransferEvent::Hashing {
+            token,
+            file_name,
+            bytes_hashed,
+            total_bytes,
+        } => (
             "transfer.hashing",
             serde_json::json!({
                 "type": "transfer.hashing",
@@ -478,7 +478,11 @@ async fn handle_status(
     let health = node.health().await;
     let uptime_secs = started_at.elapsed().as_secs();
 
-    let status = if health.healthy { "online" } else { &health.state };
+    let status = if health.healthy {
+        "online"
+    } else {
+        &health.state
+    };
     let ip_str = info.ip.map(|ip| ip.to_string()).unwrap_or_default();
 
     DaemonResponse::success(
@@ -506,10 +510,7 @@ async fn handle_status(
 // Peers
 // ==========================================================================
 
-async fn handle_peers(
-    id: u64,
-    node: &Arc<Node<TailscaleProvider>>,
-) -> DaemonResponse {
+async fn handle_peers(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonResponse {
     let peers = node.peers().await;
 
     let peers_json: Vec<serde_json::Value> = peers
@@ -701,7 +702,11 @@ async fn handle_push_file(
     let progress_handle = tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(FileTransferEvent::Hashing { bytes_hashed, total_bytes, .. }) => {
+                Ok(FileTransferEvent::Hashing {
+                    bytes_hashed,
+                    total_bytes,
+                    ..
+                }) => {
                     let notif = DaemonNotification::new(
                         super::protocol::notification::CP_PROGRESS,
                         serde_json::json!({
@@ -860,10 +865,7 @@ async fn handle_get_file(
 // Doctor
 // ==========================================================================
 
-async fn handle_doctor(
-    id: u64,
-    node: &Arc<Node<TailscaleProvider>>,
-) -> DaemonResponse {
+async fn handle_doctor(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonResponse {
     let health = node.health().await;
     let peers = node.peers().await;
     let info = node.local_info();

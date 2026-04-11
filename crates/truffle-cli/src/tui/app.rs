@@ -276,7 +276,10 @@ impl AppState {
         if let Some(at_pos) = before_cursor.rfind('@') {
             if at_pos == 0 || before_cursor.as_bytes()[at_pos - 1] == b' ' {
                 let partial = &self.input[at_pos + 1..byte_pos];
-                if partial.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                if partial
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
                     return Some((at_pos, partial));
                 }
             }
@@ -319,16 +322,32 @@ impl AppState {
         if let Some(partial) = self.find_slash_prefix() {
             let cmds = Self::filtered_commands(partial);
             if !cmds.is_empty() {
-                let selected = self.autocomplete.as_ref().map(|a| a.selected.min(cmds.len() - 1)).unwrap_or(0);
-                self.autocomplete = Some(AutocompleteState { filter: partial.to_string(), selected, kind: AutocompleteKind::Command });
+                let selected = self
+                    .autocomplete
+                    .as_ref()
+                    .map(|a| a.selected.min(cmds.len() - 1))
+                    .unwrap_or(0);
+                self.autocomplete = Some(AutocompleteState {
+                    filter: partial.to_string(),
+                    selected,
+                    kind: AutocompleteKind::Command,
+                });
                 return;
             }
         }
         if let Some((_at_pos, partial)) = self.find_at_prefix() {
             let devices = self.filtered_devices(partial);
             if !devices.is_empty() {
-                let selected = self.autocomplete.as_ref().map(|a| a.selected.min(devices.len() - 1)).unwrap_or(0);
-                self.autocomplete = Some(AutocompleteState { filter: partial.to_string(), selected, kind: AutocompleteKind::Device });
+                let selected = self
+                    .autocomplete
+                    .as_ref()
+                    .map(|a| a.selected.min(devices.len() - 1))
+                    .unwrap_or(0);
+                self.autocomplete = Some(AutocompleteState {
+                    filter: partial.to_string(),
+                    selected,
+                    kind: AutocompleteKind::Device,
+                });
                 return;
             }
         }
@@ -357,7 +376,8 @@ impl AppState {
                         let byte_pos = super::char_to_byte_pos(&self.input, self.cursor_pos);
                         let after_cursor = self.input[byte_pos..].to_string();
                         self.input = format!("{}@{}{}", &self.input[..at_pos], name, after_cursor);
-                        self.cursor_pos = self.input[..at_pos].chars().count() + 1 + name.chars().count();
+                        self.cursor_pos =
+                            self.input[..at_pos].chars().count() + 1 + name.chars().count();
                         return true;
                     }
                 }
@@ -421,7 +441,11 @@ impl AppState {
             let _ = std::fs::create_dir_all(parent);
         }
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = writeln!(f, "{}", entry);
         }
     }
@@ -433,8 +457,7 @@ impl AppState {
 
     /// Open the file picker overlay.
     pub fn open_file_picker(&mut self) {
-        let theme = Theme::default()
-            .add_default_title();
+        let theme = Theme::default().add_default_title();
         if let Ok(explorer) = FileExplorerBuilder::build_with_theme(theme) {
             self.file_picker = Some(explorer);
         }

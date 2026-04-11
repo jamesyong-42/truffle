@@ -54,10 +54,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 /// Check if two consecutive items are from the same sender (for grouping).
 fn is_same_sender(prev: &DisplayItem, curr: &DisplayItem) -> bool {
     match (prev, curr) {
-        (
-            DisplayItem::ChatOutgoing { to: to1, .. },
-            DisplayItem::ChatOutgoing { to: to2, .. },
-        ) => to1 == to2,
+        (DisplayItem::ChatOutgoing { to: to1, .. }, DisplayItem::ChatOutgoing { to: to2, .. }) => {
+            to1 == to2
+        }
         (
             DisplayItem::ChatIncoming { from: f1, .. },
             DisplayItem::ChatIncoming { from: f2, .. },
@@ -74,7 +73,10 @@ fn render_continuation(item: &DisplayItem) -> Line<'static> {
             // Indent to align with the text after "You → device: "
             Line::from(vec![
                 Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("              {text}"), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!("              {text}"),
+                    Style::default().fg(Color::Cyan),
+                ),
             ])
         }
         DisplayItem::ChatIncoming { time, text, .. } => {
@@ -135,7 +137,10 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
             Line::from(vec![
                 Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
                 Span::styled("You", Style::default().fg(Color::Cyan).bold()),
-                Span::styled(format!(" \u{2192} {to}: "), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!(" \u{2192} {to}: "),
+                    Style::default().fg(Color::Cyan),
+                ),
                 Span::styled(text.clone(), Style::default().fg(Color::Cyan)),
             ])
         }
@@ -205,7 +210,10 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
                         Span::styled(bar_filled, Style::default().fg(Color::Cyan)),
                         Span::styled(bar_empty, Style::default().fg(Color::DarkGray)),
                         Span::raw(format!(" {percent:.0}%")),
-                        Span::styled(format!("  {speed_str}"), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("  {speed_str}"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ])
                 }
                 crate::tui::app::TransferStatus::Complete { sha256 } => {
@@ -218,17 +226,18 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
                         Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
                         Span::raw(format!("{arrow} {file_name} ")),
                         Span::styled("\u{2713}", Style::default().fg(Color::Green)),
-                        Span::styled(format!("  {size_str}  sha:{sha_short}"), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("  {size_str}  sha:{sha_short}"),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ])
                 }
-                crate::tui::app::TransferStatus::Failed { reason } => {
-                    Line::from(vec![
-                        Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
-                        Span::raw(format!("{arrow} {file_name} ")),
-                        Span::styled("\u{2717}", Style::default().fg(Color::Red)),
-                        Span::styled(format!("  {reason}"), Style::default().fg(Color::Red)),
-                    ])
-                }
+                crate::tui::app::TransferStatus::Failed { reason } => Line::from(vec![
+                    Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{arrow} {file_name} ")),
+                    Span::styled("\u{2717}", Style::default().fg(Color::Red)),
+                    Span::styled(format!("  {reason}"), Style::default().fg(Color::Red)),
+                ]),
             }
         }
     }

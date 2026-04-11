@@ -24,10 +24,7 @@ pub async fn run(
         .await
         .map_err(|e| (exit_codes::ERROR, e.to_string()))?;
 
-    let peers = result["peers"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let peers = result["peers"].as_array().cloned().unwrap_or_default();
 
     if json {
         let mut map = json_output::envelope(&config.node.name);
@@ -47,7 +44,10 @@ pub async fn run(
         if all {
             println!("  No peers discovered yet.");
         } else {
-            println!("  No peers online. Use {} to include offline peers.", output::bold("--all"));
+            println!(
+                "  No peers online. Use {} to include offline peers.",
+                output::bold("--all")
+            );
         }
         println!();
         return Ok(());
@@ -70,13 +70,25 @@ pub async fn run(
                 vec![
                     output::bold(name),
                     if online {
-                        format!("{} {}", output::status_indicator("online"), output::status_label("online"))
+                        format!(
+                            "{} {}",
+                            output::status_indicator("online"),
+                            output::status_label("online")
+                        )
                     } else {
-                        format!("{} {}", output::status_indicator("offline"), output::status_label("offline"))
+                        format!(
+                            "{} {}",
+                            output::status_indicator("offline"),
+                            output::status_label("offline")
+                        )
                     },
                     ip.to_string(),
                     output::format_connection(Some(conn_type)),
-                    if connected { "yes".to_string() } else { "no".to_string() },
+                    if connected {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
                     os.to_string(),
                 ]
             })
@@ -95,9 +107,17 @@ pub async fn run(
                 vec![
                     output::bold(name),
                     if online {
-                        format!("{} {}", output::status_indicator("online"), output::status_label("online"))
+                        format!(
+                            "{} {}",
+                            output::status_indicator("online"),
+                            output::status_label("online")
+                        )
                     } else {
-                        format!("{} {}", output::status_indicator("offline"), output::status_label("offline"))
+                        format!(
+                            "{} {}",
+                            output::status_indicator("offline"),
+                            output::status_label("offline")
+                        )
                     },
                     output::format_connection(Some(conn_type)),
                 ]

@@ -212,7 +212,10 @@ mod tests {
         let envelope = Envelope::new("test", "msg", json!("data"));
 
         let json_str = serde_json::to_string(&envelope).expect("serialize");
-        assert!(!json_str.contains("timestamp"), "None timestamp should be skipped");
+        assert!(
+            !json_str.contains("timestamp"),
+            "None timestamp should be skipped"
+        );
         assert!(!json_str.contains("from"), "None from should be skipped");
     }
 

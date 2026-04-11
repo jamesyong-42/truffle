@@ -13,8 +13,7 @@ use std::io::{self, Write as _};
 // ==========================================================================
 
 /// Whether color output is enabled (set once at startup).
-static COLOR_ENABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static COLOR_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Initialize color output based on mode. Call once at startup.
 pub fn init_color(mode: &str) {
@@ -33,7 +32,9 @@ fn is_tty() -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE};
+        use windows_sys::Win32::System::Console::{
+            GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE,
+        };
         unsafe {
             let handle = GetStdHandle(STD_OUTPUT_HANDLE);
             let mut mode = 0;

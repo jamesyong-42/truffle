@@ -122,16 +122,18 @@ impl GoSidecar {
         // Take stdout/stdin from child before spawning tasks
         {
             let mut guard = child.lock().await;
-            let child_proc = guard.as_mut().ok_or_else(|| {
-                NetworkError::SidecarError("child process not available".into())
-            })?;
+            let child_proc = guard
+                .as_mut()
+                .ok_or_else(|| NetworkError::SidecarError("child process not available".into()))?;
 
-            let stdout = child_proc.stdout.take().ok_or_else(|| {
-                NetworkError::SidecarError("failed to capture stdout".into())
-            })?;
-            let stdin = child_proc.stdin.take().ok_or_else(|| {
-                NetworkError::SidecarError("failed to capture stdin".into())
-            })?;
+            let stdout = child_proc
+                .stdout
+                .take()
+                .ok_or_else(|| NetworkError::SidecarError("failed to capture stdout".into()))?;
+            let stdin = child_proc
+                .stdin
+                .take()
+                .ok_or_else(|| NetworkError::SidecarError("failed to capture stdin".into()))?;
 
             // Forward sidecar stderr so Go log.Printf output is visible.
             if let Some(stderr) = child_proc.stderr.take() {
@@ -340,18 +342,14 @@ impl GoSidecar {
                     })
             }
             event_type::NEEDS_APPROVAL => Some(SidecarInternalEvent::NeedsApproval),
-            event_type::STATE_CHANGE => {
-                serde_json::from_value::<StateChangeEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::StateChange { state: d.state })
-            }
-            event_type::KEY_EXPIRING => {
-                serde_json::from_value::<KeyExpiringEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::KeyExpiring {
-                        expires_at: d.expires_at,
-                    })
-            }
+            event_type::STATE_CHANGE => serde_json::from_value::<StateChangeEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::StateChange { state: d.state }),
+            event_type::KEY_EXPIRING => serde_json::from_value::<KeyExpiringEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::KeyExpiring {
+                    expires_at: d.expires_at,
+                }),
             event_type::HEALTH_WARNING => {
                 serde_json::from_value::<HealthWarningEventData>(event.data)
                     .ok()
@@ -359,18 +357,15 @@ impl GoSidecar {
                         warnings: d.warnings,
                     })
             }
-            event_type::PEERS => {
-                serde_json::from_value::<PeersEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::PeersReceived(d.peers))
-            }
-            event_type::PEER_CHANGED => {
-                serde_json::from_value::<PeerChangedEventData>(event.data)
-                    .ok()
-                    .map(SidecarInternalEvent::PeerChanged)
-            }
-            event_type::DIAL_RESULT => {
-                serde_json::from_value::<DialResultEventData>(event.data).ok().map(|d| {
+            event_type::PEERS => serde_json::from_value::<PeersEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::PeersReceived(d.peers)),
+            event_type::PEER_CHANGED => serde_json::from_value::<PeerChangedEventData>(event.data)
+                .ok()
+                .map(SidecarInternalEvent::PeerChanged),
+            event_type::DIAL_RESULT => serde_json::from_value::<DialResultEventData>(event.data)
+                .ok()
+                .map(|d| {
                     if d.success {
                         SidecarInternalEvent::DialSucceeded {
                             request_id: d.request_id,
@@ -381,18 +376,13 @@ impl GoSidecar {
                             error: d.error,
                         }
                     }
-                })
-            }
-            event_type::LISTENING => {
-                serde_json::from_value::<ListeningEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::Listening { port: d.port })
-            }
-            event_type::UNLISTENED => {
-                serde_json::from_value::<UnlistenedEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::Unlistened { port: d.port })
-            }
+                }),
+            event_type::LISTENING => serde_json::from_value::<ListeningEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::Listening { port: d.port }),
+            event_type::UNLISTENED => serde_json::from_value::<UnlistenedEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::Unlistened { port: d.port }),
             event_type::LISTENING_PACKET => {
                 serde_json::from_value::<ListeningPacketEventData>(event.data)
                     .ok()
@@ -401,19 +391,15 @@ impl GoSidecar {
                         local_port: d.local_port,
                     })
             }
-            event_type::PING_RESULT => {
-                serde_json::from_value::<PingResultEventData>(event.data)
-                    .ok()
-                    .map(SidecarInternalEvent::PingResult)
-            }
-            event_type::ERROR => {
-                serde_json::from_value::<ErrorEventData>(event.data)
-                    .ok()
-                    .map(|d| SidecarInternalEvent::Error {
-                        code: d.code,
-                        message: d.message,
-                    })
-            }
+            event_type::PING_RESULT => serde_json::from_value::<PingResultEventData>(event.data)
+                .ok()
+                .map(SidecarInternalEvent::PingResult),
+            event_type::ERROR => serde_json::from_value::<ErrorEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::Error {
+                    code: d.code,
+                    message: d.message,
+                }),
             other => {
                 tracing::debug!("unhandled sidecar event type: {other}");
                 None

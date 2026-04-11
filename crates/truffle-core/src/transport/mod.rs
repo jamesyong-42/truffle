@@ -20,10 +20,10 @@
 //! - All transports delegate raw networking to Layer 3's [`NetworkProvider`]
 //! - The [`FramedStream`] trait is what Layer 5 (Session) will consume
 
-pub mod tcp;
-pub mod udp;
 pub mod quic;
 pub mod quic_socket;
+pub mod tcp;
+pub mod udp;
 pub mod websocket;
 
 #[cfg(test)]
@@ -225,17 +225,17 @@ impl DatagramSocket {
     /// Send a datagram to the specified address.
     pub async fn send_to(&self, data: &[u8], addr: &str) -> Result<usize, TransportError> {
         match self {
-            Self::Direct { socket } => {
-                socket.send_to(data, addr).await.map_err(TransportError::Io)
-            }
+            Self::Direct { socket } => socket.send_to(data, addr).await.map_err(TransportError::Io),
             Self::Network { socket } => {
                 let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| {
                     TransportError::ConnectFailed(format!("invalid address '{addr}': {e}"))
                 })?;
-                socket
-                    .send_to(data, sock_addr)
-                    .await
-                    .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+                socket.send_to(data, sock_addr).await.map_err(|e| {
+                    TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })
             }
         }
     }
@@ -248,10 +248,12 @@ impl DatagramSocket {
                 Ok((n, addr.to_string()))
             }
             Self::Network { socket } => {
-                let (n, addr) = socket
-                    .recv_from(buf)
-                    .await
-                    .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+                let (n, addr) = socket.recv_from(buf).await.map_err(|e| {
+                    TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
+                })?;
                 Ok((n, addr.to_string()))
             }
         }
@@ -261,9 +263,12 @@ impl DatagramSocket {
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, TransportError> {
         match self {
             Self::Direct { socket } => socket.local_addr().map_err(TransportError::Io),
-            Self::Network { socket } => socket
-                .local_addr()
-                .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))),
+            Self::Network { socket } => socket.local_addr().map_err(|e| {
+                TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            }),
         }
     }
 }

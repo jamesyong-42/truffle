@@ -35,19 +35,13 @@ pub async fn run(
         sent += 1;
 
         let result = client
-            .request(
-                method::PING,
-                serde_json::json!({ "node": node }),
-            )
+            .request(method::PING, serde_json::json!({ "node": node }))
             .await;
 
         match result {
             Ok(resp) => {
                 let latency_ms = resp["latency_ms"].as_f64().unwrap_or(0.0);
-                let connection = resp["connection"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let connection = resp["connection"].as_str().unwrap_or("unknown").to_string();
 
                 received += 1;
                 min_ms = min_ms.min(latency_ms);
@@ -76,11 +70,7 @@ pub async fn run(
                         "error": e.to_string(),
                     }));
                 } else {
-                    println!(
-                        "  {} Request timeout: {}",
-                        output::red("x"),
-                        e,
-                    );
+                    println!("  {} Request timeout: {}", output::red("x"), e,);
                 }
             }
         }
@@ -121,10 +111,7 @@ pub async fn run(
     } else {
         // Print statistics
         println!();
-        println!(
-            "  --- {} ping statistics ---",
-            output::bold(node),
-        );
+        println!("  --- {} ping statistics ---", output::bold(node),);
         println!(
             "  {} transmitted, {} received, {:.0}% packet loss",
             sent, received, loss_pct,

@@ -7,7 +7,9 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
@@ -53,9 +55,7 @@ impl OnboardingState {
 // ── Entry point ──────────────────────────────────────────────────────────
 
 /// Run the onboarding wizard. Returns the started DaemonServer and updated config.
-pub async fn run(
-    base_config: &TruffleConfig,
-) -> Result<(DaemonServer, TruffleConfig), String> {
+pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleConfig), String> {
     let mut state = OnboardingState::new();
 
     // Initialize terminal
@@ -151,9 +151,7 @@ pub async fn run(
 
     // Start the daemon in a background task
     let config_clone = config.clone();
-    let server_handle = tokio::spawn(async move {
-        DaemonServer::start(&config_clone).await
-    });
+    let server_handle = tokio::spawn(async move { DaemonServer::start(&config_clone).await });
 
     // Poll for auth events and daemon completion
     let server = loop {

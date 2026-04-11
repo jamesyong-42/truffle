@@ -92,10 +92,7 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
     /// The store syncs on namespace `"ss:{store_id}"`. The caller must hold
     /// an `Arc<Node<N>>` because the background task needs to outlive this
     /// constructor call.
-    pub fn new<N: NetworkProvider + 'static>(
-        node: Arc<Node<N>>,
-        store_id: &str,
-    ) -> Arc<Self> {
+    pub fn new<N: NetworkProvider + 'static>(node: Arc<Node<N>>, store_id: &str) -> Arc<Self> {
         Self::new_with_backend(node, store_id, Arc::new(MemoryBackend))
     }
 
@@ -109,44 +106,44 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         store_id: &str,
         backend: Arc<dyn StoreBackend>,
     ) -> Arc<Self> {
-        let device_id = node.local_info().id;
+        // Phase 1 of RFC 017: synced store still uses the Tailscale stable
+        // ID as the per-device key. Phase 2 will switch to `device_id`
+        // (the ULID) once it propagates via the hello handshake.
+        let device_id = node.local_info().tailscale_id;
         let (event_tx, _) = broadcast::channel(256);
         let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
 
         // Attempt to restore persisted local slice.
-        let (local, initial_version) =
-            match backend.load(store_id, &device_id) {
-                Some((data, version)) => {
-                    match serde_json::from_slice::<T>(&data) {
-                        Ok(typed) => {
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64;
-                            let slice = Slice {
-                                device_id: device_id.clone(),
-                                data: typed,
-                                version,
-                                updated_at: now,
-                            };
-                            tracing::info!(
-                                store = store_id,
-                                version = version,
-                                "synced_store: restored local slice from backend"
-                            );
-                            (Some(slice), version)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                store = store_id,
-                                "synced_store: failed to deserialize persisted data, starting fresh: {e}"
-                            );
-                            (None, 0)
-                        }
-                    }
+        let (local, initial_version) = match backend.load(store_id, &device_id) {
+            Some((data, version)) => match serde_json::from_slice::<T>(&data) {
+                Ok(typed) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let slice = Slice {
+                        device_id: device_id.clone(),
+                        data: typed,
+                        version,
+                        updated_at: now,
+                    };
+                    tracing::info!(
+                        store = store_id,
+                        version = version,
+                        "synced_store: restored local slice from backend"
+                    );
+                    (Some(slice), version)
                 }
-                None => (None, 0),
-            };
+                Err(e) => {
+                    tracing::warn!(
+                        store = store_id,
+                        "synced_store: failed to deserialize persisted data, starting fresh: {e}"
+                    );
+                    (None, 0)
+                }
+            },
+            None => (None, 0),
+        };
 
         let inner = Arc::new(StoreInner {
             store_id: store_id.to_string(),
@@ -294,7 +291,10 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         let mut handle = self.task_handle.lock().await;
         if let Some(h) = handle.take() {
             h.abort();
-            tracing::info!(store = self.inner.store_id.as_str(), "synced_store: stopped");
+            tracing::info!(
+                store = self.inner.store_id.as_str(),
+                "synced_store: stopped"
+            );
         }
     }
 }

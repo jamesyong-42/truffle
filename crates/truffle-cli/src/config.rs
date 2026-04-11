@@ -298,9 +298,7 @@ impl TruffleConfig {
     /// If the file does not exist, returns default configuration.
     /// If the file exists but is invalid TOML, returns an error.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        let path = path
-            .map(PathBuf::from)
-            .unwrap_or_else(Self::default_path);
+        let path = path.map(PathBuf::from).unwrap_or_else(Self::default_path);
 
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
@@ -345,16 +343,15 @@ impl TruffleConfig {
 
     /// Save configuration to a file.
     pub fn save(&self, path: Option<&Path>) -> Result<(), ConfigError> {
-        let path = path
-            .map(PathBuf::from)
-            .unwrap_or_else(Self::default_path);
+        let path = path.map(PathBuf::from).unwrap_or_else(Self::default_path);
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ConfigError::WriteError)?;
         }
 
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::WriteError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let toml_str = toml::to_string_pretty(self).map_err(|e| {
+            ConfigError::WriteError(std::io::Error::new(std::io::ErrorKind::Other, e))
+        })?;
         std::fs::write(&path, toml_str).map_err(ConfigError::WriteError)
     }
 
@@ -445,7 +442,11 @@ log_file = "/tmp/truffle.log"
     #[test]
     fn test_compact_name_generic_ip() {
         let name = compact_name("ip-172-31-75-21.ec2.internal");
-        assert!(name.starts_with("linux-") || name.starts_with("macos-") || name.starts_with("windows-"));
+        assert!(
+            name.starts_with("linux-")
+                || name.starts_with("macos-")
+                || name.starts_with("windows-")
+        );
         assert!(name.len() <= 15);
     }
 

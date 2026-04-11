@@ -20,9 +20,7 @@ pub async fn run(config: &TruffleConfig, json: bool, _watch: bool) -> Result<(),
         .map_err(|e| (exit_codes::ERROR, e.to_string()))?;
 
     if json {
-        let node_name = result["name"]
-            .as_str()
-            .unwrap_or(&config.node.name);
+        let node_name = result["name"].as_str().unwrap_or(&config.node.name);
         let mut map = json_output::envelope(node_name);
 
         // Merge daemon response fields into the envelope

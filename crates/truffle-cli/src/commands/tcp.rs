@@ -14,14 +14,12 @@ pub async fn run(
     json: bool,
 ) -> Result<(), (i32, String)> {
     // Parse target as node:port
-    let (node, port_str) = target
-        .rsplit_once(':')
-        .ok_or_else(|| {
-            (
-                exit_codes::USAGE,
-                format!("Invalid target format: {target}. Expected 'node:port'."),
-            )
-        })?;
+    let (node, port_str) = target.rsplit_once(':').ok_or_else(|| {
+        (
+            exit_codes::USAGE,
+            format!("Invalid target format: {target}. Expected 'node:port'."),
+        )
+    })?;
 
     let port: u16 = port_str
         .parse()

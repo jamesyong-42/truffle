@@ -53,7 +53,10 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
         .to_string_lossy()
         .to_string();
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        tracing::error!(dir = output_dir.as_str(), "Failed to create output dir: {e}");
+        tracing::error!(
+            dir = output_dir.as_str(),
+            "Failed to create output dir: {e}"
+        );
     }
     let offer_rx = node.file_transfer().offer_channel(node.clone()).await;
 
@@ -70,7 +73,8 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     populate_peers(&node, &mut app).await;
 
     // Spawn event collectors — also get the sender for /cp to push transfer progress
-    let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx, Some(offer_rx));
+    let (event_tx, mut event_rx) =
+        event::spawn_event_collectors(peer_rx, chat_rx, ft_rx, Some(offer_rx));
 
     // Schedule a delayed re-poll of peers. The sidecar's WatchIPNBus may not
     // have delivered its first PeersReceived event yet at startup, and the
@@ -228,10 +232,7 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::InProgress {
-                            percent,
-                            speed_bps,
-                        };
+                        *status = app::TransferStatus::InProgress { percent, speed_bps };
                         break;
                     }
                 }
@@ -250,16 +251,15 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::Complete { sha256: sha256.clone() };
+                        *status = app::TransferStatus::Complete {
+                            sha256: sha256.clone(),
+                        };
                         break;
                     }
                 }
             }
         }
-        AppEvent::TransferFailed {
-            file_name,
-            reason,
-        } => {
+        AppEvent::TransferFailed { file_name, reason } => {
             for item in app.items.iter_mut().rev() {
                 if let app::DisplayItem::FileTransfer {
                     file_name: ref name,
@@ -268,7 +268,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::Failed { reason: reason.clone() };
+                        *status = app::TransferStatus::Failed {
+                            reason: reason.clone(),
+                        };
                         break;
                     }
                 }
@@ -292,7 +294,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             if let Some(dialog) = &app.transfer_dialog {
                 if dialog.created_at.elapsed() > std::time::Duration::from_secs(60) {
                     // Auto-reject and close
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("timed out (60s)");
                     }
@@ -300,8 +304,7 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                         time: chrono::Local::now(),
                         text: format!(
                             "  File offer from {} timed out ({})",
-                            dialog.offer.from_name,
-                            dialog.offer.file_name,
+                            dialog.offer.from_name, dialog.offer.file_name,
                         ),
                         level: app::SystemLevel::Warning,
                     });
@@ -333,7 +336,9 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             }
             KeyCode::Enter => {
                 // Check if current selection is a file or directory
-                let is_file = app.file_picker.as_ref()
+                let is_file = app
+                    .file_picker
+                    .as_ref()
                     .map(|e| !e.current().is_dir)
                     .unwrap_or(false);
 
@@ -361,8 +366,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         if dialog.phase == app::TransferDialogPhase::SaveAs {
                             if let Some(ref explorer) = app.file_picker {
-                                let dir_path = explorer.current().path.to_string_lossy().to_string();
-                                dialog.save_path_input = format!("{}/{}", dir_path, dialog.offer.file_name);
+                                let dir_path =
+                                    explorer.current().path.to_string_lossy().to_string();
+                                dialog.save_path_input =
+                                    format!("{}/{}", dir_path, dialog.offer.file_name);
                                 dialog.save_path_cursor = dialog.save_path_input.chars().count();
                             }
                             app.file_picker = None;
@@ -819,7 +826,9 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     // Reject
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("rejected by user");
                     }
@@ -835,7 +844,9 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     // Accept and add peer to auto-accept list
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     let save_path = dialog.save_path_input.clone();
                     let peer_id = dialog.offer.from_peer.clone();
                     let peer_name = app
@@ -867,17 +878,16 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     });
                     app.push_item(app::DisplayItem::System {
                         time: chrono::Local::now(),
-                        text: format!(
-                            "  Future files from {} accepted automatically",
-                            peer_name,
-                        ),
+                        text: format!("  Future files from {} accepted automatically", peer_name,),
                         level: app::SystemLevel::Info,
                     });
                     show_next_pending_offer(app);
                 }
                 KeyCode::Esc => {
                     // Esc in prompt phase rejects (same as 'r')
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("dismissed");
                     }
@@ -932,10 +942,8 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         if dialog.save_path_cursor > 0 {
                             dialog.save_path_cursor -= 1;
-                            let byte_pos = char_to_byte_pos(
-                                &dialog.save_path_input,
-                                dialog.save_path_cursor,
-                            );
+                            let byte_pos =
+                                char_to_byte_pos(&dialog.save_path_input, dialog.save_path_cursor);
                             dialog.save_path_input.remove(byte_pos);
                         }
                     }
@@ -944,18 +952,15 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         let char_count = dialog.save_path_input.chars().count();
                         if dialog.save_path_cursor < char_count {
-                            let byte_pos = char_to_byte_pos(
-                                &dialog.save_path_input,
-                                dialog.save_path_cursor,
-                            );
+                            let byte_pos =
+                                char_to_byte_pos(&dialog.save_path_input, dialog.save_path_cursor);
                             dialog.save_path_input.remove(byte_pos);
                         }
                     }
                 }
                 KeyCode::Left => {
                     if let Some(ref mut dialog) = app.transfer_dialog {
-                        dialog.save_path_cursor =
-                            dialog.save_path_cursor.saturating_sub(1);
+                        dialog.save_path_cursor = dialog.save_path_cursor.saturating_sub(1);
                     }
                 }
                 KeyCode::Right => {
@@ -973,8 +978,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::End => {
                     if let Some(ref mut dialog) = app.transfer_dialog {
-                        dialog.save_path_cursor =
-                            dialog.save_path_input.chars().count();
+                        dialog.save_path_cursor = dialog.save_path_input.chars().count();
                     }
                 }
                 KeyCode::Tab => {
@@ -1004,7 +1008,9 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
 
 /// Accept the current offer and show next pending.
 fn accept_current_offer(app: &mut AppState) {
-    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+    let Some(mut dialog) = app.transfer_dialog.take() else {
+        return;
+    };
     let save_path = dialog.save_path_input.clone();
     if let Some(responder) = dialog.responder.take() {
         responder.accept(&save_path);
@@ -1039,7 +1045,9 @@ async fn kill_existing_daemon() {
 
 /// Populate app.peers from the current Node peer list.
 async fn populate_peers(
-    node: &std::sync::Arc<truffle_core::node::Node<truffle_core::network::tailscale::TailscaleProvider>>,
+    node: &std::sync::Arc<
+        truffle_core::node::Node<truffle_core::network::tailscale::TailscaleProvider>,
+    >,
     app: &mut AppState,
 ) {
     let current_peers = node.peers().await;

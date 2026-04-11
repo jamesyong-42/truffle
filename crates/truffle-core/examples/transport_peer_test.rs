@@ -89,14 +89,11 @@ async fn main() {
 // ---------------------------------------------------------------------------
 
 async fn create_provider(role: &str) -> TailscaleProvider {
-    let sidecar = std::env::var("SIDECAR_PATH")
-        .unwrap_or_else(|_| "./sidecar-slim".to_string());
-    let state_dir = std::env::var("STATE_DIR").unwrap_or_else(|_| {
-        format!("/tmp/truffle-transport-test-{role}")
-    });
-    let hostname = std::env::var("HOSTNAME_OVERRIDE").unwrap_or_else(|_| {
-        format!("transport-test-{role}")
-    });
+    let sidecar = std::env::var("SIDECAR_PATH").unwrap_or_else(|_| "./sidecar-slim".to_string());
+    let state_dir = std::env::var("STATE_DIR")
+        .unwrap_or_else(|_| format!("/tmp/truffle-transport-test-{role}"));
+    let hostname =
+        std::env::var("HOSTNAME_OVERRIDE").unwrap_or_else(|_| format!("transport-test-{role}"));
 
     eprintln!("[{role}] Starting TailscaleProvider");
     eprintln!("[{role}]   sidecar:   {sidecar}");
@@ -105,8 +102,11 @@ async fn create_provider(role: &str) -> TailscaleProvider {
 
     let config = TailscaleConfig {
         binary_path: PathBuf::from(&sidecar),
+        app_id: "transport-test".to_string(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+        device_name: hostname.clone(),
         state_dir,
-        hostname,
+        hostname: format!("truffle-transport-test-{hostname}"),
         auth_key: std::env::var("TS_AUTHKEY").ok(),
         ephemeral: None,
         tags: None,
@@ -130,13 +130,19 @@ async fn create_provider(role: &str) -> TailscaleProvider {
                     eprintln!();
                 }
                 Ok(NetworkPeerEvent::Joined(peer)) => {
-                    eprintln!("[{role_owned}] Peer joined: {} ({})", peer.hostname, peer.ip);
+                    eprintln!(
+                        "[{role_owned}] Peer joined: {} ({})",
+                        peer.hostname, peer.ip
+                    );
                 }
                 Ok(NetworkPeerEvent::Left(id)) => {
                     eprintln!("[{role_owned}] Peer left: {id}");
                 }
                 Ok(NetworkPeerEvent::Updated(peer)) => {
-                    eprintln!("[{role_owned}] Peer updated: {} ({})", peer.hostname, peer.ip);
+                    eprintln!(
+                        "[{role_owned}] Peer updated: {} ({})",
+                        peer.hostname, peer.ip
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -151,8 +157,10 @@ async fn create_provider(role: &str) -> TailscaleProvider {
 
     let identity = provider.local_identity();
     let addr = provider.local_addr();
-    eprintln!("[{role}] Online! id={}, ip={:?}, hostname={}",
-        identity.id, addr.ip, addr.hostname);
+    eprintln!(
+        "[{role}] Online! tailscale_id={}, ip={:?}, hostname={}",
+        identity.tailscale_id, addr.ip, addr.hostname
+    );
 
     provider
 }
@@ -169,14 +177,20 @@ async fn run_server() {
 
     // --- TCP echo server ---
     let tcp_transport = TcpTransport::new(provider.clone());
-    let mut tcp_listener = tcp_transport.listen(TCP_PORT).await.expect("TCP listen failed");
+    let mut tcp_listener = tcp_transport
+        .listen(TCP_PORT)
+        .await
+        .expect("TCP listen failed");
     eprintln!("[server] TCP  listening on port {TCP_PORT}");
 
     tokio::spawn(async move {
         loop {
             match tcp_listener.accept().await {
                 Some(incoming) => {
-                    eprintln!("[server/tcp] Accepted connection from {}", incoming.remote_addr);
+                    eprintln!(
+                        "[server/tcp] Accepted connection from {}",
+                        incoming.remote_addr
+                    );
                     tokio::spawn(async move {
                         let mut stream = incoming.stream;
                         let mut buf = [0u8; 4096];
@@ -188,8 +202,11 @@ async fn run_server() {
                                 }
                                 Ok(n) => {
                                     let data = &buf[..n];
-                                    eprintln!("[server/tcp] Received {} bytes: {:?}",
-                                        n, String::from_utf8_lossy(data));
+                                    eprintln!(
+                                        "[server/tcp] Received {} bytes: {:?}",
+                                        n,
+                                        String::from_utf8_lossy(data)
+                                    );
                                     if let Err(e) = stream.write_all(data).await {
                                         eprintln!("[server/tcp] Write error: {e}");
                                         break;
@@ -238,8 +255,11 @@ async fn run_server() {
                         loop {
                             match stream.recv().await {
                                 Ok(Some(data)) => {
-                                    eprintln!("[server/ws] Received {} bytes: {:?}",
-                                        data.len(), String::from_utf8_lossy(&data));
+                                    eprintln!(
+                                        "[server/ws] Received {} bytes: {:?}",
+                                        data.len(),
+                                        String::from_utf8_lossy(&data)
+                                    );
                                     if let Err(e) = stream.send(&data).await {
                                         eprintln!("[server/ws] Send error: {e}");
                                         break;
@@ -270,7 +290,16 @@ async fn run_server() {
     // The QuicTransport automatically binds via NetworkProvider::bind_udp()
     // and wraps the socket in TsnetUdpSocket so that datagrams route through
     // the tsnet relay instead of the host network.
-    match QuicTransport::new(provider.clone(), QuicConfig { port: QUIC_PORT, ..QuicConfig::default() }).listen().await {
+    match QuicTransport::new(
+        provider.clone(),
+        QuicConfig {
+            port: QUIC_PORT,
+            ..QuicConfig::default()
+        },
+    )
+    .listen()
+    .await
+    {
         Ok(mut quic_listener) => {
             eprintln!("[server] QUIC listening on port {QUIC_PORT} (via TsnetUdpSocket)");
             tokio::spawn(async move {
@@ -283,8 +312,11 @@ async fn run_server() {
                                 loop {
                                     match stream.recv().await {
                                         Ok(Some(data)) => {
-                                            eprintln!("[server/quic] Received {} bytes: {:?}",
-                                                data.len(), String::from_utf8_lossy(&data));
+                                            eprintln!(
+                                                "[server/quic] Received {} bytes: {:?}",
+                                                data.len(),
+                                                String::from_utf8_lossy(&data)
+                                            );
                                             if let Err(e) = stream.send(&data).await {
                                                 eprintln!("[server/quic] Send error: {e}");
                                                 break;
@@ -330,8 +362,12 @@ async fn run_server() {
             match udp_socket.recv_from(&mut buf).await {
                 Ok((n, sender)) => {
                     let data = &buf[..n];
-                    eprintln!("[server/udp] Received {} bytes from {}: {:?}",
-                        n, sender, String::from_utf8_lossy(data));
+                    eprintln!(
+                        "[server/udp] Received {} bytes from {}: {:?}",
+                        n,
+                        sender,
+                        String::from_utf8_lossy(data)
+                    );
                     // Echo back to sender
                     if let Err(e) = udp_socket.send_to(data, &sender).await {
                         eprintln!("[server/udp] Send error: {e}");
@@ -387,13 +423,21 @@ async fn run_client(server_ip: &str) {
     eprintln!("[test/tcp] Dialing {server_ip}:{TCP_PORT}...");
     let tcp_result = tokio::time::timeout(TEST_TIMEOUT, async {
         let tcp_transport = TcpTransport::new(provider.clone());
-        let mut stream = tcp_transport.open(&peer_addr, TCP_PORT).await
+        let mut stream = tcp_transport
+            .open(&peer_addr, TCP_PORT)
+            .await
             .map_err(|e| format!("dial failed: {e}"))?;
 
         let msg = b"hello tcp";
         let expected_len = msg.len();
-        stream.write_all(msg).await.map_err(|e| format!("write failed: {e}"))?;
-        stream.flush().await.map_err(|e| format!("flush failed: {e}"))?;
+        stream
+            .write_all(msg)
+            .await
+            .map_err(|e| format!("write failed: {e}"))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("flush failed: {e}"))?;
         eprintln!("[test/tcp] Sent {expected_len} bytes, reading echo...");
 
         // Read with a loop — the bridge adds latency so the echo may not
@@ -431,9 +475,14 @@ async fn run_client(server_ip: &str) {
         if reply == "hello tcp" {
             Ok(format!("echoed {} bytes correctly", response.len()))
         } else {
-            Err(format!("expected 'hello tcp', got '{}' ({} bytes)", reply, response.len()))
+            Err(format!(
+                "expected 'hello tcp', got '{}' ({} bytes)",
+                reply,
+                response.len()
+            ))
         }
-    }).await;
+    })
+    .await;
 
     match tcp_result {
         Ok(Ok(detail)) => {
@@ -460,13 +509,21 @@ async fn run_client(server_ip: &str) {
             ..WsConfig::default()
         };
         let ws_transport = WebSocketTransport::new(provider.clone(), ws_config);
-        let mut stream = ws_transport.connect(&peer_addr).await
+        let mut stream = ws_transport
+            .connect(&peer_addr)
+            .await
             .map_err(|e| format!("connect failed: {e}"))?;
 
         let msg = b"hello ws";
-        stream.send(msg).await.map_err(|e| format!("send failed: {e}"))?;
+        stream
+            .send(msg)
+            .await
+            .map_err(|e| format!("send failed: {e}"))?;
 
-        let reply = stream.recv().await.map_err(|e| format!("recv failed: {e}"))?
+        let reply = stream
+            .recv()
+            .await
+            .map_err(|e| format!("recv failed: {e}"))?
             .ok_or_else(|| "stream closed before reply".to_string())?;
 
         let reply_str = String::from_utf8_lossy(&reply).to_string();
@@ -477,7 +534,8 @@ async fn run_client(server_ip: &str) {
         } else {
             Err(format!("expected 'hello ws', got '{reply_str}'"))
         }
-    }).await;
+    })
+    .await;
 
     match ws_result {
         Ok(Ok(detail)) => {
@@ -490,7 +548,11 @@ async fn run_client(server_ip: &str) {
         }
         Err(_) => {
             eprintln!("[test/ws] FAIL - timeout after {TEST_TIMEOUT:?}");
-            results.push(("WebSocket", false, format!("timeout after {TEST_TIMEOUT:?}")));
+            results.push((
+                "WebSocket",
+                false,
+                format!("timeout after {TEST_TIMEOUT:?}"),
+            ));
         }
     }
 
@@ -505,13 +567,21 @@ async fn run_client(server_ip: &str) {
             ..QuicConfig::default()
         };
         let quic_transport = QuicTransport::new(provider.clone(), quic_config);
-        let mut stream = quic_transport.connect(&peer_addr).await
+        let mut stream = quic_transport
+            .connect(&peer_addr)
+            .await
             .map_err(|e| format!("connect failed: {e}"))?;
 
         let msg = b"hello quic";
-        stream.send(msg).await.map_err(|e| format!("send failed: {e}"))?;
+        stream
+            .send(msg)
+            .await
+            .map_err(|e| format!("send failed: {e}"))?;
 
-        let reply = stream.recv().await.map_err(|e| format!("recv failed: {e}"))?
+        let reply = stream
+            .recv()
+            .await
+            .map_err(|e| format!("recv failed: {e}"))?
             .ok_or_else(|| "stream closed before reply".to_string())?;
 
         let reply_str = String::from_utf8_lossy(&reply).to_string();
@@ -522,7 +592,8 @@ async fn run_client(server_ip: &str) {
         } else {
             Err(format!("expected 'hello quic', got '{reply_str}'"))
         }
-    }).await;
+    })
+    .await;
 
     match quic_result {
         Ok(Ok(detail)) => {
@@ -547,10 +618,15 @@ async fn run_client(server_ip: &str) {
     eprintln!("[test/udp] Binding UDP socket via tsnet relay...");
     let udp_result = tokio::time::timeout(TEST_TIMEOUT, async {
         let udp_transport = UdpTransport::new(provider.clone(), UdpConfig::default());
-        let socket = udp_transport.bind(0).await
+        let socket = udp_transport
+            .bind(0)
+            .await
             .map_err(|e| format!("bind failed: {e}"))?;
 
-        let local = socket.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| "?".into());
+        let local = socket
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "?".into());
         eprintln!("[test/udp] Bound socket at {local}");
 
         // Detect which socket variant we got. If it's Direct (bound to 0.0.0.0),
@@ -566,12 +642,16 @@ async fn run_client(server_ip: &str) {
         let msg = b"hello udp";
         let target = format!("{server_ip}:{UDP_PORT}");
         eprintln!("[test/udp] Sending {} bytes to {target}...", msg.len());
-        socket.send_to(msg, &target).await
+        socket
+            .send_to(msg, &target)
+            .await
             .map_err(|e| format!("send_to failed: {e}"))?;
 
         eprintln!("[test/udp] Waiting for echo...");
         let mut buf = [0u8; 1024];
-        let (n, from) = socket.recv_from(&mut buf).await
+        let (n, from) = socket
+            .recv_from(&mut buf)
+            .await
             .map_err(|e| format!("recv_from failed: {e}"))?;
 
         let reply = String::from_utf8_lossy(&buf[..n]).to_string();
@@ -581,7 +661,8 @@ async fn run_client(server_ip: &str) {
         } else {
             Err(format!("expected 'hello udp', got '{reply}'"))
         }
-    }).await;
+    })
+    .await;
 
     match udp_result {
         Ok(Ok(detail)) => {
@@ -617,7 +698,10 @@ async fn run_client(server_ip: &str) {
         eprintln!("  [{status}] {name:10} — {detail}");
     }
     eprintln!("=========================================================");
-    eprintln!("  {pass_count} passed, {fail_count} failed out of {} tests", results.len());
+    eprintln!(
+        "  {pass_count} passed, {fail_count} failed out of {} tests",
+        results.len()
+    );
     eprintln!("=========================================================");
 
     if fail_count > 0 {

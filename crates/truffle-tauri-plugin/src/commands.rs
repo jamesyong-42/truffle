@@ -19,9 +19,7 @@ use crate::TruffleState;
 // Helper: get a clone of the Arc<Node> from state, or error
 // ---------------------------------------------------------------------------
 
-async fn get_node(
-    state: &TruffleState,
-) -> Result<Arc<Node<TailscaleProvider>>, String> {
+async fn get_node(state: &TruffleState) -> Result<Arc<Node<TailscaleProvider>>, String> {
     state
         .node
         .read()
@@ -111,18 +109,14 @@ pub async fn stop(state: State<'_, TruffleState>) -> Result<(), String> {
 
 /// Get the local node's identity.
 #[command]
-pub async fn get_local_info(
-    state: State<'_, TruffleState>,
-) -> Result<NodeIdentityJs, String> {
+pub async fn get_local_info(state: State<'_, TruffleState>) -> Result<NodeIdentityJs, String> {
     let node = get_node(&state).await?;
     Ok(node.local_info().into())
 }
 
 /// Get all known peers.
 #[command]
-pub async fn get_peers(
-    state: State<'_, TruffleState>,
-) -> Result<Vec<PeerJs>, String> {
+pub async fn get_peers(state: State<'_, TruffleState>) -> Result<Vec<PeerJs>, String> {
     let node = get_node(&state).await?;
     let peers = node.peers().await;
     Ok(peers.into_iter().map(PeerJs::from).collect())
@@ -134,10 +128,7 @@ pub async fn get_peers(
 
 /// Ping a peer by ID or name.
 #[command]
-pub async fn ping(
-    state: State<'_, TruffleState>,
-    peer_id: String,
-) -> Result<PingResultJs, String> {
+pub async fn ping(state: State<'_, TruffleState>, peer_id: String) -> Result<PingResultJs, String> {
     let node = get_node(&state).await?;
     let result = node.ping(&peer_id).await.map_err(|e| e.to_string())?;
     Ok(result.into())
@@ -145,9 +136,7 @@ pub async fn ping(
 
 /// Get health information from the network layer.
 #[command]
-pub async fn health(
-    state: State<'_, TruffleState>,
-) -> Result<HealthInfoJs, String> {
+pub async fn health(state: State<'_, TruffleState>) -> Result<HealthInfoJs, String> {
     let node = get_node(&state).await?;
     Ok(node.health().await.into())
 }
@@ -224,10 +213,7 @@ pub async fn pull_file(
 ///
 /// All incoming offers will be automatically accepted and saved to `output_dir`.
 #[command]
-pub async fn auto_accept(
-    state: State<'_, TruffleState>,
-    output_dir: String,
-) -> Result<(), String> {
+pub async fn auto_accept(state: State<'_, TruffleState>, output_dir: String) -> Result<(), String> {
     let node = get_node(&state).await?;
     let ft = node.file_transfer();
     ft.auto_accept(node.clone(), &output_dir).await;
@@ -236,9 +222,7 @@ pub async fn auto_accept(
 
 /// Auto-reject all incoming file offers.
 #[command]
-pub async fn auto_reject(
-    state: State<'_, TruffleState>,
-) -> Result<(), String> {
+pub async fn auto_reject(state: State<'_, TruffleState>) -> Result<(), String> {
     let node = get_node(&state).await?;
     let ft = node.file_transfer();
     ft.auto_reject(node.clone()).await;

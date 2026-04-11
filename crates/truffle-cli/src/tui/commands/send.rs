@@ -94,18 +94,12 @@ fn parse_send_args(args: &str) -> Option<(String, String)> {
 }
 
 /// Resolve a device name to an online PeerInfo (case-insensitive, prefix match).
-fn resolve_peer(
-    app: &AppState,
-    name: &str,
-) -> Option<crate::tui::app::PeerInfo> {
+fn resolve_peer(app: &AppState, name: &str) -> Option<crate::tui::app::PeerInfo> {
     let lower = name.to_lowercase();
     let online_peers: Vec<_> = app.peers.iter().filter(|p| p.online).collect();
 
     // Exact match (case-insensitive)
-    if let Some(peer) = online_peers
-        .iter()
-        .find(|p| p.name.to_lowercase() == lower)
-    {
+    if let Some(peer) = online_peers.iter().find(|p| p.name.to_lowercase() == lower) {
         return Some((*peer).clone());
     }
 

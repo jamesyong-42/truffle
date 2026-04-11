@@ -443,7 +443,8 @@ mod tests {
 
     #[test]
     fn deserialize_peer_left_event() {
-        let json = r#"{"event":"tsnet:peerChanged","data":{"changeType":"left","peerId":"node456"}}"#;
+        let json =
+            r#"{"event":"tsnet:peerChanged","data":{"changeType":"left","peerId":"node456"}}"#;
         let event: SidecarEvent = serde_json::from_str(json).unwrap();
         let data: PeerChangedEventData = serde_json::from_value(event.data).unwrap();
         assert_eq!(data.change_type, "left");
@@ -453,7 +454,8 @@ mod tests {
 
     #[test]
     fn deserialize_error_event() {
-        let json = r#"{"event":"tsnet:error","data":{"code":"NOT_RUNNING","message":"node not running"}}"#;
+        let json =
+            r#"{"event":"tsnet:error","data":{"code":"NOT_RUNNING","message":"node not running"}}"#;
         let event: SidecarEvent = serde_json::from_str(json).unwrap();
         let data: ErrorEventData = serde_json::from_value(event.data).unwrap();
         assert_eq!(data.code, "NOT_RUNNING");

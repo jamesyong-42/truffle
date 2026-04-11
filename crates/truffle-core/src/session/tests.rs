@@ -6,11 +6,11 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::network::NetworkProvider;
 use crate::network::{
     HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
     NetworkTcpListener, NetworkUdpSocket, NodeIdentity, PeerAddr, PingResult,
 };
-use crate::network::NetworkProvider;
 use crate::transport::websocket::WebSocketTransport;
 use crate::transport::WsConfig;
 
@@ -36,9 +36,11 @@ impl MockNetworkProvider {
         let (peer_event_tx, _) = broadcast::channel(64);
         Self {
             identity: NodeIdentity {
-                id: id.to_string(),
-                hostname: format!("truffle-test-{id}"),
-                name: format!("Test Node {id}"),
+                app_id: "test".to_string(),
+                device_id: format!("device-{id}"),
+                device_name: format!("Test Node {id}"),
+                tailscale_hostname: format!("truffle-test-{id}"),
+                tailscale_id: id.to_string(),
                 dns_name: None,
                 ip: Some("127.0.0.1".parse().unwrap()),
             },
@@ -229,12 +231,8 @@ async fn test_peers_from_network_events() {
     // Inject peer joined events
     let peer1 = make_network_peer("peer-1", "100.64.0.1");
     let peer2 = make_network_peer("peer-2", "100.64.0.2");
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer1))
-        .unwrap();
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer2))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer1)).unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer2)).unwrap();
 
     // Give the event loop time to process
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -254,9 +252,7 @@ async fn test_peer_left_removes() {
     registry.start().await;
 
     let peer = make_network_peer("peer-1", "100.64.0.1");
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer)).unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(registry.peers().await.len(), 1);
@@ -276,9 +272,7 @@ async fn test_peers_online_without_connection() {
     registry.start().await;
 
     let peer = make_network_peer("peer-1", "100.64.0.1");
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer)).unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -288,7 +282,10 @@ async fn test_peers_online_without_connection() {
     let p = &peers[0];
     assert_eq!(p.id, "peer-1");
     assert!(p.online, "peer should be online");
-    assert!(!p.ws_connected, "peer should NOT be ws_connected (no WS yet)");
+    assert!(
+        !p.ws_connected,
+        "peer should NOT be ws_connected (no WS yet)"
+    );
 }
 
 #[tokio::test]
@@ -298,9 +295,7 @@ async fn test_peer_updated_preserves_connected() {
     registry.start().await;
 
     let peer = make_network_peer("peer-1", "100.64.0.1");
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer)).unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -328,9 +323,7 @@ async fn test_peer_event_subscription() {
     registry.start().await;
 
     let peer = make_network_peer("peer-1", "100.64.0.1");
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer)).unwrap();
 
     let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
         .await
@@ -374,9 +367,7 @@ async fn test_send_offline_peer_errors() {
 
     let mut peer = make_network_peer("peer-1", "100.64.0.1");
     peer.online = false;
-    event_sender
-        .send(NetworkPeerEvent::Joined(peer))
-        .unwrap();
+    event_sender.send(NetworkPeerEvent::Joined(peer)).unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -413,7 +404,10 @@ async fn test_send_lazy_connects() {
     // Verify peer is known but not connected
     let peers = client_registry.peers().await;
     assert_eq!(peers.len(), 1);
-    assert!(!peers[0].ws_connected, "should not be connected before send");
+    assert!(
+        !peers[0].ws_connected,
+        "should not be connected before send"
+    );
 
     // Send — triggers lazy connect
     let msg = b"hello from lazy connect";
@@ -514,14 +508,8 @@ async fn test_broadcast_sends_to_all() {
 
     // Both clients send to broadcaster to establish connections
     // (the broadcaster's accept loop caches these connections)
-    client1_reg
-        .send("broadcaster", b"hello1")
-        .await
-        .unwrap();
-    client2_reg
-        .send("broadcaster", b"hello2")
-        .await
-        .unwrap();
+    client1_reg.send("broadcaster", b"hello1").await.unwrap();
+    client2_reg.send("broadcaster", b"hello2").await.unwrap();
 
     // Give the broadcaster time to accept and cache both connections
     tokio::time::sleep(Duration::from_millis(200)).await;

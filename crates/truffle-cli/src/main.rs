@@ -196,8 +196,9 @@ async fn main() {
     let global_json = cli.json;
 
     // Determine if we're launching the TUI (bare command on a TTY)
-    let is_tui_mode =
-        cli.command.is_none() && !global_json && std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let is_tui_mode = cli.command.is_none()
+        && !global_json
+        && std::io::IsTerminal::is_terminal(&std::io::stdin());
 
     // Initialize tracing — suppress in TUI mode to prevent log corruption,
     // write to a log file instead.
@@ -215,8 +216,7 @@ async fn main() {
         {
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
                 )
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
@@ -390,12 +390,7 @@ async fn main() {
 fn handle_error(json: bool, code: i32, msg: &str) {
     if json {
         if !msg.is_empty() {
-            json_output::print_json(&json_output::error_envelope(
-                code,
-                "command_error",
-                msg,
-                "",
-            ));
+            json_output::print_json(&json_output::error_envelope(code, "command_error", msg, ""));
         }
     } else if !msg.is_empty() && !msg.contains('\u{2717}') {
         output::print_error(msg, "", "");

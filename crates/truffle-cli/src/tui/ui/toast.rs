@@ -43,7 +43,11 @@ pub fn render_toast(f: &mut Frame, area: Rect, app: &AppState) {
     // Truncate text if needed
     let max_text = (width as usize).saturating_sub(4);
     let display_text = if toast.text.chars().count() > max_text {
-        let truncated: String = toast.text.chars().take(max_text.saturating_sub(3)).collect();
+        let truncated: String = toast
+            .text
+            .chars()
+            .take(max_text.saturating_sub(3))
+            .collect();
         format!("{truncated}...")
     } else {
         toast.text.clone()

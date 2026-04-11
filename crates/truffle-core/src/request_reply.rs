@@ -129,9 +129,11 @@ mod tests {
             let (peer_event_tx, _) = tokio::sync::broadcast::channel(64);
             Self {
                 identity: NodeIdentity {
-                    id: id.to_string(),
-                    hostname: format!("truffle-test-{id}"),
-                    name: format!("Test Node {id}"),
+                    app_id: "test".to_string(),
+                    device_id: format!("device-{id}"),
+                    device_name: format!("Test Node {id}"),
+                    tailscale_hostname: format!("truffle-test-{id}"),
+                    tailscale_id: id.to_string(),
                     dns_name: None,
                     ip: Some("127.0.0.1".parse().unwrap()),
                 },
@@ -151,30 +153,54 @@ mod tests {
     }
 
     impl NetworkProvider for MockNetworkProvider {
-        fn local_identity(&self) -> NodeIdentity { self.identity.clone() }
-        fn local_addr(&self) -> PeerAddr { self.local_addr.clone() }
+        fn local_identity(&self) -> NodeIdentity {
+            self.identity.clone()
+        }
+        fn local_addr(&self) -> PeerAddr {
+            self.local_addr.clone()
+        }
         fn peer_events(&self) -> tokio::sync::broadcast::Receiver<NetworkPeerEvent> {
             self.peer_event_tx.subscribe()
         }
 
-        async fn start(&mut self) -> Result<(), NetworkError> { Ok(()) }
-        async fn stop(&mut self) -> Result<(), NetworkError> { Ok(()) }
-        async fn peers(&self) -> Vec<NetworkPeer> { self.mock_peers.read().await.clone() }
-        async fn dial_tcp(&self, _addr: &str, _port: u16) -> Result<tokio::net::TcpStream, NetworkError> {
+        async fn start(&mut self) -> Result<(), NetworkError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), NetworkError> {
+            Ok(())
+        }
+        async fn peers(&self) -> Vec<NetworkPeer> {
+            self.mock_peers.read().await.clone()
+        }
+        async fn dial_tcp(
+            &self,
+            _addr: &str,
+            _port: u16,
+        ) -> Result<tokio::net::TcpStream, NetworkError> {
             Err(NetworkError::DialFailed("mock".into()))
         }
         async fn listen_tcp(&self, _port: u16) -> Result<NetworkTcpListener, NetworkError> {
             Err(NetworkError::ListenFailed("mock".into()))
         }
-        async fn unlisten_tcp(&self, _port: u16) -> Result<(), NetworkError> { Ok(()) }
+        async fn unlisten_tcp(&self, _port: u16) -> Result<(), NetworkError> {
+            Ok(())
+        }
         async fn bind_udp(&self, _port: u16) -> Result<NetworkUdpSocket, NetworkError> {
             Err(NetworkError::NotRunning)
         }
         async fn ping(&self, _addr: &str) -> Result<PingResult, NetworkError> {
-            Ok(PingResult { latency: Duration::from_millis(1), connection: "direct".to_string(), peer_addr: None })
+            Ok(PingResult {
+                latency: Duration::from_millis(1),
+                connection: "direct".to_string(),
+                peer_addr: None,
+            })
         }
         async fn health(&self) -> HealthInfo {
-            HealthInfo { state: "running".to_string(), healthy: true, ..Default::default() }
+            HealthInfo {
+                state: "running".to_string(),
+                healthy: true,
+                ..Default::default()
+            }
         }
     }
 
@@ -248,7 +274,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(RequestError::Timeout) | Err(RequestError::Send(_))));
+        assert!(matches!(
+            result,
+            Err(RequestError::Timeout) | Err(RequestError::Send(_))
+        ));
     }
 
     #[tokio::test]

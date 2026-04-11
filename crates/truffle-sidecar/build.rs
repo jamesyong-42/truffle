@@ -29,7 +29,9 @@ fn main() {
         "aarch64-unknown-linux-gnu" => ("tsnet-sidecar-linux-arm64", "sidecar-slim"),
         "x86_64-pc-windows-msvc" => ("tsnet-sidecar-windows-amd64.exe", "sidecar-slim.exe"),
         other => {
-            eprintln!("cargo:warning=truffle-sidecar: unsupported target {other}, skipping download");
+            eprintln!(
+                "cargo:warning=truffle-sidecar: unsupported target {other}, skipping download"
+            );
             println!("cargo:rustc-env=TRUFFLE_SIDECAR_PATH=truffle-sidecar");
             return;
         }
@@ -61,14 +63,13 @@ fn main() {
                 "cargo:rustc-env=TRUFFLE_SIDECAR_PATH={}",
                 sidecar_path.display()
             );
-            eprintln!(
-                "truffle-sidecar: downloaded to {}",
-                sidecar_path.display()
-            );
+            eprintln!("truffle-sidecar: downloaded to {}", sidecar_path.display());
         }
         Err(e) => {
             eprintln!("cargo:warning=truffle-sidecar: failed to download sidecar: {e}");
-            eprintln!("cargo:warning=truffle-sidecar: set TRUFFLE_SIDECAR_PATH to provide it manually");
+            eprintln!(
+                "cargo:warning=truffle-sidecar: set TRUFFLE_SIDECAR_PATH to provide it manually"
+            );
             // Fall back to PATH lookup at runtime
             println!("cargo:rustc-env=TRUFFLE_SIDECAR_PATH=truffle-sidecar");
         }

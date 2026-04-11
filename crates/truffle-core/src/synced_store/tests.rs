@@ -34,9 +34,11 @@ impl MockNetworkProvider {
         let (peer_event_tx, _) = broadcast::channel(64);
         Self {
             identity: NodeIdentity {
-                id: id.to_string(),
-                hostname: format!("truffle-test-{id}"),
-                name: format!("Test Node {id}"),
+                app_id: "test".to_string(),
+                device_id: format!("device-{id}"),
+                device_name: format!("Test Node {id}"),
+                tailscale_hostname: format!("truffle-test-{id}"),
+                tailscale_id: id.to_string(),
                 dns_name: None,
                 ip: Some("127.0.0.1".parse().unwrap()),
             },
@@ -537,7 +539,10 @@ fn test_file_backend_path_traversal_sanitization() {
 
     // Round-trip should succeed (same sanitization applied on load).
     let result = backend.load("../etc", "../../passwd");
-    assert!(result.is_some(), "round-trip through sanitized path should work");
+    assert!(
+        result.is_some(),
+        "round-trip through sanitized path should work"
+    );
 
     let (loaded, ver) = result.unwrap();
     assert_eq!(ver, 1);
@@ -585,7 +590,10 @@ async fn test_persistence_across_restart() {
 
         // Data should be restored from disk.
         let restored = store.local().await;
-        assert!(restored.is_some(), "local data should be restored from disk");
+        assert!(
+            restored.is_some(),
+            "local data should be restored from disk"
+        );
         assert_eq!(restored.unwrap(), state);
 
         // Version should be restored.

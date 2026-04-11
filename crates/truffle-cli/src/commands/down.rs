@@ -23,7 +23,10 @@ pub async fn run(config: &TruffleConfig, force: bool, json: bool) -> Result<(), 
         return Ok(());
     }
 
-    match client.request(method::SHUTDOWN, serde_json::json!({})).await {
+    match client
+        .request(method::SHUTDOWN, serde_json::json!({}))
+        .await
+    {
         Ok(_) => {
             if json {
                 let mut map = json_output::envelope(&config.node.name);
@@ -45,10 +48,7 @@ pub async fn run(config: &TruffleConfig, force: bool, json: bool) -> Result<(), 
                     output::print_success("Daemon stopped.");
                 }
             } else {
-                return Err((
-                    exit_codes::ERROR,
-                    format!("Failed to stop daemon: {e}"),
-                ));
+                return Err((exit_codes::ERROR, format!("Failed to stop daemon: {e}")));
             }
         }
     }

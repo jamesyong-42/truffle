@@ -16,12 +16,7 @@ pub fn envelope(node_name: &str) -> Map<String, Value> {
 
 /// Build a JSON error envelope per RFC 013 Section 11.6:
 /// `{"version": 1, "error": {"code": N, "type": "...", "message": "...", "suggestion": "..."}}`
-pub fn error_envelope(
-    code: i32,
-    error_type: &str,
-    message: &str,
-    suggestion: &str,
-) -> Value {
+pub fn error_envelope(code: i32, error_type: &str, message: &str, suggestion: &str) -> Value {
     let mut error_obj = Map::new();
     error_obj.insert("code".into(), code.into());
     error_obj.insert("type".into(), error_type.into());
@@ -38,7 +33,10 @@ pub fn error_envelope(
 
 /// Pretty-print a JSON value to stdout.
 pub fn print_json(value: &Value) {
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_default()
+    );
 }
 
 #[cfg(test)]

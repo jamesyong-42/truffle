@@ -240,13 +240,9 @@ impl From<truffle_core::session::PeerEvent> for PeerEventJs {
     fn from(e: truffle_core::session::PeerEvent) -> Self {
         use truffle_core::session::PeerEvent;
         match e {
-            PeerEvent::Joined(state) => PeerEventJs::Joined {
-                peer: state.into(),
-            },
+            PeerEvent::Joined(state) => PeerEventJs::Joined { peer: state.into() },
             PeerEvent::Left(id) => PeerEventJs::Left { id },
-            PeerEvent::Updated(state) => PeerEventJs::Updated {
-                peer: state.into(),
-            },
+            PeerEvent::Updated(state) => PeerEventJs::Updated { peer: state.into() },
             PeerEvent::WsConnected(id) => PeerEventJs::WsConnected { id },
             PeerEvent::WsDisconnected(id) => PeerEventJs::WsDisconnected { id },
             PeerEvent::AuthRequired { url } => PeerEventJs::AuthRequired { url },

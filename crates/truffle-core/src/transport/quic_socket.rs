@@ -264,9 +264,9 @@ impl UdpPoller for TsnetUdpPoller {
         // If we don't have a future yet, create one.
         if self.fut.is_none() {
             let socket = self.socket.clone();
-            self.fut = Some(Box::pin(async move {
-                socket.inner.inner().writable().await
-            }));
+            self.fut = Some(Box::pin(
+                async move { socket.inner.inner().writable().await },
+            ));
         }
 
         // Poll the future
@@ -341,7 +341,10 @@ mod tests {
         buf.extend_from_slice(&8080u16.to_be_bytes()); // port 8080
         buf.extend_from_slice(b"hello"); // payload
         let (addr, hdr_len) = TsnetUdpSocket::decode_header(&buf).unwrap();
-        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080));
+        assert_eq!(
+            addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080)
+        );
         assert_eq!(hdr_len, 6);
         assert_eq!(&buf[hdr_len..], b"hello");
     }
@@ -432,6 +435,8 @@ mod tests {
         bufs: &mut [IoSliceMut<'_>],
         meta: &mut [RecvMeta],
     ) -> usize {
-        std::future::poll_fn(|cx| socket.poll_recv(cx, bufs, meta)).await.unwrap()
+        std::future::poll_fn(|cx| socket.poll_recv(cx, bufs, meta))
+            .await
+            .unwrap()
     }
 }

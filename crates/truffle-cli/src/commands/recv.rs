@@ -40,10 +40,7 @@ pub async fn run(
             Some(t) => format!(" (timeout: {}s)", t),
             None => String::new(),
         };
-        println!(
-            "  Waiting for message{}{}...",
-            filter_msg, timeout_msg,
-        );
+        println!("  Waiting for message{}{}...", filter_msg, timeout_msg,);
     }
 
     let mut received_msg: Option<serde_json::Value> = None;
@@ -97,7 +94,10 @@ pub async fn run(
                     "truffle send <node> <msg>    send a message first",
                 );
             }
-            Err((crate::exit_codes::TIMEOUT, "Timed out waiting for a message".to_string()))
+            Err((
+                crate::exit_codes::TIMEOUT,
+                "Timed out waiting for a message".to_string(),
+            ))
         }
         Err(e) => Err((crate::exit_codes::ERROR, e.to_string())),
     }

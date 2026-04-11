@@ -87,7 +87,10 @@ pub fn sidecar_path() -> PathBuf {
     // 4. System paths (Unix only)
     #[cfg(not(windows))]
     {
-        for path in &["/usr/local/bin/sidecar-slim", "/usr/local/bin/truffle-sidecar"] {
+        for path in &[
+            "/usr/local/bin/sidecar-slim",
+            "/usr/local/bin/truffle-sidecar",
+        ] {
             let p = PathBuf::from(path);
             if p.exists() {
                 return p;
@@ -127,7 +130,11 @@ fn config_bin_dir() -> Option<PathBuf> {
         std::env::var("XDG_CONFIG_HOME")
             .ok()
             .map(PathBuf::from)
-            .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".config"))
+            })
             .map(|d| d.join("truffle/bin"))
     }
 

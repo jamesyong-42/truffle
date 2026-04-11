@@ -33,9 +33,9 @@
 //! }
 //! ```
 
-pub mod types;
-pub mod sender;
 pub mod receiver;
+pub mod sender;
+pub mod types;
 
 pub use types::*;
 
@@ -258,11 +258,7 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
         if let Some(h) = handle.take() {
             h.abort();
         }
-        let h = receiver::spawn_receive_handler(
-            node,
-            offer_tx,
-            self.state().event_tx.clone(),
-        );
+        let h = receiver::spawn_receive_handler(node, offer_tx, self.state().event_tx.clone());
         *handle = Some(h);
     }
 }
@@ -293,7 +289,10 @@ async fn pull_file<N: NetworkProvider + 'static>(
 
     let start = Instant::now();
     let token = uuid::Uuid::new_v4().to_string();
-    let requester_id = node.local_info().id;
+    // Phase 1 of RFC 017: file transfer still tags itself with the local
+    // Tailscale stable ID. Phase 2 will migrate to `device_id` once the
+    // hello handshake carries it between peers.
+    let requester_id = node.local_info().tailscale_id;
 
     // 0. Resolve peer_id to the canonical Tailscale node ID.
     let peer_id = node
@@ -314,46 +313,43 @@ async fn pull_file<N: NetworkProvider + 'static>(
 
     tracing::info!(peer = peer_id, path = remote_path, "Sending PULL_REQUEST");
 
-    let (offer_sha256, offer_size, offer_token, file_name) =
-        crate::request_reply::send_and_wait(
-            node,
-            peer_id,
-            "ft",
-            "pull_request",
-            &pull_payload,
-            std::time::Duration::from_secs(30),
-            |msg| {
-                if msg.from != peer_id {
-                    return None;
-                }
-                let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone()).ok()?;
-                match ft_msg {
-                    FtMessage::Offer {
-                        file_name,
-                        sha256,
-                        size,
-                        token: offer_token,
-                        ..
-                    } => {
-                        tracing::info!(size = size, "Received OFFER from peer");
-                        Some(Ok((sha256, size, offer_token, file_name)))
-                    }
-                    FtMessage::Reject { reason, .. } => {
-                        Some(Err(TransferError::Rejected(reason)))
-                    }
-                    _ => None,
-                }
-            },
-        )
-        .await
-        .map_err(|e| match e {
-            crate::request_reply::RequestError::Timeout => TransferError::Timeout,
-            crate::request_reply::RequestError::Send(e) => TransferError::Node(e.to_string()),
-            crate::request_reply::RequestError::ChannelClosed => {
-                TransferError::Protocol("Channel closed".into())
+    let (offer_sha256, offer_size, offer_token, file_name) = crate::request_reply::send_and_wait(
+        node,
+        peer_id,
+        "ft",
+        "pull_request",
+        &pull_payload,
+        std::time::Duration::from_secs(30),
+        |msg| {
+            if msg.from != peer_id {
+                return None;
             }
-        })?
-        .map_err(|e| e)?;
+            let ft_msg: FtMessage = serde_json::from_value(msg.payload.clone()).ok()?;
+            match ft_msg {
+                FtMessage::Offer {
+                    file_name,
+                    sha256,
+                    size,
+                    token: offer_token,
+                    ..
+                } => {
+                    tracing::info!(size = size, "Received OFFER from peer");
+                    Some(Ok((sha256, size, offer_token, file_name)))
+                }
+                FtMessage::Reject { reason, .. } => Some(Err(TransferError::Rejected(reason))),
+                _ => None,
+            }
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        crate::request_reply::RequestError::Timeout => TransferError::Timeout,
+        crate::request_reply::RequestError::Send(e) => TransferError::Node(e.to_string()),
+        crate::request_reply::RequestError::ChannelClosed => {
+            TransferError::Protocol("Channel closed".into())
+        }
+    })?
+    .map_err(|e| e)?;
 
     // 3. Start TCP listener, then send ACCEPT with our port
     let mut listener = node
@@ -379,13 +375,10 @@ async fn pull_file<N: NetworkProvider + 'static>(
     );
 
     // 4. Accept incoming TCP connection with timeout
-    let incoming = tokio::time::timeout(
-        tokio::time::Duration::from_secs(30),
-        listener.accept(),
-    )
-    .await
-    .map_err(|_| TransferError::Timeout)?
-    .ok_or_else(|| TransferError::Protocol("Listener closed before accepting".to_string()))?;
+    let incoming = tokio::time::timeout(tokio::time::Duration::from_secs(30), listener.accept())
+        .await
+        .map_err(|_| TransferError::Timeout)?
+        .ok_or_else(|| TransferError::Protocol("Listener closed before accepting".to_string()))?;
 
     let mut stream = incoming.stream;
     tracing::info!("TCP connection accepted from peer");

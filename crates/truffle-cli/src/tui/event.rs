@@ -39,10 +39,7 @@ pub enum AppEvent {
         sha256: String,
     },
     /// File transfer failed.
-    TransferFailed {
-        file_name: String,
-        reason: String,
-    },
+    TransferFailed { file_name: String, reason: String },
     /// An incoming file offer with its responder (for interactive accept/reject).
     FileOfferReceived {
         offer: FileOffer,
@@ -60,7 +57,10 @@ pub fn spawn_event_collectors(
     chat_rx: tokio::sync::broadcast::Receiver<NamespacedMessage>,
     ft_rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
     offer_rx: Option<mpsc::UnboundedReceiver<(FileOffer, OfferResponder)>>,
-) -> (mpsc::UnboundedSender<AppEvent>, mpsc::UnboundedReceiver<AppEvent>) {
+) -> (
+    mpsc::UnboundedSender<AppEvent>,
+    mpsc::UnboundedReceiver<AppEvent>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
 
     // 1. Crossterm terminal events
@@ -165,7 +165,12 @@ pub fn spawn_event_collectors(
                             FileTransferEvent::Rejected { .. } => {
                                 // Rejections are handled by the dialog flow.
                             }
-                            FileTransferEvent::Hashing { file_name, bytes_hashed, total_bytes, .. } => {
+                            FileTransferEvent::Hashing {
+                                file_name,
+                                bytes_hashed,
+                                total_bytes,
+                                ..
+                            } => {
                                 let percent = if total_bytes > 0 {
                                     bytes_hashed as f64 / total_bytes as f64 * 100.0
                                 } else {
@@ -213,10 +218,7 @@ pub fn spawn_event_collectors(
                             FileTransferEvent::Failed {
                                 file_name, reason, ..
                             } => {
-                                let _ = tx.send(AppEvent::TransferFailed {
-                                    file_name,
-                                    reason,
-                                });
+                                let _ = tx.send(AppEvent::TransferFailed { file_name, reason });
                             }
                         }
                     }
@@ -234,7 +236,10 @@ pub fn spawn_event_collectors(
         let tx = tx.clone();
         tokio::spawn(async move {
             while let Some((offer, responder)) = offer_rx.recv().await {
-                if tx.send(AppEvent::FileOfferReceived { offer, responder }).is_err() {
+                if tx
+                    .send(AppEvent::FileOfferReceived { offer, responder })
+                    .is_err()
+                {
                     break;
                 }
             }

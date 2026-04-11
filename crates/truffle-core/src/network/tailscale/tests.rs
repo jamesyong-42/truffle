@@ -269,7 +269,8 @@ fn event_status_running_deserialization() {
 
 #[test]
 fn event_status_error_deserialization() {
-    let json = r#"{"event":"tsnet:status","data":{"state":"error","error":"something went wrong"}}"#;
+    let json =
+        r#"{"event":"tsnet:status","data":{"state":"error","error":"something went wrong"}}"#;
     let event: SidecarEvent = serde_json::from_str(json).unwrap();
     let data: StatusEventData = serde_json::from_value(event.data).unwrap();
     assert_eq!(data.state, "error");
@@ -362,12 +363,15 @@ fn event_peer_changed_left_deserialization() {
 // ===== Peer filtering tests =====
 
 #[test]
-fn filter_truffle_peers_only() {
+fn filter_app_peers_only() {
+    // Given peers from multiple apps on the same tailnet, the filter should
+    // admit only those whose hostname prefix matches `truffle-{app_id}-`.
     let peers = vec![
+        // playground peer with a real slug — kept.
         SidecarPeer {
             id: "node1".into(),
-            hostname: "truffle-cli-abc".into(),
-            dns_name: "truffle-cli-abc.tailnet.ts.net".into(),
+            hostname: "truffle-playground-alice".into(),
+            dns_name: "truffle-playground-alice.tailnet.ts.net".into(),
             tailscale_ips: vec!["100.64.0.2".into()],
             online: true,
             os: "linux".into(),
@@ -377,10 +381,11 @@ fn filter_truffle_peers_only() {
             key_expiry: None,
             expired: false,
         },
+        // Different app — rejected.
         SidecarPeer {
             id: "node2".into(),
-            hostname: "my-laptop".into(), // NOT a truffle peer
-            dns_name: "my-laptop.tailnet.ts.net".into(),
+            hostname: "truffle-chat-bob".into(),
+            dns_name: "truffle-chat-bob.tailnet.ts.net".into(),
             tailscale_ips: vec!["100.64.0.3".into()],
             online: true,
             os: "darwin".into(),
@@ -390,10 +395,11 @@ fn filter_truffle_peers_only() {
             key_expiry: None,
             expired: false,
         },
+        // Non-truffle host — rejected.
         SidecarPeer {
             id: "node3".into(),
-            hostname: "truffle-daemon-xyz".into(),
-            dns_name: "truffle-daemon-xyz.tailnet.ts.net".into(),
+            hostname: "my-laptop".into(),
+            dns_name: "my-laptop.tailnet.ts.net".into(),
             tailscale_ips: vec!["100.64.0.4".into()],
             online: false,
             os: "linux".into(),
@@ -403,32 +409,88 @@ fn filter_truffle_peers_only() {
             key_expiry: None,
             expired: false,
         },
+        // Empty-slug edge (`truffle-playground-` with nothing after the
+        // hyphen) — rejected per `is_app_peer` requiring trailing content.
+        SidecarPeer {
+            id: "node4".into(),
+            hostname: "truffle-playground-".into(),
+            dns_name: "truffle-playground-.tailnet.ts.net".into(),
+            tailscale_ips: vec!["100.64.0.5".into()],
+            online: true,
+            os: "linux".into(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        },
+        // Another playground peer — kept.
+        SidecarPeer {
+            id: "node5".into(),
+            hostname: "truffle-playground-bob".into(),
+            dns_name: "truffle-playground-bob.tailnet.ts.net".into(),
+            tailscale_ips: vec!["100.64.0.6".into()],
+            online: true,
+            os: "linux".into(),
+            cur_addr: String::new(),
+            relay: String::new(),
+            last_seen: None,
+            key_expiry: None,
+            expired: false,
+        },
     ];
 
-    let truffle_peers: Vec<_> = peers
+    let admitted: Vec<_> = peers
         .iter()
-        .filter(|p| super::provider::is_truffle_peer(&p.hostname))
+        .filter(|p| super::provider::is_app_peer(&p.hostname, "playground"))
         .collect();
 
-    assert_eq!(truffle_peers.len(), 2);
-    assert_eq!(truffle_peers[0].hostname, "truffle-cli-abc");
-    assert_eq!(truffle_peers[1].hostname, "truffle-daemon-xyz");
+    assert_eq!(admitted.len(), 2);
+    assert_eq!(admitted[0].hostname, "truffle-playground-alice");
+    assert_eq!(admitted[1].hostname, "truffle-playground-bob");
 }
 
 #[test]
-fn non_truffle_hostnames_rejected() {
-    assert!(!super::provider::is_truffle_peer("my-laptop"));
-    assert!(!super::provider::is_truffle_peer("desktop-abc"));
-    assert!(!super::provider::is_truffle_peer(""));
-    assert!(!super::provider::is_truffle_peer("truffles")); // not truffle- prefix
+fn non_app_hostnames_rejected() {
+    // These all fail the `truffle-playground-{slug}` prefix check.
+    assert!(!super::provider::is_app_peer("my-laptop", "playground"));
+    assert!(!super::provider::is_app_peer("desktop-abc", "playground"));
+    assert!(!super::provider::is_app_peer("", "playground"));
+    // `truffles` is not `truffle-` prefix.
+    assert!(!super::provider::is_app_peer("truffles", "playground"));
+    // Different app rejected.
+    assert!(!super::provider::is_app_peer(
+        "truffle-chat-alice",
+        "playground"
+    ));
+    // Empty slug rejected.
+    assert!(!super::provider::is_app_peer(
+        "truffle-playground-",
+        "playground"
+    ));
+    // Exact prefix with nothing after — rejected.
+    assert!(!super::provider::is_app_peer(
+        "truffle-playground",
+        "playground"
+    ));
 }
 
 #[test]
-fn truffle_hostnames_accepted() {
-    assert!(super::provider::is_truffle_peer("truffle-cli-abc123"));
-    assert!(super::provider::is_truffle_peer("truffle-daemon-xyz"));
-    assert!(super::provider::is_truffle_peer("truffle-test"));
-    assert!(super::provider::is_truffle_peer("truffle-"));
+fn app_hostnames_accepted() {
+    assert!(super::provider::is_app_peer(
+        "truffle-playground-alice",
+        "playground"
+    ));
+    assert!(super::provider::is_app_peer(
+        "truffle-playground-alice-mbp-16",
+        "playground"
+    ));
+    assert!(super::provider::is_app_peer("truffle-chat-bob", "chat"));
+    // Single-character slug is allowed — `is_app_peer` only rejects empty.
+    assert!(super::provider::is_app_peer(
+        "truffle-playground-a",
+        "playground"
+    ));
 }
 
 // ===== Phase 1 audit fix tests =====
@@ -442,7 +504,10 @@ async fn test_bind_udp_returns_not_running() {
 
     let config = TailscaleConfig {
         binary_path: "/nonexistent/sidecar".into(),
-        hostname: "truffle-test".to_string(),
+        app_id: "test".to_string(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+        device_name: "Test Device".to_string(),
+        hostname: "truffle-test-test-device".to_string(),
         state_dir: "/tmp/test-state".to_string(),
         auth_key: None,
         ephemeral: None,
@@ -468,7 +533,10 @@ fn test_local_identity_default_before_start() {
 
     let config = TailscaleConfig {
         binary_path: "/nonexistent/sidecar".into(),
-        hostname: "truffle-test".to_string(),
+        app_id: "test".to_string(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+        device_name: "Test Device".to_string(),
+        hostname: "truffle-test-test-device".to_string(),
         state_dir: "/tmp/test-state".to_string(),
         auth_key: None,
         ephemeral: None,
@@ -476,12 +544,22 @@ fn test_local_identity_default_before_start() {
     };
     let provider = TailscaleProvider::new(config);
 
-    // This must not panic — it should return a default NodeIdentity
+    // This must not panic — it should return a seeded NodeIdentity where
+    // only the fields the sidecar populates (tailscale_id, dns_name, ip)
+    // are still empty. The app/device triple is already known from config.
     let identity = provider.local_identity();
-    assert!(identity.hostname.is_empty(), "hostname should be empty before start");
-    assert!(identity.id.is_empty(), "id should be empty before start");
-    assert!(identity.name.is_empty(), "name should be empty before start");
-    assert!(identity.dns_name.is_none(), "dns_name should be None before start");
+    assert_eq!(identity.app_id, "test");
+    assert_eq!(identity.device_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+    assert_eq!(identity.device_name, "Test Device");
+    assert_eq!(identity.tailscale_hostname, "truffle-test-test-device");
+    assert!(
+        identity.tailscale_id.is_empty(),
+        "tailscale_id should be empty before start"
+    );
+    assert!(
+        identity.dns_name.is_none(),
+        "dns_name should be None before start"
+    );
     assert!(identity.ip.is_none(), "ip should be None before start");
 }
 
@@ -494,7 +572,10 @@ fn test_local_addr_default_before_start() {
 
     let config = TailscaleConfig {
         binary_path: "/nonexistent/sidecar".into(),
-        hostname: "truffle-test".to_string(),
+        app_id: "test".to_string(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+        device_name: "Test Device".to_string(),
+        hostname: "truffle-test-test-device".to_string(),
         state_dir: "/tmp/test-state".to_string(),
         auth_key: None,
         ephemeral: None,
@@ -504,9 +585,15 @@ fn test_local_addr_default_before_start() {
 
     // This must not panic — it should return a default PeerAddr
     let addr = provider.local_addr();
-    assert!(addr.hostname.is_empty(), "hostname should be empty before start");
+    assert!(
+        addr.hostname.is_empty(),
+        "hostname should be empty before start"
+    );
     assert!(addr.ip.is_none(), "ip should be None before start");
-    assert!(addr.dns_name.is_none(), "dns_name should be None before start");
+    assert!(
+        addr.dns_name.is_none(),
+        "dns_name should be None before start"
+    );
 }
 
 /// Verify that `Bridge::local_port()` returns `Result<u16>` (not a panic) and gives a valid port.
@@ -626,10 +713,7 @@ async fn test_network_udp_socket_framing_roundtrip() {
     // Create the NetworkUdpSocket connected to the relay
     let rust_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let rust_addr = rust_socket.local_addr().unwrap();
-    rust_socket
-        .connect(relay_addr)
-        .await
-        .unwrap();
+    rust_socket.connect(relay_addr).await.unwrap();
 
     // Also connect the relay to the rust socket so send/recv work
     relay.connect(rust_addr).await.unwrap();
@@ -712,13 +796,16 @@ async fn test_network_udp_socket_short_packet() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("too short"), "expected 'too short' error, got: {msg}");
+    assert!(
+        msg.contains("too short"),
+        "expected 'too short' error, got: {msg}"
+    );
 }
 
 /// Verify that the sidecar ListeningPacket event is correctly mapped.
 #[test]
 fn test_sidecar_listening_packet_event_deserialization() {
-    use super::protocol::{SidecarEvent, ListeningPacketEventData, event_type};
+    use super::protocol::{event_type, ListeningPacketEventData, SidecarEvent};
 
     let json = r#"{"event":"tsnet:listeningPacket","data":{"port":19420,"localPort":54321}}"#;
     let event: SidecarEvent = serde_json::from_str(json).unwrap();
@@ -731,7 +818,7 @@ fn test_sidecar_listening_packet_event_deserialization() {
 /// Verify that the sidecar ListenPacket command serializes correctly.
 #[test]
 fn test_sidecar_listen_packet_command_serialization() {
-    use super::protocol::{SidecarCommand, ListenPacketCommandData, command_type};
+    use super::protocol::{command_type, ListenPacketCommandData, SidecarCommand};
 
     let data = ListenPacketCommandData { port: 19420 };
     let cmd = SidecarCommand {

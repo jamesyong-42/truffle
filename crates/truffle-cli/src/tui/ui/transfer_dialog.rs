@@ -43,7 +43,9 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &AppState) {
             Span::raw("  "),
             Span::styled(
                 &peer_name,
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" wants to send you a file:"),
         ]),
@@ -52,7 +54,9 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &AppState) {
             Span::raw("  "),
             Span::styled(
                 format!("\u{1F4C4} {}  ({})", offer.file_name, size_str),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -65,16 +69,34 @@ fn render_prompt(f: &mut Frame, area: Rect, app: &AppState) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("[a]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[a]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Accept    "),
-            Span::styled("[s]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[s]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Save as...    "),
-            Span::styled("[r]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[r]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Reject"),
         ]),
         Line::from(vec![
             Span::raw("                          "),
-            Span::styled("[d]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[d]",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Don't ask from "),
             Span::styled(&peer_name, Style::default().fg(Color::Cyan)),
         ]),
@@ -118,19 +140,25 @@ fn render_save_as(f: &mut Frame, area: Rect, app: &AppState) {
     let cursor_char = if after.is_empty() {
         " "
     } else {
-        &after[..after.char_indices().nth(1).map(|(i, _)| i).unwrap_or(after.len())]
+        &after[..after
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap_or(after.len())]
     };
     let rest = if after.is_empty() {
         ""
     } else {
-        &after[after.char_indices().nth(1).map(|(i, _)| i).unwrap_or(after.len())..]
+        &after[after
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| i)
+            .unwrap_or(after.len())..]
     };
 
     let lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::raw(format!("  Save {} to:", offer.file_name)),
-        ]),
+        Line::from(vec![Span::raw(format!("  Save {} to:", offer.file_name))]),
         Line::from(vec![
             Span::raw("  \u{276F} "),
             Span::styled(before, Style::default().fg(Color::White)),
@@ -143,9 +171,19 @@ fn render_save_as(f: &mut Frame, area: Rect, app: &AppState) {
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Enter]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Confirm    "),
-            Span::styled("[Esc]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Back"),
         ]),
         Line::from(""),
@@ -178,21 +216,28 @@ fn render_overwrite_confirm(f: &mut Frame, area: Rect, app: &AppState) {
         Line::from(""),
         Line::from(Span::styled(
             "  File already exists:",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                &dialog.save_path_input,
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(&dialog.save_path_input, Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::raw("  Overwrite? "),
-            Span::styled("[y]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Yes    "),
-            Span::styled("[n]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[n]",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" No"),
         ]),
         Line::from(""),

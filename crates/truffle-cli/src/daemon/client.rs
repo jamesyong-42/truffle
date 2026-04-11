@@ -137,7 +137,11 @@ impl DaemonClient {
         let request_json =
             serde_json::to_string(&request).map_err(|e| ClientError::IoError(e.to_string()))?;
 
-        debug!(method = method, id = id, "Sending request to daemon (with notifications)");
+        debug!(
+            method = method,
+            id = id,
+            "Sending request to daemon (with notifications)"
+        );
 
         writer
             .write_line(&request_json)
@@ -153,8 +157,8 @@ impl DaemonClient {
                     ClientError::IoError("Daemon closed connection without responding".into())
                 })?;
 
-            let raw: serde_json::Value = serde_json::from_str(&line)
-                .map_err(|e| ClientError::ParseError(e.to_string()))?;
+            let raw: serde_json::Value =
+                serde_json::from_str(&line).map_err(|e| ClientError::ParseError(e.to_string()))?;
 
             if raw.get("id").is_some() {
                 let response: DaemonResponse = serde_json::from_value(raw)
@@ -193,7 +197,9 @@ impl DaemonClient {
         let stream = self.connect().await?;
         let (mut reader, mut writer) = stream.into_split();
 
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request = DaemonRequest::new(id, super::protocol::method::SUBSCRIBE, params);
 
         let request_json =
@@ -215,9 +221,7 @@ impl DaemonClient {
                 match tokio::time::timeout_at(dl, read_future).await {
                     Ok(result) => result
                         .map_err(|e| ClientError::IoError(e.to_string()))?
-                        .ok_or_else(|| {
-                            ClientError::IoError("Daemon closed connection".into())
-                        })?,
+                        .ok_or_else(|| ClientError::IoError("Daemon closed connection".into()))?,
                     Err(_) => {
                         return Err(ClientError::DaemonError {
                             code: super::protocol::error_code::TIMEOUT,
@@ -229,13 +233,11 @@ impl DaemonClient {
                 read_future
                     .await
                     .map_err(|e| ClientError::IoError(e.to_string()))?
-                    .ok_or_else(|| {
-                        ClientError::IoError("Daemon closed connection".into())
-                    })?
+                    .ok_or_else(|| ClientError::IoError("Daemon closed connection".into()))?
             };
 
-            let raw: serde_json::Value = serde_json::from_str(&line)
-                .map_err(|e| ClientError::ParseError(e.to_string()))?;
+            let raw: serde_json::Value =
+                serde_json::from_str(&line).map_err(|e| ClientError::ParseError(e.to_string()))?;
 
             // If it has an "id" field, it's an error response (subscribe shouldn't
             // normally produce a response, but errors are possible).

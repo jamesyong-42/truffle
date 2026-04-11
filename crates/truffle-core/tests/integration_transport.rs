@@ -23,11 +23,11 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
 
+use truffle_core::network::NetworkProvider;
 use truffle_core::network::{
     HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
     NetworkTcpListener, NodeIdentity, PeerAddr, PingResult,
 };
-use truffle_core::network::NetworkProvider;
 use truffle_core::transport::{
     DatagramTransport, FramedStream, RawTransport, StreamTransport, WsConfig,
 };
@@ -51,9 +51,11 @@ impl MockNetworkProvider {
         let (peer_event_tx, _) = broadcast::channel(16);
         Self {
             identity: NodeIdentity {
-                id: id.to_string(),
-                hostname: format!("truffle-test-{id}"),
-                name: format!("Test Node {id}"),
+                app_id: "test".to_string(),
+                device_id: format!("device-{id}"),
+                device_name: format!("Test Node {id}"),
+                tailscale_hostname: format!("truffle-test-{id}"),
+                tailscale_id: id.to_string(),
                 dns_name: None,
                 ip: Some("127.0.0.1".parse().unwrap()),
             },
@@ -139,7 +141,10 @@ impl NetworkProvider for MockNetworkProvider {
         Ok(())
     }
 
-    async fn bind_udp(&self, _port: u16) -> Result<truffle_core::network::NetworkUdpSocket, NetworkError> {
+    async fn bind_udp(
+        &self,
+        _port: u16,
+    ) -> Result<truffle_core::network::NetworkUdpSocket, NetworkError> {
         Err(NetworkError::Internal("mock: UDP not supported".into()))
     }
 
@@ -216,10 +221,9 @@ async fn test_ws_concurrent_bidirectional() {
         let client_ws = WebSocketTransport::new(client_provider, config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.expect("client connect should succeed");
         let mut server_stream = server_stream.expect("server should accept");
@@ -304,10 +308,9 @@ async fn test_ws_large_message() {
         let client_ws = WebSocketTransport::new(client_provider, config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
@@ -318,15 +321,26 @@ async fn test_ws_large_message() {
 
         // Client -> Server
         client_stream.send(&payload).await.unwrap();
-        let received = server_stream.recv().await.unwrap().expect("should receive 1MB");
+        let received = server_stream
+            .recv()
+            .await
+            .unwrap()
+            .expect("should receive 1MB");
         assert_eq!(received.len(), payload_size);
         assert_eq!(received, payload, "1MB payload integrity check failed");
 
         // Server -> Client (reverse direction)
         server_stream.send(&payload).await.unwrap();
-        let received = client_stream.recv().await.unwrap().expect("should receive 1MB reply");
+        let received = client_stream
+            .recv()
+            .await
+            .unwrap()
+            .expect("should receive 1MB reply");
         assert_eq!(received.len(), payload_size);
-        assert_eq!(received, payload, "1MB reverse payload integrity check failed");
+        assert_eq!(
+            received, payload,
+            "1MB reverse payload integrity check failed"
+        );
 
         client_stream.close().await.unwrap();
         server_stream.close().await.unwrap();
@@ -356,17 +370,20 @@ async fn test_ws_rapid_reconnect() {
         let peer_addr = loopback_peer_addr();
 
         // --- First connection ---
-        let (client_result, server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
 
         // Send first message
         client_stream.send(b"message-1").await.unwrap();
-        let received = server_stream.recv().await.unwrap().expect("should receive msg 1");
+        let received = server_stream
+            .recv()
+            .await
+            .unwrap()
+            .expect("should receive msg 1");
         assert_eq!(received, b"message-1");
 
         // Close both sides
@@ -374,17 +391,20 @@ async fn test_ws_rapid_reconnect() {
         server_stream.close().await.unwrap();
 
         // --- Second connection (rapid reconnect) ---
-        let (client_result, server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
 
         // Send second message
         client_stream.send(b"message-2").await.unwrap();
-        let received = server_stream.recv().await.unwrap().expect("should receive msg 2");
+        let received = server_stream
+            .recv()
+            .await
+            .unwrap()
+            .expect("should receive msg 2");
         assert_eq!(received, b"message-2");
 
         client_stream.close().await.unwrap();
@@ -416,8 +436,7 @@ async fn test_ws_multiple_connections_same_listener() {
         // Spawn 5 client tasks that each connect, send, and receive
         let mut client_handles = Vec::new();
         for i in 0..num_connections {
-            let client_provider =
-                Arc::new(MockNetworkProvider::new(&format!("multi-client-{i}")));
+            let client_provider = Arc::new(MockNetworkProvider::new(&format!("multi-client-{i}")));
             let client_ws = WebSocketTransport::new(client_provider, config.clone());
             let peer_addr = peer_addr.clone();
 
@@ -471,7 +490,9 @@ async fn test_ws_multiple_connections_same_listener() {
         server_results.sort();
         for i in 0..num_connections {
             assert!(
-                server_results.iter().any(|m| m == &format!("hello from client {i}")),
+                server_results
+                    .iter()
+                    .any(|m| m == &format!("hello from client {i}")),
                 "server should have seen message from client {i}"
             );
         }
@@ -500,10 +521,9 @@ async fn test_ws_message_ordering() {
         let client_ws = WebSocketTransport::new(client_provider, config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
@@ -753,7 +773,10 @@ async fn test_tcp_half_close() {
         let response = client_result.unwrap();
         server_result.unwrap();
 
-        assert_eq!(response, "response", "client should receive server's response after half-close");
+        assert_eq!(
+            response, "response",
+            "client should receive server's response after half-close"
+        );
     })
     .await
     .expect("test timed out");
@@ -870,12 +893,12 @@ async fn test_udp_max_datagram_size() {
         // Note: macOS loopback max UDP payload is ~9216 bytes (not the
         // theoretical 65507). We test up to 9000 which works cross-platform.
         let test_sizes: Vec<usize> = vec![
-            1,      // minimum
-            508,    // safe minimum (576 IP - 60 IP header - 8 UDP header)
-            1472,   // standard Ethernet MTU - IP/UDP headers
-            1473,   // just over standard Ethernet MTU limit
-            8192,   // larger, still within typical loopback limits
-            9000,   // near macOS loopback ceiling
+            1,    // minimum
+            508,  // safe minimum (576 IP - 60 IP header - 8 UDP header)
+            1472, // standard Ethernet MTU - IP/UDP headers
+            1473, // just over standard Ethernet MTU limit
+            8192, // larger, still within typical loopback limits
+            9000, // near macOS loopback ceiling
         ];
 
         for size in &test_sizes {
@@ -885,13 +908,10 @@ async fn test_udp_max_datagram_size() {
             assert_eq!(sent, *size, "should send {size} bytes");
 
             let mut buf = vec![0u8; 65536];
-            let (n, _sender) = timeout(
-                Duration::from_secs(5),
-                socket_b.recv_from(&mut buf),
-            )
-            .await
-            .expect("recv should not time out")
-            .unwrap();
+            let (n, _sender) = timeout(Duration::from_secs(5), socket_b.recv_from(&mut buf))
+                .await
+                .expect("recv should not time out")
+                .unwrap();
 
             assert_eq!(n, *size, "should receive {size} bytes");
             assert_eq!(
@@ -923,19 +943,24 @@ async fn test_quic_concurrent_bidirectional() {
         let server_provider = Arc::new(MockNetworkProvider::new("quic-bidi-integ-server"));
         let client_provider = Arc::new(MockNetworkProvider::new("quic-bidi-integ-client"));
 
-        let server_config = QuicConfig { port: 0, max_streams: 100 };
+        let server_config = QuicConfig {
+            port: 0,
+            max_streams: 100,
+        };
         let server_quic = QuicTransport::new(server_provider, server_config);
         let mut listener = server_quic.listen().await.unwrap();
         let actual_port = listener.port;
 
-        let client_config = QuicConfig { port: actual_port, max_streams: 100 };
+        let client_config = QuicConfig {
+            port: actual_port,
+            max_streams: 100,
+        };
         let client_quic = QuicTransport::new(client_provider, client_config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_quic.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
@@ -1004,19 +1029,24 @@ async fn test_quic_large_message() {
         let server_provider = Arc::new(MockNetworkProvider::new("quic-large-server"));
         let client_provider = Arc::new(MockNetworkProvider::new("quic-large-client"));
 
-        let server_config = QuicConfig { port: 0, max_streams: 100 };
+        let server_config = QuicConfig {
+            port: 0,
+            max_streams: 100,
+        };
         let server_quic = QuicTransport::new(server_provider, server_config);
         let mut listener = server_quic.listen().await.unwrap();
         let actual_port = listener.port;
 
-        let client_config = QuicConfig { port: actual_port, max_streams: 100 };
+        let client_config = QuicConfig {
+            port: actual_port,
+            max_streams: 100,
+        };
         let client_quic = QuicTransport::new(client_provider, client_config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_quic.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
@@ -1026,7 +1056,11 @@ async fn test_quic_large_message() {
 
         // Client -> Server
         client_stream.send(&payload).await.unwrap();
-        let received = server_stream.recv().await.unwrap().expect("should receive 1MB");
+        let received = server_stream
+            .recv()
+            .await
+            .unwrap()
+            .expect("should receive 1MB");
         assert_eq!(received.len(), payload_size);
         assert_eq!(received, payload);
 
@@ -1049,19 +1083,24 @@ async fn test_quic_message_ordering() {
         let server_provider = Arc::new(MockNetworkProvider::new("quic-order-server"));
         let client_provider = Arc::new(MockNetworkProvider::new("quic-order-client"));
 
-        let server_config = QuicConfig { port: 0, max_streams: 100 };
+        let server_config = QuicConfig {
+            port: 0,
+            max_streams: 100,
+        };
         let server_quic = QuicTransport::new(server_provider, server_config);
         let mut listener = server_quic.listen().await.unwrap();
         let actual_port = listener.port;
 
-        let client_config = QuicConfig { port: actual_port, max_streams: 100 };
+        let client_config = QuicConfig {
+            port: actual_port,
+            max_streams: 100,
+        };
         let client_quic = QuicTransport::new(client_provider, client_config);
         let peer_addr = loopback_peer_addr();
 
-        let (client_result, server_stream) = tokio::join!(
-            client_quic.connect(&peer_addr),
-            async { listener.accept().await }
-        );
+        let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+            listener.accept().await
+        });
 
         let mut client_stream = client_result.unwrap();
         let mut server_stream = server_stream.unwrap();
@@ -1140,10 +1179,10 @@ async fn test_ws_and_tcp_simultaneous() {
         let client_ws = WebSocketTransport::new(ws_client_provider, ws_config);
         let peer_addr = loopback_peer_addr();
 
-        let (ws_client_result, ws_server_stream) = tokio::join!(
-            client_ws.connect(&peer_addr),
-            async { ws_listener.accept().await }
-        );
+        let (ws_client_result, ws_server_stream) =
+            tokio::join!(client_ws.connect(&peer_addr), async {
+                ws_listener.accept().await
+            });
 
         let mut ws_client_stream = ws_client_result.unwrap();
         let mut ws_server_stream = ws_server_stream.unwrap();
@@ -1151,11 +1190,13 @@ async fn test_ws_and_tcp_simultaneous() {
         // --- TCP client connects ---
         let tcp_client = TcpTransport::new(provider.clone());
         let tcp_connect_task = tokio::spawn(async move {
-            tcp_client.open(&loopback_peer_addr(), tcp_port).await.unwrap()
+            tcp_client
+                .open(&loopback_peer_addr(), tcp_port)
+                .await
+                .unwrap()
         });
-        let tcp_accept_task = tokio::spawn(async move {
-            tcp_listener.accept().await.expect("should accept TCP")
-        });
+        let tcp_accept_task =
+            tokio::spawn(async move { tcp_listener.accept().await.expect("should accept TCP") });
 
         let (tcp_client_stream, tcp_server_incoming) =
             tokio::join!(tcp_connect_task, tcp_accept_task);
@@ -1177,7 +1218,11 @@ async fn test_ws_and_tcp_simultaneous() {
                     .send(format!("ws-reply-{i}").as_bytes())
                     .await
                     .unwrap();
-                let reply = ws_client_stream.recv().await.unwrap().expect("ws reply recv");
+                let reply = ws_client_stream
+                    .recv()
+                    .await
+                    .unwrap()
+                    .expect("ws reply recv");
                 assert_eq!(reply, format!("ws-reply-{i}").as_bytes());
             }
             ws_client_stream.close().await.unwrap();
@@ -1194,7 +1239,10 @@ async fn test_ws_and_tcp_simultaneous() {
 
             let mut received = Vec::new();
             tcp_server_stream.read_to_end(&mut received).await.unwrap();
-            assert_eq!(received, expected, "TCP data integrity during concurrent WS");
+            assert_eq!(
+                received, expected,
+                "TCP data integrity during concurrent WS"
+            );
         });
 
         let (ws_result, tcp_result) = tokio::join!(ws_task, tcp_task);
@@ -1245,10 +1293,10 @@ async fn test_all_transports_use_same_network_provider() {
 
         // Run all three transports concurrently
         let ws_task = tokio::spawn(async move {
-            let (client_result, server_stream) = tokio::join!(
-                ws_client.connect(&peer_addr),
-                async { ws_listener.accept().await }
-            );
+            let (client_result, server_stream) =
+                tokio::join!(ws_client.connect(&peer_addr), async {
+                    ws_listener.accept().await
+                });
             let mut cs = client_result.unwrap();
             let mut ss = server_stream.unwrap();
 
@@ -1263,13 +1311,18 @@ async fn test_all_transports_use_same_network_provider() {
 
         let tcp_task = tokio::spawn(async move {
             // TCP client
-            let tcp_client = TcpTransport::new(Arc::new(MockNetworkProvider::new("tcp-client-shared")));
+            let tcp_client =
+                TcpTransport::new(Arc::new(MockNetworkProvider::new("tcp-client-shared")));
             let connect_task = tokio::spawn(async move {
-                tcp_client.open(&loopback_peer_addr(), tcp_port).await.unwrap()
+                tcp_client
+                    .open(&loopback_peer_addr(), tcp_port)
+                    .await
+                    .unwrap()
             });
-            let accept_task = tokio::spawn(async move {
-                tcp_listener.accept().await.expect("should accept TCP")
-            });
+            let accept_task =
+                tokio::spawn(
+                    async move { tcp_listener.accept().await.expect("should accept TCP") },
+                );
 
             let (client_result, server_result) = tokio::join!(connect_task, accept_task);
             let mut client_stream = client_result.unwrap();
@@ -1334,7 +1387,10 @@ async fn test_quic_and_ws_simultaneous() {
         let mut ws_listener = ws_server.listen().await.unwrap();
 
         // --- QUIC setup ---
-        let quic_server_config = QuicConfig { port: 0, max_streams: 100 };
+        let quic_server_config = QuicConfig {
+            port: 0,
+            max_streams: 100,
+        };
         let quic_server = QuicTransport::new(provider.clone(), quic_server_config);
         let mut quic_listener = quic_server.listen().await.unwrap();
         let quic_port = quic_listener.port;
@@ -1346,10 +1402,10 @@ async fn test_quic_and_ws_simultaneous() {
             let ws_client_provider = Arc::new(MockNetworkProvider::new("ws-client-x"));
             let ws_client = WebSocketTransport::new(ws_client_provider, ws_config);
 
-            let (client_result, server_stream) = tokio::join!(
-                ws_client.connect(&peer_addr),
-                async { ws_listener.accept().await }
-            );
+            let (client_result, server_stream) =
+                tokio::join!(ws_client.connect(&peer_addr), async {
+                    ws_listener.accept().await
+                });
 
             let mut cs = client_result.unwrap();
             let mut ss = server_stream.unwrap();
@@ -1368,14 +1424,17 @@ async fn test_quic_and_ws_simultaneous() {
         // QUIC traffic task
         let quic_task = tokio::spawn(async move {
             let quic_client_provider = Arc::new(MockNetworkProvider::new("quic-client-x"));
-            let quic_client_config = QuicConfig { port: quic_port, max_streams: 100 };
+            let quic_client_config = QuicConfig {
+                port: quic_port,
+                max_streams: 100,
+            };
             let quic_client = QuicTransport::new(quic_client_provider, quic_client_config);
 
             let quic_peer_addr = loopback_peer_addr();
-            let (client_result, server_stream) = tokio::join!(
-                quic_client.connect(&quic_peer_addr),
-                async { quic_listener.accept().await }
-            );
+            let (client_result, server_stream) =
+                tokio::join!(quic_client.connect(&quic_peer_addr), async {
+                    quic_listener.accept().await
+                });
 
             let mut cs = client_result.unwrap();
             let mut ss = server_stream.unwrap();

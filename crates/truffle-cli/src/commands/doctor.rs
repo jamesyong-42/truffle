@@ -33,11 +33,7 @@ pub async fn run(config: &TruffleConfig, json: bool) -> Result<(), (i32, String)
             map.insert("checks".to_string(), serde_json::json!(checks_json));
             json_output::print_json(&serde_json::Value::Object(map));
         } else {
-            output::print_check(
-                output::Indicator::Fail,
-                "Daemon running",
-                "not running",
-            );
+            output::print_check(output::Indicator::Fail, "Daemon running", "not running");
             output::print_fix_suggestion("Run 'truffle up' to start the daemon");
             println!();
         }
@@ -93,11 +89,7 @@ pub async fn run(config: &TruffleConfig, json: bool) -> Result<(), (i32, String)
             &format!("{} peers", peer_count),
         );
     } else {
-        output::print_check(
-            output::Indicator::Warn,
-            "Mesh reachable",
-            "no peers found",
-        );
+        output::print_check(output::Indicator::Warn, "Mesh reachable", "no peers found");
         output::print_fix_suggestion("Start truffle on other devices in your tailnet");
     }
 
@@ -152,11 +144,7 @@ pub async fn run(config: &TruffleConfig, json: bool) -> Result<(), (i32, String)
             &config_path.display().to_string(),
         );
     } else {
-        output::print_check(
-            output::Indicator::Skip,
-            "Config file",
-            "using defaults",
-        );
+        output::print_check(output::Indicator::Skip, "Config file", "using defaults");
     }
 
     if json {

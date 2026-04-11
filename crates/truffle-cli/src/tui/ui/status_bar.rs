@@ -13,7 +13,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let _node_name = info.name.trim_start_matches("truffle-").to_string();
     let peer_count = app.online_peer_count();
 
-    let status = if info.ip.is_some() { "online" } else { "connecting" };
+    let status = if info.ip.is_some() {
+        "online"
+    } else {
+        "connecting"
+    };
     let (indicator, color) = if status == "online" {
         ("\u{25cf}", Color::Green)
     } else {
@@ -24,8 +28,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::styled("  truffle", Style::default().fg(Color::DarkGray)),
         Span::styled(" \u{00b7} ", Style::default().fg(Color::DarkGray)),
         Span::styled(indicator, Style::default().fg(color)),
-        Span::styled(format!(" {status}", ), Style::default().fg(color)),
-        Span::styled(format!(" \u{00b7} {peer_count} peers"), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!(" {status}",), Style::default().fg(color)),
+        Span::styled(
+            format!(" \u{00b7} {peer_count} peers"),
+            Style::default().fg(Color::DarkGray),
+        ),
     ];
 
     // Unread indicator (right side)

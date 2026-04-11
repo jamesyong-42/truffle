@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tracing::{error, info};
-use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::node::Node;
 use truffle_core::session::PeerEvent;
 
 use super::handler::{DaemonContext, DispatchResult};
@@ -400,11 +400,9 @@ fn resolve_sidecar_path(config: &TruffleConfig) -> Result<PathBuf, String> {
         }
     }
 
-    Err(
-        "Could not find the Go sidecar binary. \
+    Err("Could not find the Go sidecar binary. \
          Install it with 'truffle install-sidecar' or set node.sidecar_path in config."
-            .to_string(),
-    )
+        .to_string())
 }
 
 /// Resolve the Tailscale state directory.

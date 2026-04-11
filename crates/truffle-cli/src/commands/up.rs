@@ -27,19 +27,13 @@ pub async fn run(
         if json {
             let mut map = json_output::envelope(&config.node.name);
             map.insert("status".to_string(), serde_json::json!("already_running"));
-            if let Ok(result) = client
-                .request(method::STATUS, serde_json::json!({}))
-                .await
-            {
+            if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
                 if let Some(pid) = result["pid"].as_u64() {
                     map.insert("pid".to_string(), serde_json::json!(pid));
                 }
             }
             json_output::print_json(&serde_json::Value::Object(map));
-        } else if let Ok(result) = client
-            .request(method::STATUS, serde_json::json!({}))
-            .await
-        {
+        } else if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
             let name = result["name"].as_str().unwrap_or("-");
             let uptime = result["uptime_secs"]
                 .as_u64()
@@ -187,8 +181,12 @@ async fn run_background(
     name: Option<&str>,
     json: bool,
 ) -> Result<(), (i32, String)> {
-    let exe = std::env::current_exe()
-        .map_err(|e| (exit_codes::ERROR, format!("Failed to get current executable: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        (
+            exit_codes::ERROR,
+            format!("Failed to get current executable: {e}"),
+        )
+    })?;
 
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("up").arg("--foreground");
@@ -219,8 +217,12 @@ async fn run_background(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    cmd.spawn()
-        .map_err(|e| (exit_codes::ERROR, format!("Failed to start background daemon: {e}")))?;
+    cmd.spawn().map_err(|e| {
+        (
+            exit_codes::ERROR,
+            format!("Failed to start background daemon: {e}"),
+        )
+    })?;
 
     let client = DaemonClient::new();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
@@ -249,10 +251,7 @@ async fn run_background(
         let mut map = json_output::envelope(&config.node.name);
         map.insert("status".to_string(), serde_json::json!("started"));
 
-        if let Ok(result) = client
-            .request(method::STATUS, serde_json::json!({}))
-            .await
-        {
+        if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
             if let Some(pid) = result["pid"].as_u64() {
                 map.insert("pid".to_string(), serde_json::json!(pid));
             }
@@ -277,10 +276,7 @@ async fn run_background(
     let status_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
     let mut final_status = None;
     while tokio::time::Instant::now() < status_deadline {
-        if let Ok(result) = client
-            .request(method::STATUS, serde_json::json!({}))
-            .await
-        {
+        if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
             let status = result["status"].as_str().unwrap_or("offline");
             let ip = result["ip"].as_str().unwrap_or("");
 

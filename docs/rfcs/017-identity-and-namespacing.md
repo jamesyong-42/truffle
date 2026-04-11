@@ -203,9 +203,10 @@ Examples with `appId = 'playground'` (slug budget 44):
 |---|---|---|
 | `Alice's MacBook Pro` | `alice-s-macbook-pro` | `truffle-playground-alice-s-macbook-pro` |
 | `田中's 部屋` | `s-d2a1f3k8` | `truffle-playground-s-d2a1f3k8` |
-| `🚀` | `d2a1f3k8` | `truffle-playground-d2a1f3k8` |
+| `🚀` | `rocket` | `truffle-playground-rocket` |
+| `〓` (U+3013, GETA mark — no Latin transliteration) | deterministic 8-char hash | `truffle-playground-{hash}` |
 | `JAMES-mbp-16"` | `james-mbp-16` | `truffle-playground-james-mbp-16` |
-| `this-is-a-very-long-device-name-that-blows-past-the-dns-label-budget-and-then-some` | `this-is-a-very-long-device-name-that-blows-past` | `truffle-playground-this-is-a-very-long-device-name-that-blows-past` |
+| `this-is-a-very-long-device-name-that-blows-past-the-dns-label-budget-and-then-some` | `this-is-a-very-long-device-name-that-blows-p` | `truffle-playground-this-is-a-very-long-device-name-that-blows-p` |
 | `` (empty) | rejected at input — defaults to OS hostname instead | — |
 
 **Collision handling.** Two distinct `deviceName`s can sanitise to the same slug (`"Alice's Mac"` and `"Alice Mac"` both → `alice-mac`). Tailscale's control plane resolves hostname collisions by appending `-2`, `-3`, … at the Tailscale layer — we rely on that behaviour and do NOT pre-emptively add our own suffix. The app-level `deviceId` (§5.4) is what guarantees unique identity; the hostname is only for Tailscale's own use.
