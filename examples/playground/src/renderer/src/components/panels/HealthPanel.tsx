@@ -41,7 +41,7 @@ export function HealthPanel() {
       [...peers].sort((a, b) => {
         if (a.wsConnected !== b.wsConnected) return a.wsConnected ? -1 : 1;
         if (a.online !== b.online) return a.online ? -1 : 1;
-        return a.name.localeCompare(b.name);
+        return a.deviceName.localeCompare(b.deviceName);
       }),
     [peers],
   );
@@ -49,18 +49,18 @@ export function HealthPanel() {
   const doPing = async (peer: Peer) => {
     setPings((current) => ({
       ...current,
-      [peer.id]: { ...current[peer.id], pinging: true, error: undefined },
+      [peer.deviceId]: { ...current[peer.deviceId], pinging: true, error: undefined },
     }));
     try {
-      const result = await ping(peer.id);
+      const result = await ping(peer.deviceId);
       setPings((current) => ({
         ...current,
-        [peer.id]: { result, pinging: false },
+        [peer.deviceId]: { result, pinging: false },
       }));
     } catch (err) {
       setPings((current) => ({
         ...current,
-        [peer.id]: {
+        [peer.deviceId]: {
           error: err instanceof Error ? err.message : String(err),
           pinging: false,
         },
@@ -146,12 +146,12 @@ export function HealthPanel() {
                 <span className="text-right">Action</span>
               </div>
               {sortedPeers.map((peer) => {
-                const cell = pings[peer.id];
+                const cell = pings[peer.deviceId];
                 const latency = cell?.result?.latencyMs;
                 const { filled, tone } = latencyBar(latency);
                 return (
                   <div
-                    key={peer.id}
+                    key={peer.deviceId}
                     className="grid grid-cols-[minmax(0,1.5fr)_minmax(0,1.3fr)_minmax(0,1.3fr)_72px] items-center gap-3 border-b border-[var(--color-border-subtle)] px-3 py-2 last:border-b-0"
                   >
                     <div className="flex min-w-0 items-center gap-2">
@@ -167,7 +167,7 @@ export function HealthPanel() {
                         )}
                       />
                       <span className="truncate text-[12.5px] text-[var(--color-text-primary)]">
-                        {peer.name}
+                        {peer.deviceName}
                       </span>
                     </div>
                     <div className="flex items-center gap-2">

@@ -15,9 +15,28 @@
 // ─── Lifecycle ──────────────────────────────────────────────────────────
 
 export interface StartConfig {
-  /** Node name advertised to the tailnet (becomes the hostname prefix). */
-  name: string;
-  /** State directory for Tailscale. Defaults to `./.truffle-state/{name}`. */
+  /**
+   * Required. Application namespace (RFC 017 §5.1). Must match
+   * `^[a-z][a-z0-9-]{1,31}$`. Two apps with different `appId`s cannot
+   * see each other as peers on the same tailnet.
+   */
+  appId: string;
+  /**
+   * Optional human-readable device name. Defaults to 'default' in the
+   * Electron main process when absent. May contain any Unicode; the
+   * Tailscale-safe hostname is derived automatically.
+   */
+  deviceName?: string;
+  /**
+   * Optional stable per-device ULID override. When omitted, truffle
+   * auto-generates and persists one inside `stateDir`.
+   */
+  deviceId?: string;
+  /**
+   * Optional Tailscale state directory override. When omitted, the
+   * Electron main process defaults to
+   * `{app.getPath('userData')}/truffle-state/{appId}/{deviceName}`.
+   */
   stateDir?: string;
   /** Ephemeral node — removed from tailnet on shutdown. */
   ephemeral?: boolean;
@@ -26,9 +45,16 @@ export interface StartConfig {
 }
 
 export interface NodeIdentity {
-  id: string;
-  hostname: string;
-  name: string;
+  /** Application namespace identifier. */
+  appId: string;
+  /** Stable per-device ULID (RFC 017 §5.4). Primary key. */
+  deviceId: string;
+  /** Original (unsanitised) device name as passed by the application. */
+  deviceName: string;
+  /** Derived Tailscale hostname (`truffle-{appId}-{slug}`). Debug use only. */
+  tailscaleHostname: string;
+  /** Tailscale stable node ID. Escape hatch; most code uses `deviceId`. */
+  tailscaleId: string;
   dnsName?: string;
   ip?: string;
 }
@@ -45,8 +71,12 @@ export interface NodeStateEvent {
 // ─── Peers ──────────────────────────────────────────────────────────────
 
 export interface Peer {
-  id: string;
-  name: string;
+  /** Stable per-device ULID from the remote node. Primary key (RFC 017). */
+  deviceId: string;
+  /** Human-readable device name from the remote node. */
+  deviceName: string;
+  /** Tailscale stable ID. Escape hatch; most code should use `deviceId`. */
+  tailscaleId: string;
   ip: string;
   online: boolean;
   wsConnected: boolean;
@@ -86,9 +116,11 @@ export interface HealthInfo {
 // ─── Messaging (chat namespace) ─────────────────────────────────────────
 
 export interface ChatMessage {
-  /** Stable node ID of the sender. */
+  /** Sender's stable per-device ULID (RFC 017 `deviceId`). */
   from: string;
-  /** Human-readable sender name (resolved by main process from peer cache). */
+  /** Human-readable sender `deviceName`, resolved by the main process
+   *  from the peer cache at receive time. Falls back to the raw
+   *  `deviceId` if the peer is not yet known. */
   fromName: string;
   /** Message body. */
   text: string;
@@ -127,7 +159,9 @@ export interface StoreEvent {
 
 export interface FileOffer {
   token: string;
+  /** Sender's `deviceId` (RFC 017). */
   fromPeer: string;
+  /** Sender's `deviceName`. */
   fromName: string;
   fileName: string;
   size: number;

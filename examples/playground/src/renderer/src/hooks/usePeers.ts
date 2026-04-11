@@ -33,7 +33,9 @@ export function usePeers(): UsePeersResult {
 
     const unsub = window.truffle.onPeerEvent((event: PeerEvent) => {
       setPeers((current) => {
-        const idx = current.findIndex((p) => p.id === event.peerId);
+        // `event.peerId` is the RFC 017 `deviceId` ULID — match it
+        // against each peer's `deviceId`, not the Tailscale stable ID.
+        const idx = current.findIndex((p) => p.deviceId === event.peerId);
         switch (event.eventType) {
           case 'joined':
           case 'updated': {
@@ -47,7 +49,7 @@ export function usePeers(): UsePeersResult {
           }
           case 'left': {
             if (idx < 0) return current;
-            return current.filter((p) => p.id !== event.peerId);
+            return current.filter((p) => p.deviceId !== event.peerId);
           }
           case 'ws_connected': {
             if (idx < 0) {

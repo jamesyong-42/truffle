@@ -1,6 +1,6 @@
 # RFC 017: Identity and App Namespacing
 
-**Status:** Draft
+**Status:** Implemented
 **Author:** James + Claude
 **Date:** 2026-04-11
 

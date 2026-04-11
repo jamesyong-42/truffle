@@ -83,7 +83,7 @@ export function FilesPanel() {
     const path = pendingPath;
     setPendingPath(null);
     try {
-      await sendFile(peer.id, path);
+      await sendFile(peer.deviceId, path);
     } catch (err) {
       setSendError(err instanceof Error ? err.message : String(err));
     }
@@ -288,7 +288,7 @@ export function FilesPanel() {
             ) : (
               <ul className="flex flex-col gap-1">
                 {connectedPeers.map((peer) => (
-                  <li key={peer.id}>
+                  <li key={peer.deviceId}>
                     <button
                       type="button"
                       onClick={() => void confirmSend(peer)}

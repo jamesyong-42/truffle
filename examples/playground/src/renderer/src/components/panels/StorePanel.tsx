@@ -69,8 +69,8 @@ export function StorePanel() {
   };
 
   const peerName = (deviceId: string): string => {
-    const match = peers.find((p) => p.id === deviceId);
-    return match?.name ?? deviceId.slice(0, 10);
+    const match = peers.find((p) => p.deviceId === deviceId);
+    return match?.deviceName ?? deviceId.slice(0, 10);
   };
 
   const localUpdatedAgo = localSlice

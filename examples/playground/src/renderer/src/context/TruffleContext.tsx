@@ -43,19 +43,22 @@ const TruffleContext = createContext<TruffleContextValue | null>(null);
 /**
  * Build a default start config.
  *
- * Uses a **stable name + persistent state directory** on purpose:
+ * Uses a **fixed `appId` + per-device `deviceName` + persistent state
+ * directory** (RFC 017):
  *   - First run → Tailscale auth URL appears, user authenticates once
  *   - Subsequent runs → the cached tailnet credentials are reused and the
  *     app lands straight in the running shell with no re-auth
  *
- * The `NAME` env var (surfaced via the renderer at build time by Vite)
- * can override the stable name if you want to run multiple playgrounds
- * on the same machine side-by-side.
+ * The `VITE_TRUFFLE_NAME` env var (surfaced by electron-vite at build
+ * time) controls the `deviceName`. Defaults to `'default'` — matching
+ * the Electron main process fallback so the state-dir path is stable
+ * across fresh installs.
  */
 function makeDefaultConfig(): StartConfig {
   const envName = import.meta.env.VITE_TRUFFLE_NAME as string | undefined;
   return {
-    name: envName ?? 'playground',
+    appId: 'playground',
+    deviceName: envName ?? 'default',
     // Non-ephemeral: keep the tailnet entry around so auth persists.
     ephemeral: false,
   };
