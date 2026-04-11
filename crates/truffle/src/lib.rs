@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! truffle = "0.3"
+//! truffle = "0.4"
 //! ```
 //!
 //! ```rust,no_run
@@ -19,7 +19,8 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let node = Node::<TailscaleProvider>::builder()
-//!     .name("my-app")
+//!     .app_id("my-app")?
+//!     .device_name("my-device")
 //!     .sidecar_path(sidecar_path())
 //!     .build()
 //!     .await?;
@@ -40,7 +41,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! truffle-core = "0.3"
+//! truffle-core = "0.4"
 //! ```
 
 // Re-export everything from truffle-core

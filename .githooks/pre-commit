@@ -8,7 +8,11 @@
 #   1. NAPI binding drift — if crates/truffle-napi/src/ changed but
 #      index.d.ts / index.js weren't regenerated (caused 0.3.17 pipeline
 #      to ship stale types)
-#   2. Rustfmt violations on staged Rust files
+#   2. Workflow YAML parse errors
+#   3. Rustfmt violations on staged Rust files
+#   4. Prettier violations on staged TypeScript files in packages/
+#   5. Doctests in crates/truffle/src/lib.rs (the only doctest in CI)
+#      when truffle-core or the meta-crate changes
 #
 # Skip with: git commit --no-verify
 
@@ -133,6 +137,65 @@ if [ "$rust_count" -gt 0 ]; then
     else
       echo "${GREEN}[pre-commit] Rustfmt clean ($rust_count file(s)).${NC}"
     fi
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────
+# Check 4: Prettier on staged TypeScript files in packages/
+# CI runs `prettier --check 'packages/*/src/**/*.ts'`, so mirror that.
+# ───────────────────────────────────────────────────────────────
+ts_files=""
+ts_count=0
+while IFS= read -r f; do
+  case "$f" in
+    packages/*/src/*.ts|packages/*/src/**/*.ts)
+      ts_files="$ts_files $f"
+      ts_count=$((ts_count + 1))
+      ;;
+  esac
+done <<< "$staged_files"
+
+if [ "$ts_count" -gt 0 ]; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "${YELLOW}[pre-commit] pnpm not found — skipping prettier check${NC}"
+  else
+    # shellcheck disable=SC2086
+    if ! pnpm exec prettier --check $ts_files >/dev/null 2>&1; then
+      echo "${RED}[pre-commit] Prettier formatting issues. Run:${NC}"
+      echo "            pnpm exec prettier --write$ts_files"
+      fail=1
+    else
+      echo "${GREEN}[pre-commit] Prettier clean ($ts_count file(s)).${NC}"
+    fi
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────
+# Check 5: Doctest in crates/truffle/src/lib.rs
+# This is the only doctest CI runs, and it broke twice during the
+# RFC 017 migration because the meta-crate's quick-start example
+# referenced API that no longer existed. Re-run it whenever the
+# meta-crate, truffle-core's public Node API, or the lib.rs itself
+# changes.
+# ───────────────────────────────────────────────────────────────
+doctest_relevant=0
+while IFS= read -r f; do
+  case "$f" in
+    crates/truffle/src/lib.rs|crates/truffle/Cargo.toml|crates/truffle-core/src/node.rs|crates/truffle-core/src/lib.rs)
+      doctest_relevant=1
+      break
+      ;;
+  esac
+done <<< "$staged_files"
+
+if [ "$doctest_relevant" -eq 1 ]; then
+  echo "${YELLOW}[pre-commit] Meta-crate or core Node API changed — running truffle doctest...${NC}"
+  if ! cargo test -p truffle --doc --quiet >/dev/null 2>&1; then
+    echo "${RED}[pre-commit] truffle doctest failed. Run:${NC}"
+    echo "            cargo test -p truffle --doc"
+    fail=1
+  else
+    echo "${GREEN}[pre-commit] truffle doctest passes.${NC}"
   fi
 fi
 

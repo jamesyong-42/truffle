@@ -5524,7 +5524,7 @@ dependencies = [
 
 [[package]]
 name = "truffle"
-version = "0.3.25"
+version = "0.4.0"
 dependencies = [
  "truffle-core",
  "truffle-sidecar",
@@ -5532,7 +5532,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-cli"
-version = "0.3.25"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "clap",
@@ -5567,7 +5567,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-core"
-version = "0.3.25"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "deunicode",
@@ -5609,7 +5609,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-sidecar"
-version = "0.3.25"
+version = "0.4.0"
 dependencies = [
  "flate2",
  "tar",

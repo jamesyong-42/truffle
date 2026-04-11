@@ -87,7 +87,9 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
 
         case 'updated':
           if (event.peer) {
-            setPeers((prev) => prev.map((p) => (p.deviceId === event.peer!.deviceId ? event.peer! : p)));
+            setPeers((prev) =>
+              prev.map((p) => (p.deviceId === event.peer!.deviceId ? event.peer! : p)),
+            );
           }
           break;
 
