@@ -149,8 +149,9 @@ mod platform {
                     let (r, w) = split(s);
                     (
                         IpcReadHalf {
-                            inner: BufReader::new(Box::new(r)
-                                as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+                            inner: BufReader::new(
+                                Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+                            ),
                         },
                         IpcWriteHalf {
                             inner: Box::new(w) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
@@ -161,8 +162,9 @@ mod platform {
                     let (r, w) = split(c);
                     (
                         IpcReadHalf {
-                            inner: BufReader::new(Box::new(r)
-                                as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+                            inner: BufReader::new(
+                                Box::new(r) as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+                            ),
                         },
                         IpcWriteHalf {
                             inner: Box::new(w) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>,

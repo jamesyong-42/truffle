@@ -94,11 +94,7 @@ impl Bridge {
     }
 
     /// Register a channel for incoming connections on a specific port.
-    pub async fn register_listener(
-        &self,
-        port: u16,
-        tx: mpsc::Sender<IncomingConnection>,
-    ) {
+    pub async fn register_listener(&self, port: u16, tx: mpsc::Sender<IncomingConnection>) {
         self.incoming_channels.lock().await.insert(port, tx);
     }
 
@@ -166,13 +162,11 @@ impl Bridge {
         incoming_channels: Arc<Mutex<HashMap<u16, mpsc::Sender<IncomingConnection>>>>,
     ) -> Result<(), NetworkError> {
         // Read header with timeout
-        let header = tokio::time::timeout(
-            HEADER_READ_TIMEOUT,
-            BridgeHeader::read_from(&mut stream),
-        )
-        .await
-        .map_err(|_| NetworkError::BridgeError("header read timeout".into()))?
-        .map_err(|e| NetworkError::BridgeError(format!("header parse error: {e}")))?;
+        let header =
+            tokio::time::timeout(HEADER_READ_TIMEOUT, BridgeHeader::read_from(&mut stream))
+                .await
+                .map_err(|_| NetworkError::BridgeError("header read timeout".into()))?
+                .map_err(|e| NetworkError::BridgeError(format!("header parse error: {e}")))?;
 
         // Validate session token (constant-time comparison)
         if header.session_token.ct_eq(&expected_token).unwrap_u8() != 1 {

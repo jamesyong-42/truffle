@@ -53,7 +53,10 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
         .to_string_lossy()
         .to_string();
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        tracing::error!(dir = output_dir.as_str(), "Failed to create output dir: {e}");
+        tracing::error!(
+            dir = output_dir.as_str(),
+            "Failed to create output dir: {e}"
+        );
     }
     let offer_rx = node.file_transfer().offer_channel(node.clone()).await;
 
@@ -70,7 +73,8 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
     populate_peers(&node, &mut app).await;
 
     // Spawn event collectors — also get the sender for /cp to push transfer progress
-    let (event_tx, mut event_rx) = event::spawn_event_collectors(peer_rx, chat_rx, ft_rx, Some(offer_rx));
+    let (event_tx, mut event_rx) =
+        event::spawn_event_collectors(peer_rx, chat_rx, ft_rx, Some(offer_rx));
 
     // Schedule a delayed re-poll of peers. The sidecar's WatchIPNBus may not
     // have delivered its first PeersReceived event yet at startup, and the
@@ -86,9 +90,18 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                 let peers = node_clone.peers().await;
                 for peer in peers {
                     if peer.online {
-                        // Re-emit as a synthetic Joined event so the TUI updates
+                        // Re-emit as a synthetic Joined event so the TUI updates.
+                        // Reconstruct a hello-envelope identity from the Peer
+                        // so downstream UI sees the user-facing device_name.
+                        let identity = Some(truffle_core::session::PeerIdentity {
+                            app_id: String::new(),
+                            device_id: peer.device_id.clone(),
+                            device_name: peer.device_name.clone(),
+                            os: peer.os.clone().unwrap_or_default(),
+                            tailscale_id: peer.tailscale_id.clone(),
+                        });
                         let state = truffle_core::session::PeerState {
-                            id: peer.id.clone(),
+                            id: peer.tailscale_id.clone(),
                             name: peer.name.clone(),
                             ip: peer.ip,
                             online: peer.online,
@@ -96,6 +109,7 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                             connection_type: peer.connection_type.clone(),
                             os: peer.os.clone(),
                             last_seen: peer.last_seen.clone(),
+                            identity,
                         };
                         let _ = tx.send(event::AppEvent::PeerEvent(
                             truffle_core::session::PeerEvent::Updated(state),
@@ -196,8 +210,8 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             let display_name = app
                 .peers
                 .iter()
-                .find(|p| p.id == from_id)
-                .map(|p| p.name.clone())
+                .find(|p| p.device_id == from_id)
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| from_id.clone());
 
             // Toast if scrolled up (user would miss the message)
@@ -228,10 +242,7 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::InProgress {
-                            percent,
-                            speed_bps,
-                        };
+                        *status = app::TransferStatus::InProgress { percent, speed_bps };
                         break;
                     }
                 }
@@ -250,16 +261,15 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::Complete { sha256: sha256.clone() };
+                        *status = app::TransferStatus::Complete {
+                            sha256: sha256.clone(),
+                        };
                         break;
                     }
                 }
             }
         }
-        AppEvent::TransferFailed {
-            file_name,
-            reason,
-        } => {
+        AppEvent::TransferFailed { file_name, reason } => {
             for item in app.items.iter_mut().rev() {
                 if let app::DisplayItem::FileTransfer {
                     file_name: ref name,
@@ -268,7 +278,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                 } = item
                 {
                     if name == &file_name {
-                        *status = app::TransferStatus::Failed { reason: reason.clone() };
+                        *status = app::TransferStatus::Failed {
+                            reason: reason.clone(),
+                        };
                         break;
                     }
                 }
@@ -292,7 +304,9 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             if let Some(dialog) = &app.transfer_dialog {
                 if dialog.created_at.elapsed() > std::time::Duration::from_secs(60) {
                     // Auto-reject and close
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("timed out (60s)");
                     }
@@ -300,8 +314,7 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
                         time: chrono::Local::now(),
                         text: format!(
                             "  File offer from {} timed out ({})",
-                            dialog.offer.from_name,
-                            dialog.offer.file_name,
+                            dialog.offer.from_name, dialog.offer.file_name,
                         ),
                         level: app::SystemLevel::Warning,
                     });
@@ -333,7 +346,9 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             }
             KeyCode::Enter => {
                 // Check if current selection is a file or directory
-                let is_file = app.file_picker.as_ref()
+                let is_file = app
+                    .file_picker
+                    .as_ref()
                     .map(|e| !e.current().is_dir)
                     .unwrap_or(false);
 
@@ -361,8 +376,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         if dialog.phase == app::TransferDialogPhase::SaveAs {
                             if let Some(ref explorer) = app.file_picker {
-                                let dir_path = explorer.current().path.to_string_lossy().to_string();
-                                dialog.save_path_input = format!("{}/{}", dir_path, dialog.offer.file_name);
+                                let dir_path =
+                                    explorer.current().path.to_string_lossy().to_string();
+                                dialog.save_path_input =
+                                    format!("{}/{}", dir_path, dialog.offer.file_name);
                                 dialog.save_path_cursor = dialog.save_path_input.chars().count();
                             }
                             app.file_picker = None;
@@ -576,16 +593,36 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
 
     match event {
         PeerEvent::Joined(state) => {
-            // Add or update peer in cache
-            let name = state.name.trim_start_matches("truffle-").to_string();
-            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == state.id) {
+            // Add or update peer in cache. Prefer RFC 017 identity
+            // (device_id / device_name) when the hello envelope has
+            // been processed; fall back to the Layer 3 tailscale_id and
+            // de-slugged hostname otherwise.
+            let name = state
+                .identity
+                .as_ref()
+                .map(|i| i.device_name.clone())
+                .unwrap_or_else(|| state.name.trim_start_matches("truffle-").to_string());
+            let device_id = state
+                .identity
+                .as_ref()
+                .map(|i| i.device_id.clone())
+                .unwrap_or_else(|| state.id.clone());
+            let tailscale_id = state.id.clone();
+            if let Some(peer) = app
+                .peers
+                .iter_mut()
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+            {
+                peer.device_id = device_id.clone();
+                peer.tailscale_id = tailscale_id.clone();
                 peer.online = true;
                 peer.ip = state.ip.to_string();
-                peer.name = name.clone();
+                peer.device_name = name.clone();
             } else {
                 app.peers.push(app::PeerInfo {
-                    id: state.id.clone(),
-                    name: name.clone(),
+                    device_id,
+                    device_name: name.clone(),
+                    tailscale_id,
                     ip: state.ip.to_string(),
                     online: true,
                     connection: None,
@@ -599,13 +636,14 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             });
         }
         PeerEvent::Left(id) => {
+            // PeerEvent::Left carries the session-layer Tailscale stable ID.
             let name = app
                 .peers
                 .iter()
-                .find(|p| p.id == id)
-                .map(|p| p.name.clone())
+                .find(|p| p.tailscale_id == id)
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
-            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == id) {
+            if let Some(peer) = app.peers.iter_mut().find(|p| p.tailscale_id == id) {
                 peer.online = false;
             }
             app.push_item(app::DisplayItem::PeerEvent {
@@ -616,11 +654,14 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             });
         }
         PeerEvent::WsConnected(id) => {
+            // WsConnected/WsDisconnected carry the Tailscale stable ID
+            // because the session layer only knows that at the moment of
+            // the event — look up PeerInfo by its tailscale_id escape hatch.
             let name = app
                 .peers
                 .iter()
-                .find(|p| p.id == id)
-                .map(|p| p.name.clone())
+                .find(|p| p.tailscale_id == id)
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
@@ -633,8 +674,8 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             let name = app
                 .peers
                 .iter()
-                .find(|p| p.id == id)
-                .map(|p| p.name.clone())
+                .find(|p| p.tailscale_id == id)
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
@@ -644,26 +685,46 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             });
         }
         PeerEvent::Updated(state) => {
-            // Update peer cache with new state (online/offline, IP, connection type)
-            let name = state.name.trim_start_matches("truffle-").to_string();
+            // Update peer cache with new state (online/offline, IP, connection type).
+            // Prefer RFC 017 identity from the hello envelope; fall back
+            // to Layer 3 hostname/tailscale_id otherwise.
+            let name = state
+                .identity
+                .as_ref()
+                .map(|i| i.device_name.clone())
+                .unwrap_or_else(|| state.name.trim_start_matches("truffle-").to_string());
+            let device_id = state
+                .identity
+                .as_ref()
+                .map(|i| i.device_id.clone())
+                .unwrap_or_else(|| state.id.clone());
+            let tailscale_id = state.id.clone();
+
             let was_online = app
                 .peers
                 .iter()
-                .find(|p| p.id == state.id)
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
                 .map(|p| p.online)
                 .unwrap_or(false);
 
-            if let Some(peer) = app.peers.iter_mut().find(|p| p.id == state.id) {
+            if let Some(peer) = app
+                .peers
+                .iter_mut()
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+            {
+                peer.device_id = device_id.clone();
+                peer.tailscale_id = tailscale_id.clone();
                 peer.online = state.online;
                 peer.ip = state.ip.to_string();
-                peer.name = name.clone();
+                peer.device_name = name.clone();
                 if !state.connection_type.is_empty() {
                     peer.connection = Some(state.connection_type.clone());
                 }
             } else {
                 app.peers.push(app::PeerInfo {
-                    id: state.id.clone(),
-                    name: name.clone(),
+                    device_id,
+                    device_name: name.clone(),
+                    tailscale_id,
                     ip: state.ip.to_string(),
                     online: state.online,
                     connection: if state.connection_type.is_empty() {
@@ -720,8 +781,8 @@ fn handle_file_offer_received(
         let _peer_name = app
             .peers
             .iter()
-            .find(|p| p.id == offer.from_peer)
-            .map(|p| p.name.clone())
+            .find(|p| p.device_id == offer.from_peer)
+            .map(|p| p.device_name.clone())
             .unwrap_or_else(|| offer.from_name.clone());
         // Add FileTransfer item so receive progress can update it
         app.push_item(app::DisplayItem::FileTransfer {
@@ -819,7 +880,9 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     // Reject
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("rejected by user");
                     }
@@ -835,14 +898,16 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::Char('d') | KeyCode::Char('D') => {
                     // Accept and add peer to auto-accept list
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     let save_path = dialog.save_path_input.clone();
                     let peer_id = dialog.offer.from_peer.clone();
                     let peer_name = app
                         .peers
                         .iter()
-                        .find(|p| p.id == peer_id)
-                        .map(|p| p.name.clone())
+                        .find(|p| p.device_id == peer_id)
+                        .map(|p| p.device_name.clone())
                         .unwrap_or_else(|| dialog.offer.from_name.clone());
 
                     if let Some(responder) = dialog.responder.take() {
@@ -867,17 +932,16 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     });
                     app.push_item(app::DisplayItem::System {
                         time: chrono::Local::now(),
-                        text: format!(
-                            "  Future files from {} accepted automatically",
-                            peer_name,
-                        ),
+                        text: format!("  Future files from {} accepted automatically", peer_name,),
                         level: app::SystemLevel::Info,
                     });
                     show_next_pending_offer(app);
                 }
                 KeyCode::Esc => {
                     // Esc in prompt phase rejects (same as 'r')
-                    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+                    let Some(mut dialog) = app.transfer_dialog.take() else {
+                        return;
+                    };
                     if let Some(responder) = dialog.responder.take() {
                         responder.reject("dismissed");
                     }
@@ -932,10 +996,8 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         if dialog.save_path_cursor > 0 {
                             dialog.save_path_cursor -= 1;
-                            let byte_pos = char_to_byte_pos(
-                                &dialog.save_path_input,
-                                dialog.save_path_cursor,
-                            );
+                            let byte_pos =
+                                char_to_byte_pos(&dialog.save_path_input, dialog.save_path_cursor);
                             dialog.save_path_input.remove(byte_pos);
                         }
                     }
@@ -944,18 +1006,15 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     if let Some(ref mut dialog) = app.transfer_dialog {
                         let char_count = dialog.save_path_input.chars().count();
                         if dialog.save_path_cursor < char_count {
-                            let byte_pos = char_to_byte_pos(
-                                &dialog.save_path_input,
-                                dialog.save_path_cursor,
-                            );
+                            let byte_pos =
+                                char_to_byte_pos(&dialog.save_path_input, dialog.save_path_cursor);
                             dialog.save_path_input.remove(byte_pos);
                         }
                     }
                 }
                 KeyCode::Left => {
                     if let Some(ref mut dialog) = app.transfer_dialog {
-                        dialog.save_path_cursor =
-                            dialog.save_path_cursor.saturating_sub(1);
+                        dialog.save_path_cursor = dialog.save_path_cursor.saturating_sub(1);
                     }
                 }
                 KeyCode::Right => {
@@ -973,8 +1032,7 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                 }
                 KeyCode::End => {
                     if let Some(ref mut dialog) = app.transfer_dialog {
-                        dialog.save_path_cursor =
-                            dialog.save_path_input.chars().count();
+                        dialog.save_path_cursor = dialog.save_path_input.chars().count();
                     }
                 }
                 KeyCode::Tab => {
@@ -1004,7 +1062,9 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
 
 /// Accept the current offer and show next pending.
 fn accept_current_offer(app: &mut AppState) {
-    let Some(mut dialog) = app.transfer_dialog.take() else { return; };
+    let Some(mut dialog) = app.transfer_dialog.take() else {
+        return;
+    };
     let save_path = dialog.save_path_input.clone();
     if let Some(responder) = dialog.responder.take() {
         responder.accept(&save_path);
@@ -1039,25 +1099,40 @@ async fn kill_existing_daemon() {
 
 /// Populate app.peers from the current Node peer list.
 async fn populate_peers(
-    node: &std::sync::Arc<truffle_core::node::Node<truffle_core::network::tailscale::TailscaleProvider>>,
+    node: &std::sync::Arc<
+        truffle_core::node::Node<truffle_core::network::tailscale::TailscaleProvider>,
+    >,
     app: &mut AppState,
 ) {
     let current_peers = node.peers().await;
     for peer in current_peers {
-        let name = peer.name.trim_start_matches("truffle-").to_string();
-        let id = peer.id.clone();
-        // Update existing or insert new
-        if let Some(existing) = app.peers.iter_mut().find(|p| p.id == id) {
+        // RFC 017: prefer device_name / device_id from the hello
+        // envelope (carried on the Peer struct). Peer always has these
+        // fields populated — they fall back to the Layer 3 hostname /
+        // tailscale_id before the hello lands.
+        let name = peer.device_name.clone();
+        let device_id = peer.device_id.clone();
+        let tailscale_id = peer.tailscale_id.clone();
+        // Update existing or insert new. Match by tailscale_id or
+        // device_id so pre-hello and post-hello entries reconcile.
+        if let Some(existing) = app
+            .peers
+            .iter_mut()
+            .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+        {
+            existing.device_id = device_id;
+            existing.tailscale_id = tailscale_id;
             existing.online = peer.online;
             existing.ip = peer.ip.to_string();
-            existing.name = name;
+            existing.device_name = name;
             if !peer.connection_type.is_empty() {
                 existing.connection = Some(peer.connection_type.clone());
             }
         } else {
             app.peers.push(app::PeerInfo {
-                id,
-                name,
+                device_id,
+                device_name: name,
+                tailscale_id,
                 ip: peer.ip.to_string(),
                 online: peer.online,
                 connection: if peer.connection_type.is_empty() {

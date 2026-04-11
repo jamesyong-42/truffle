@@ -31,19 +31,31 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+// `std::sync::RwLock` is aliased to `StdRwLock` so the namespace_filters
+// lock — which is held only briefly for pure HashMap ops with no `.await`
+// points underneath — can stay sync. Keeping it sync lets
+// `Node::subscribe` remain non-async (required by the NAPI bridge, which
+// is called from Node.js's sync main thread with no tokio runtime in
+// scope) without the `try_write`-panic footgun that the previous
+// `tokio::sync::RwLock` implementation suffered from (see RFC 017 fix K).
+use std::sync::RwLock as StdRwLock;
 
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
+// The tokio RwLock is only used by the in-file test `MockNetworkProvider`
+// (see `#[cfg(test)] mod tests`); production code now uses the std
+// RwLock alias above for `namespace_filters`.
+#[cfg(test)]
+use tokio::sync::RwLock;
 
 use crate::envelope::codec::{EnvelopeCodec, JsonCodec};
 use crate::envelope::{Envelope, EnvelopeError};
 use crate::file_transfer::{self, FileTransferState};
+use crate::identity::{self, AppId, DeviceId, DeviceName};
 use crate::network::tailscale::{TailscaleConfig, TailscaleProvider};
-use crate::network::{
-    HealthInfo, NetworkProvider, NetworkUdpSocket, NodeIdentity, PingResult,
-};
+use crate::network::{HealthInfo, NetworkProvider, NetworkUdpSocket, NodeIdentity, PingResult};
 use crate::session::{PeerEvent, PeerRegistry, PeerState};
 use crate::transport::websocket::WebSocketTransport;
 use crate::transport::{RawListener, WsConfig};
@@ -79,12 +91,33 @@ pub struct NamespacedMessage {
 /// This is a simplified projection of the internal [`PeerState`] that hides
 /// session-layer internals. Applications use this to display peer lists and
 /// resolve peer IDs for `send()` / `open_tcp()`.
+///
+/// RFC 017 introduced `device_id` and `device_name` derived from the hello
+/// envelope — these are populated once the WebSocket link comes up. Before
+/// that, they fall back to the legacy Tailscale ID / hostname pair so
+/// application code has something to display even for not-yet-connected
+/// peers.
 #[derive(Debug, Clone)]
 pub struct Peer {
-    /// Stable node ID.
+    /// Legacy per-peer ID. Kept for back-compat with call sites that
+    /// destructure `peer.id`; new code should prefer [`device_id`](Self::device_id)
+    /// directly. Equal to `device_id` once the hello has landed; equal to
+    /// the Tailscale stable ID beforehand.
     pub id: String,
-    /// Human-readable name (hostname).
+    /// Legacy name (the Layer 3 Tailscale hostname — the *slug*). New code
+    /// should prefer [`device_name`](Self::device_name).
     pub name: String,
+    /// Stable per-device ULID (RFC 017 §5.4) from the hello envelope.
+    /// Falls back to the Tailscale stable ID until the hello handshake
+    /// completes.
+    pub device_id: String,
+    /// Human-readable device name from the hello envelope (original
+    /// Unicode form, NOT the slug). Falls back to the hostname until the
+    /// hello completes.
+    pub device_name: String,
+    /// Tailscale stable node ID — escape hatch for diagnostics and the
+    /// transport routing key.
+    pub tailscale_id: String,
     /// Network IP address.
     pub ip: IpAddr,
     /// Whether the peer is online (from Layer 3).
@@ -93,7 +126,8 @@ pub struct Peer {
     pub ws_connected: bool,
     /// Connection type description (e.g., `"direct"` or `"relay:ord"`).
     pub connection_type: String,
-    /// Operating system, if known.
+    /// Operating system, if known. Prefers the hello envelope's value
+    /// and falls back to Layer 3.
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
@@ -101,14 +135,30 @@ pub struct Peer {
 
 impl From<PeerState> for Peer {
     fn from(s: PeerState) -> Self {
+        let (device_id, device_name, os) = match s.identity.as_ref() {
+            Some(identity) => (
+                identity.device_id.clone(),
+                identity.device_name.clone(),
+                Some(identity.os.clone()),
+            ),
+            None => (s.id.clone(), s.name.clone(), s.os.clone()),
+        };
+        let legacy_id = s
+            .identity
+            .as_ref()
+            .map(|i| i.device_id.clone())
+            .unwrap_or_else(|| s.id.clone());
         Self {
-            id: s.id,
+            id: legacy_id,
             name: s.name,
+            device_id,
+            device_name,
+            tailscale_id: s.id,
             ip: s.ip,
             online: s.online,
             ws_connected: s.ws_connected,
             connection_type: s.connection_type,
-            os: s.os,
+            os,
             last_seen: s.last_seen,
         }
     }
@@ -160,6 +210,10 @@ pub enum NodeError {
     /// Builder configuration error.
     #[error("build error: {0}")]
     BuildError(String),
+
+    /// I/O error from the builder (state dir creation, device-id persistence).
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +243,13 @@ pub struct Node<N: NetworkProvider + 'static> {
     #[allow(dead_code)]
     incoming_tx: broadcast::Sender<NamespacedMessage>,
     /// Per-namespace subscription channels.
-    namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
+    ///
+    /// Guarded by a `std::sync::RwLock` (not tokio) because the lock is
+    /// held only for quick HashMap operations with no `.await` points
+    /// underneath, and the `subscribe()` API has to be callable from
+    /// synchronous contexts (the NAPI bridge, which runs on Node.js's
+    /// main thread with no tokio runtime in scope).
+    namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     /// File transfer subsystem state.
     pub(crate) file_transfer_state: FileTransferState,
 }
@@ -206,8 +266,9 @@ impl<N: NetworkProvider + 'static> Node<N> {
         codec: Arc<dyn EnvelopeCodec>,
     ) -> Self {
         let (incoming_tx, _) = broadcast::channel(1024);
-        let namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let namespace_filters: Arc<
+            StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>,
+        > = Arc::new(StdRwLock::new(HashMap::new()));
 
         let node = Self {
             network,
@@ -232,7 +293,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         session: Arc<PeerRegistry<N>>,
         codec: Arc<dyn EnvelopeCodec>,
         incoming_tx: broadcast::Sender<NamespacedMessage>,
-        namespace_filters: Arc<RwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
+        namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     ) {
         let mut rx = session.subscribe();
 
@@ -260,7 +321,11 @@ impl<N: NetworkProvider + 'static> Node<N> {
                             let _ = incoming_tx.send(namespaced.clone());
 
                             // Route to namespace-specific subscriber if present.
-                            let filters = namespace_filters.read().await;
+                            // Sync read on the std RwLock: the critical section
+                            // is a HashMap lookup with no `.await` points.
+                            let filters = namespace_filters
+                                .read()
+                                .expect("namespace_filters std RwLock poisoned");
                             let _has_subscriber = filters.contains_key(&namespaced.namespace);
                             if let Some(tx) = filters.get(&namespaced.namespace) {
                                 let send_result = tx.send(namespaced);
@@ -330,12 +395,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         store_id: &str,
     ) -> Arc<crate::synced_store::SyncedStore<T>>
     where
-        T: serde::Serialize
-            + serde::de::DeserializeOwned
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     {
         crate::synced_store::SyncedStore::new(self.clone(), store_id)
     }
@@ -350,12 +410,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         backend: std::sync::Arc<dyn crate::synced_store::StoreBackend>,
     ) -> Arc<crate::synced_store::SyncedStore<T>>
     where
-        T: serde::Serialize
-            + serde::de::DeserializeOwned
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     {
         crate::synced_store::SyncedStore::new_with_backend(self.clone(), store_id, backend)
     }
@@ -401,37 +456,88 @@ impl<N: NetworkProvider + 'static> Node<N> {
         self.session.on_peer_change()
     }
 
-    /// Resolve a peer identifier (name or Tailscale ID) to the canonical
-    /// Tailscale stable node ID.
+    /// Resolve a peer identifier to the canonical per-device ULID
+    /// (`device_id`) from the RFC 017 hello envelope.
     ///
-    /// Returns the input unchanged if it already matches a peer's `id`.
-    /// Falls back to searching by `name` (hostname).
+    /// Accepts any of:
+    /// - the stable `device_id` (full ULID)
+    /// - a unique prefix of the `device_id` (at least 4 characters; must
+    ///   match exactly one known peer)
+    /// - the human-readable `device_name` from the hello
+    /// - the Layer 3 Tailscale hostname (the sanitised slug) — legacy
+    /// - the Tailscale stable ID — escape hatch for diagnostics
+    ///
+    /// The returned string is always a `device_id`, so it is safe to feed
+    /// back into `Node::send` or any other method that takes a peer
+    /// identifier.
     pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
         let peers = self.session.peers().await;
-        peers
-            .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
-            .map(|p| p.id.clone())
-            .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))
+
+        // Direct matches first — device_id, device_name, hostname,
+        // tailscale_id — so deterministic inputs always take the fast path.
+        for p in &peers {
+            if let Some(identity) = p.identity.as_ref() {
+                if identity.device_id == peer_id || identity.device_name == peer_id {
+                    return Ok(identity.device_id.clone());
+                }
+            }
+            if p.id == peer_id || p.name == peer_id {
+                // `p.id` is the tailscale_id. If we have a richer identity,
+                // return its device_id; otherwise fall back to the routing
+                // key so the caller still has something usable.
+                return Ok(p
+                    .identity
+                    .as_ref()
+                    .map(|i| i.device_id.clone())
+                    .unwrap_or_else(|| p.id.clone()));
+            }
+        }
+
+        // Prefix match on device_id (require at least 4 chars and a single
+        // unambiguous hit). This matches the CLI affordance of typing just
+        // the first few characters of a ULID.
+        if peer_id.len() >= 4 {
+            let prefix_hits: Vec<&PeerState> = peers
+                .iter()
+                .filter(|p| {
+                    p.identity
+                        .as_ref()
+                        .map(|i| i.device_id.starts_with(peer_id))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if prefix_hits.len() == 1 {
+                if let Some(identity) = prefix_hits[0].identity.as_ref() {
+                    return Ok(identity.device_id.clone());
+                }
+            }
+        }
+
+        Err(NodeError::PeerNotFound(peer_id.to_string()))
     }
 
     // ── Diagnostics ──────────────────────────────────────────────────────
 
     /// Ping a peer via the network layer.
     ///
-    /// Resolves the peer ID to an IP address and pings via Layer 3.
+    /// Resolves the peer ID to an IP address and pings via Layer 3. Accepts
+    /// the same identifier forms as [`resolve_peer_id`](Self::resolve_peer_id).
     pub async fn ping(&self, peer_id: &str) -> Result<PingResult, NodeError> {
         let peers = self.session.peers().await;
         let peer = peers
             .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
+            .find(|p| {
+                p.id == peer_id
+                    || p.name == peer_id
+                    || p.identity
+                        .as_ref()
+                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                        .unwrap_or(false)
+            })
             .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
 
         let addr = peer.ip.to_string();
-        self.network
-            .ping(&addr)
-            .await
-            .map_err(NodeError::Network)
+        self.network.ping(&addr).await.map_err(NodeError::Network)
     }
 
     /// Return health information from the network layer.
@@ -446,12 +552,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// The data is wrapped in a Layer 6 [`Envelope`] with the given namespace
     /// and a `"message"` type, then serialized and sent via the session layer.
     /// If no WebSocket connection exists, one is lazily established.
-    pub async fn send(
-        &self,
-        peer_id: &str,
-        namespace: &str,
-        data: &[u8],
-    ) -> Result<(), NodeError> {
+    pub async fn send(&self, peer_id: &str, namespace: &str, data: &[u8]) -> Result<(), NodeError> {
         // If the data is valid UTF-8 JSON, parse it into a proper JSON value
         // so the receiver gets a structured object rather than an array of
         // byte values.  This is critical for the file transfer protocol and
@@ -462,12 +563,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .unwrap_or_else(|| serde_json::Value::from(data.to_vec()));
 
-        let envelope = Envelope::new(
-            namespace,
-            "message",
-            payload,
-        )
-        .with_timestamp();
+        let envelope = Envelope::new(namespace, "message", payload).with_timestamp();
 
         let encoded = self.codec.encode(&envelope)?;
         self.session.send(peer_id, &encoded).await?;
@@ -523,12 +619,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .unwrap_or_else(|| serde_json::Value::from(data.to_vec()));
 
-        let envelope = Envelope::new(
-            namespace,
-            "message",
-            payload,
-        )
-        .with_timestamp();
+        let envelope = Envelope::new(namespace, "message", payload).with_timestamp();
 
         match self.codec.encode(&envelope) {
             Ok(encoded) => {
@@ -548,14 +639,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
     pub fn subscribe(&self, namespace: &str) -> broadcast::Receiver<NamespacedMessage> {
         // Fast path: check if subscriber already exists (read lock).
         {
-            let filters = self.namespace_filters.blocking_lock_read();
+            let filters = self
+                .namespace_filters
+                .read()
+                .expect("namespace_filters std RwLock poisoned");
             if let Some(tx) = filters.get(namespace) {
                 return tx.subscribe();
             }
         }
 
         // Slow path: create a new channel for this namespace (write lock).
-        let mut filters = self.namespace_filters.blocking_lock_write();
+        let mut filters = self
+            .namespace_filters
+            .write()
+            .expect("namespace_filters std RwLock poisoned");
         // Double-check after acquiring write lock.
         if let Some(tx) = filters.get(namespace) {
             return tx.subscribe();
@@ -570,17 +667,21 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Open a raw TCP stream to a peer on the given port.
     ///
     /// Resolves the peer ID to an IP address via the session's peer list,
-    /// then dials via the network layer. Returns a plain `TcpStream` for
-    /// byte-oriented I/O.
-    pub async fn open_tcp(
-        &self,
-        peer_id: &str,
-        port: u16,
-    ) -> Result<TcpStream, NodeError> {
+    /// then dials via the network layer. Accepts the same identifier
+    /// forms as [`resolve_peer_id`](Self::resolve_peer_id). Returns a
+    /// plain `TcpStream` for byte-oriented I/O.
+    pub async fn open_tcp(&self, peer_id: &str, port: u16) -> Result<TcpStream, NodeError> {
         let peers = self.session.peers().await;
         let peer = peers
             .iter()
-            .find(|p| p.id == peer_id || p.name == peer_id)
+            .find(|p| {
+                p.id == peer_id
+                    || p.name == peer_id
+                    || p.identity
+                        .as_ref()
+                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                        .unwrap_or(false)
+            })
             .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
 
         let addr = peer.ip.to_string();
@@ -622,48 +723,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
 }
 
 // ---------------------------------------------------------------------------
-// Blocking lock helpers for RwLock (used in sync subscribe())
-// ---------------------------------------------------------------------------
-
-/// Extension trait for using tokio RwLock in synchronous contexts within
-/// the subscribe() method (which cannot be async because it returns a
-/// Receiver, not a Future).
-trait RwLockBlockingExt<T> {
-    fn blocking_lock_read(&self) -> tokio::sync::RwLockReadGuard<'_, T>;
-    fn blocking_lock_write(&self) -> tokio::sync::RwLockWriteGuard<'_, T>;
-}
-
-impl<T> RwLockBlockingExt<T> for RwLock<T> {
-    fn blocking_lock_read(&self) -> tokio::sync::RwLockReadGuard<'_, T> {
-        // In an async context, try_read is safe. If contended, fall back.
-        self.try_read().unwrap_or_else(|_| {
-            // Should not happen in practice since we hold locks briefly,
-            // but if it does we panic with a clear message.
-            panic!("node: namespace_filters read lock contended in sync context")
-        })
-    }
-
-    fn blocking_lock_write(&self) -> tokio::sync::RwLockWriteGuard<'_, T> {
-        self.try_write().unwrap_or_else(|_| {
-            panic!("node: namespace_filters write lock contended in sync context")
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // NodeBuilder
 // ---------------------------------------------------------------------------
 
 /// Builder for constructing a [`Node<TailscaleProvider>`].
 ///
-/// Configures the Tailscale sidecar, network identity, and transport
+/// Configures the Tailscale sidecar, RFC 017 identity, and transport
 /// parameters before wiring all layers together.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let node = Node::builder()
-///     .name("my-node")
+///     .app_id("playground")?
+///     .device_name("alice-mbp")
 ///     .sidecar_path("/opt/truffle/sidecar")
 ///     .ws_port(9417)
 ///     .build()
@@ -671,7 +744,9 @@ impl<T> RwLockBlockingExt<T> for RwLock<T> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct NodeBuilder {
-    name: Option<String>,
+    app_id: Option<AppId>,
+    device_name: Option<DeviceName>,
+    device_id: Option<DeviceId>,
     sidecar_path: Option<PathBuf>,
     state_dir: Option<String>,
     auth_key: Option<String>,
@@ -679,10 +754,44 @@ pub struct NodeBuilder {
     ws_port: u16,
 }
 
+/// Atomically write a string to `path` by writing to a sibling `.tmp`
+/// file first and then renaming it over the destination.
+///
+/// On POSIX, `rename(2)` is atomic and replaces an existing destination
+/// in-place. On Windows, `std::fs::rename` refuses to overwrite, so we
+/// explicitly remove the destination first — the window between remove
+/// and rename is acceptable here because the caller (device-id.txt
+/// persistence) runs once at startup and is not racing itself.
+fn atomic_write_string(path: &Path, content: &str) -> std::io::Result<()> {
+    let _parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    #[cfg(unix)]
+    {
+        std::fs::rename(&tmp, path)?;
+    }
+    #[cfg(windows)]
+    {
+        // Windows: std::fs::rename errors if the destination exists, so
+        // remove the old file first. Best-effort — missing file is fine.
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp, path)?;
+    }
+    Ok(())
+}
+
 impl Default for NodeBuilder {
     fn default() -> Self {
         Self {
-            name: None,
+            app_id: None,
+            device_name: None,
+            device_id: None,
             sidecar_path: None,
             state_dir: None,
             auth_key: None,
@@ -693,10 +802,38 @@ impl Default for NodeBuilder {
 }
 
 impl NodeBuilder {
-    /// Set the node's display name (used as the Tailscale hostname).
-    pub fn name(mut self, name: &str) -> Self {
-        self.name = Some(name.to_string());
+    /// Set the application namespace identifier (RFC 017 §5.1).
+    ///
+    /// The input is validated against `^[a-z][a-z0-9-]{1,31}$`. Invalid
+    /// values are rejected with `NodeError::BuildError`.
+    pub fn app_id(mut self, s: impl Into<String>) -> Result<Self, NodeError> {
+        let raw: String = s.into();
+        let app_id = AppId::parse(&raw)
+            .map_err(|e| NodeError::BuildError(format!("invalid app_id: {e}")))?;
+        self.app_id = Some(app_id);
+        Ok(self)
+    }
+
+    /// Set the human-readable device name.
+    ///
+    /// Accepts any Unicode input; soft-truncated to 256 graphemes. When
+    /// unset, the builder falls back to `hostname::get()` at `build()` time.
+    pub fn device_name(mut self, s: impl Into<String>) -> Self {
+        self.device_name = Some(DeviceName::parse(s));
         self
+    }
+
+    /// Override the auto-generated device ID.
+    ///
+    /// Validates that `s` is a well-formed ULID. When provided, the value
+    /// is persisted to `{state_dir}/device-id.txt` during `build()` so
+    /// subsequent starts without an explicit `device_id` see it.
+    pub fn device_id(mut self, s: impl Into<String>) -> Result<Self, NodeError> {
+        let raw: String = s.into();
+        let device_id = DeviceId::parse(&raw)
+            .map_err(|e| NodeError::BuildError(format!("invalid device_id: {e}")))?;
+        self.device_id = Some(device_id);
+        Ok(self)
     }
 
     /// Set the path to the Go sidecar binary.
@@ -729,6 +866,104 @@ impl NodeBuilder {
         self
     }
 
+    /// Resolve RFC 017 identity values and the Tailscale config.
+    ///
+    /// Shared between [`build()`](Self::build) and
+    /// [`build_with_auth_handler()`](Self::build_with_auth_handler). Returns
+    /// the ready-to-start `TailscaleConfig` along with the parsed identity
+    /// triple.
+    fn prepare_config(&self) -> Result<TailscaleConfig, NodeError> {
+        // 1. sidecar binary is required.
+        let binary_path = self
+            .sidecar_path
+            .clone()
+            .ok_or_else(|| NodeError::BuildError("sidecar_path is required".into()))?;
+
+        // 2. app_id is required.
+        let app_id = self
+            .app_id
+            .clone()
+            .ok_or_else(|| NodeError::BuildError("app_id is required".into()))?;
+
+        // 3. device_name falls back to the OS hostname.
+        let device_name = match self.device_name.clone() {
+            Some(name) => name,
+            None => {
+                let os_hostname = hostname::get()
+                    .map_err(|e| {
+                        NodeError::BuildError(format!(
+                            "device_name is unset and hostname::get() failed: {e}"
+                        ))
+                    })?
+                    .to_string_lossy()
+                    .into_owned();
+                DeviceName::parse(os_hostname)
+            }
+        };
+
+        // 4. Compose the Tailscale hostname once, here. Downstream code
+        //    MUST NOT rebuild it — the provider config stores this verbatim.
+        let tailscale_host = identity::tailscale_hostname(&app_id, &device_name);
+
+        // 5. Resolve state_dir. Default:
+        //    `{dirs::data_dir}/truffle/{app_id}/{slug(device_name)}`.
+        let state_dir = self.state_dir.clone().unwrap_or_else(|| {
+            let base = dirs::data_dir().unwrap_or_else(|| {
+                tracing::warn!(
+                    "dirs::data_dir() returned None, falling back to std::env::temp_dir()"
+                );
+                std::env::temp_dir()
+            });
+            base.join("truffle")
+                .join(app_id.as_str())
+                .join(identity::slug(device_name.as_str(), 255))
+                .to_string_lossy()
+                .into_owned()
+        });
+
+        // 6. Ensure the state directory exists before Tailscale starts.
+        std::fs::create_dir_all(&state_dir)?;
+
+        // 7. Resolve device_id. Priority:
+        //    a) explicit builder override → validate + persist
+        //    b) existing `device-id.txt` → read + validate
+        //    c) generate + persist
+        let device_id_file = Path::new(&state_dir).join("device-id.txt");
+        let device_id = match self.device_id.clone() {
+            Some(id) => {
+                // Persist the override so later auto-generated calls see it.
+                atomic_write_string(&device_id_file, id.as_str())?;
+                id
+            }
+            None => {
+                if device_id_file.exists() {
+                    let s = std::fs::read_to_string(&device_id_file)?.trim().to_string();
+                    DeviceId::parse(&s).map_err(|e| {
+                        NodeError::BuildError(format!(
+                            "device-id.txt at {device_id_file:?} contains an invalid ULID: {e}"
+                        ))
+                    })?
+                } else {
+                    let id = DeviceId::generate();
+                    atomic_write_string(&device_id_file, id.as_str())?;
+                    id
+                }
+            }
+        };
+
+        Ok(TailscaleConfig {
+            binary_path,
+            app_id: app_id.as_str().to_string(),
+            device_id: device_id.as_str().to_string(),
+            device_name: device_name.as_str().to_string(),
+            hostname: tailscale_host,
+            state_dir,
+            auth_key: self.auth_key.clone(),
+            ephemeral: if self.ephemeral { Some(true) } else { None },
+            tags: None,
+        })
+    }
+
     /// Build and start the node.
     ///
     /// This creates the TailscaleProvider, starts it, creates the WebSocket
@@ -740,27 +975,8 @@ impl NodeBuilder {
     /// Returns [`NodeError::BuildError`] if required configuration is missing,
     /// or propagates errors from the network provider startup.
     pub async fn build(self) -> Result<Node<TailscaleProvider>, NodeError> {
-        let binary_path = self
-            .sidecar_path
-            .ok_or_else(|| NodeError::BuildError("sidecar_path is required".into()))?;
-
-        let hostname = self
-            .name
-            .ok_or_else(|| NodeError::BuildError("name is required".into()))?;
-
-        let state_dir = self
-            .state_dir
-            .unwrap_or_else(|| format!("/tmp/truffle-{hostname}"));
-
-        // 1. Create and start the TailscaleProvider.
-        let config = TailscaleConfig {
-            binary_path,
-            hostname,
-            state_dir,
-            auth_key: self.auth_key,
-            ephemeral: if self.ephemeral { Some(true) } else { None },
-            tags: None,
-        };
+        let ws_port = self.ws_port;
+        let config = self.prepare_config()?;
 
         let mut provider = TailscaleProvider::new(config);
         provider.start().await.map_err(NodeError::Network)?;
@@ -769,7 +985,7 @@ impl NodeBuilder {
 
         // 2. Create WebSocket transport.
         let ws_config = WsConfig {
-            port: self.ws_port,
+            port: ws_port,
             ..Default::default()
         };
         let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config));
@@ -801,27 +1017,8 @@ impl NodeBuilder {
         self,
         on_auth: impl Fn(String) + Send + 'static,
     ) -> Result<Node<TailscaleProvider>, NodeError> {
-        let binary_path = self
-            .sidecar_path
-            .ok_or_else(|| NodeError::BuildError("sidecar_path is required".into()))?;
-
-        let hostname = self
-            .name
-            .ok_or_else(|| NodeError::BuildError("name is required".into()))?;
-
-        let state_dir = self
-            .state_dir
-            .unwrap_or_else(|| format!("/tmp/truffle-{hostname}"));
-
-        // 1. Create the TailscaleProvider (not started yet).
-        let config = TailscaleConfig {
-            binary_path,
-            hostname,
-            state_dir,
-            auth_key: self.auth_key,
-            ephemeral: if self.ephemeral { Some(true) } else { None },
-            tags: None,
-        };
+        let ws_port = self.ws_port;
+        let config = self.prepare_config()?;
 
         let mut provider = TailscaleProvider::new(config);
 
@@ -855,7 +1052,7 @@ impl NodeBuilder {
 
         // 6. Create WebSocket transport.
         let ws_config = WsConfig {
-            port: self.ws_port,
+            port: ws_port,
             ..Default::default()
         };
         let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config));
@@ -904,9 +1101,13 @@ mod tests {
             let (peer_event_tx, _) = broadcast::channel(64);
             Self {
                 identity: NodeIdentity {
-                    id: id.to_string(),
-                    hostname: format!("truffle-test-{id}"),
-                    name: format!("Test Node {id}"),
+                    app_id: "test".to_string(),
+                    // RFC 017: align `device_id` with fixture input so
+                    // tests can reason about a single identifier.
+                    device_id: id.to_string(),
+                    device_name: format!("Test Node {id}"),
+                    tailscale_hostname: format!("truffle-test-{id}"),
+                    tailscale_id: id.to_string(),
                     dns_name: None,
                     ip: Some("127.0.0.1".parse().unwrap()),
                 },
@@ -1061,10 +1262,7 @@ mod tests {
         let provider = MockNetworkProvider::new(id);
         let event_tx = provider.event_sender();
         let network = Arc::new(provider);
-        let ws_transport = Arc::new(WebSocketTransport::new(
-            network.clone(),
-            ws_config(ws_port),
-        ));
+        let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(ws_port)));
         let session = Arc::new(PeerRegistry::new(network.clone(), ws_transport));
         session.start().await;
 
@@ -1082,8 +1280,9 @@ mod tests {
         let (node, _event_tx, _network) = make_test_node("node-1", ws_port).await;
 
         let identity = node.local_info();
-        assert_eq!(identity.id, "node-1");
-        assert!(identity.hostname.contains("node-1"));
+        assert_eq!(identity.tailscale_id, "node-1");
+        assert_eq!(identity.device_id, "node-1");
+        assert!(identity.tailscale_hostname.contains("node-1"));
     }
 
     #[tokio::test]
@@ -1127,12 +1326,8 @@ mod tests {
         // We test the codec directly since a full send requires two connected nodes.
         let codec = JsonCodec;
         let data = b"hello world";
-        let envelope = Envelope::new(
-            "test-ns",
-            "message",
-            serde_json::Value::from(data.to_vec()),
-        )
-        .with_timestamp();
+        let envelope = Envelope::new("test-ns", "message", serde_json::Value::from(data.to_vec()))
+            .with_timestamp();
 
         let encoded = codec.encode(&envelope).unwrap();
         let decoded = codec.decode(&encoded).unwrap();
@@ -1265,8 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_envelope_serialize_deserialize() {
-        let envelope =
-            Envelope::new("chat", "message", json!({"text": "hello"})).with_timestamp();
+        let envelope = Envelope::new("chat", "message", json!({"text": "hello"})).with_timestamp();
 
         let bytes = envelope.serialize().unwrap();
         let decoded = Envelope::deserialize(&bytes).unwrap();
@@ -1366,5 +1560,124 @@ mod tests {
         }
         // If send fails due to loopback WS peer-id mismatch, that's expected
         // in unit tests. The important thing is no panics.
+    }
+
+    // ── RFC 017 Phase 2: resolve_peer_id ─────────────────────────────
+
+    /// Helper: inject a peer entry into the session registry and then
+    /// stamp a synthetic RFC 017 identity on it so `resolve_peer_id`
+    /// has something to look up. This skips the real hello exchange.
+    async fn inject_peer_with_identity(
+        node: &Node<MockNetworkProvider>,
+        event_tx: &broadcast::Sender<NetworkPeerEvent>,
+        tailscale_id: &str,
+        device_id: &str,
+        device_name: &str,
+    ) {
+        let peer = make_loopback_peer(tailscale_id);
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let identity = crate::session::PeerIdentity {
+            app_id: "test".into(),
+            device_id: device_id.into(),
+            device_name: device_name.into(),
+            os: "linux".into(),
+            tailscale_id: tailscale_id.into(),
+        };
+        assert!(
+            node.session
+                .test_stamp_identity(tailscale_id, identity)
+                .await,
+            "peer {tailscale_id} should exist in session registry before stamping identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_id() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HZZZZZZZZZZZZZZZZZZZZZZZ",
+            "Alice MacBook",
+        )
+        .await;
+
+        let resolved = node
+            .resolve_peer_id("01HZZZZZZZZZZZZZZZZZZZZZZZ")
+            .await
+            .unwrap();
+        assert_eq!(resolved, "01HZZZZZZZZZZZZZZZZZZZZZZZ");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_name() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HXYZXYZXYZXYZXYZXYZXYZXY",
+            "Bob's Mac",
+        )
+        .await;
+
+        let resolved = node.resolve_peer_id("Bob's Mac").await.unwrap();
+        assert_eq!(resolved, "01HXYZXYZXYZXYZXYZXYZXYZXY");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_device_id_prefix() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-abc",
+            "01HXYZXYZXYZXYZXYZXYZXYZXY",
+            "laptop",
+        )
+        .await;
+
+        // Prefix match — 4 chars is the minimum the implementation
+        // accepts.
+        let resolved = node.resolve_peer_id("01HX").await.unwrap();
+        assert_eq!(resolved, "01HXYZXYZXYZXYZXYZXYZXYZXY");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_by_tailscale_id_legacy() {
+        // Escape hatch: resolving by the Tailscale stable ID should
+        // still work and return the device_id (or the tailscale_id as
+        // fallback when no identity is populated).
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        inject_peer_with_identity(
+            &node,
+            &event_tx,
+            "tailscale-legacy",
+            "01HLEGACY0000000000000000X",
+            "legacy box",
+        )
+        .await;
+
+        let resolved = node.resolve_peer_id("tailscale-legacy").await.unwrap();
+        assert_eq!(resolved, "01HLEGACY0000000000000000X");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_id_unknown() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
+        let result = node.resolve_peer_id("nope").await;
+        assert!(matches!(result, Err(NodeError::PeerNotFound(_))));
     }
 }

@@ -34,14 +34,14 @@ export function PeerBadge({ peer, showIp = false, className }: PeerBadgeProps) {
   return (
     <span
       className={cn('inline-flex items-center gap-2', className)}
-      aria-label={`${peer.name}: ${label}`}
+      aria-label={`${peer.deviceName}: ${label}`}
     >
       <span
         aria-hidden="true"
         className={cn('h-2 w-2 shrink-0 rounded-full', dotClass)}
       />
       <span className="truncate text-[var(--color-text-primary)]">
-        {peer.name}
+        {peer.deviceName}
       </span>
       {showIp && peer.ip ? (
         <span className="mono text-[11px] text-[var(--color-text-secondary)]">

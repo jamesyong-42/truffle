@@ -9,14 +9,16 @@ use std::path::Path;
 use tokio::sync::mpsc;
 use truffle_core::file_transfer::types::FileTransferEvent;
 
-use crate::tui::app::{
-    AppState, DisplayItem, SystemLevel, TransferDirection, TransferStatus,
-};
+use crate::tui::app::{AppState, DisplayItem, SystemLevel, TransferDirection, TransferStatus};
 use crate::tui::commands::CommandResult;
 use crate::tui::event::AppEvent;
 
 /// Execute the /cp command.
-pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSender<AppEvent>) -> CommandResult {
+pub async fn execute(
+    args: &str,
+    app: &mut AppState,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+) -> CommandResult {
     let (local_path, device_name, remote_path) = match parse_cp_args(args) {
         Some(parsed) => parsed,
         None => {
@@ -41,8 +43,17 @@ pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSe
     let peer = match resolve_online_peer(app, &device_name) {
         Some(p) => p,
         None => {
-            let available: Vec<String> = app.peers.iter().filter(|p| p.online).map(|p| p.name.clone()).collect();
-            let hint = if available.is_empty() { "No peers online.".to_string() } else { format!("Available: {}", available.join(", ")) };
+            let available: Vec<String> = app
+                .peers
+                .iter()
+                .filter(|p| p.online)
+                .map(|p| p.device_name.clone())
+                .collect();
+            let hint = if available.is_empty() {
+                "No peers online.".to_string()
+            } else {
+                format!("Available: {}", available.join(", "))
+            };
             return CommandResult::Items(vec![DisplayItem::System {
                 time: chrono::Local::now(),
                 text: format!("  Peer '{device_name}' not found. {hint}"),
@@ -73,7 +84,7 @@ pub async fn execute(args: &str, app: &mut AppState, event_tx: mpsc::UnboundedSe
 
     // Spawn the upload in a background task using the core file transfer API.
     let node = app.node.clone();
-    let peer_id = peer.id.clone();
+    let peer_id = peer.device_id.clone();
     let local = local_path.clone();
     let remote = remote_path.clone();
     let tx = event_tx.clone();
@@ -172,10 +183,16 @@ fn resolve_online_peer(app: &AppState, name: &str) -> Option<crate::tui::app::Pe
     let lower = name.to_lowercase();
     let online: Vec<_> = app.peers.iter().filter(|p| p.online).collect();
 
-    if let Some(p) = online.iter().find(|p| p.name.to_lowercase() == lower) {
+    if let Some(p) = online
+        .iter()
+        .find(|p| p.device_name.to_lowercase() == lower)
+    {
         return Some((*p).clone());
     }
-    let matches: Vec<_> = online.iter().filter(|p| p.name.to_lowercase().starts_with(&lower)).collect();
+    let matches: Vec<_> = online
+        .iter()
+        .filter(|p| p.device_name.to_lowercase().starts_with(&lower))
+        .collect();
     if matches.len() == 1 {
         return Some((*matches[0]).clone());
     }
@@ -190,15 +207,27 @@ mod tests {
     fn test_parse_cp_args() {
         assert_eq!(
             parse_cp_args("report.pdf @server"),
-            Some(("report.pdf".to_string(), "server".to_string(), String::new()))
+            Some((
+                "report.pdf".to_string(),
+                "server".to_string(),
+                String::new()
+            ))
         );
         assert_eq!(
             parse_cp_args("report.pdf @server:/tmp/"),
-            Some(("report.pdf".to_string(), "server".to_string(), "/tmp/".to_string()))
+            Some((
+                "report.pdf".to_string(),
+                "server".to_string(),
+                "/tmp/".to_string()
+            ))
         );
         assert_eq!(
             parse_cp_args("~/Documents/file.txt @my-laptop"),
-            Some(("~/Documents/file.txt".to_string(), "my-laptop".to_string(), String::new()))
+            Some((
+                "~/Documents/file.txt".to_string(),
+                "my-laptop".to_string(),
+                String::new()
+            ))
         );
         assert_eq!(parse_cp_args(""), None);
         assert_eq!(parse_cp_args("@server"), None);

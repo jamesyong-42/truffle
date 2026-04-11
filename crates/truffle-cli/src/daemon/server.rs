@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tracing::{error, info};
-use truffle_core::node::Node;
 use truffle_core::network::tailscale::TailscaleProvider;
+use truffle_core::node::Node;
 use truffle_core::session::PeerEvent;
 
 use super::handler::{DaemonContext, DispatchResult};
@@ -71,16 +71,13 @@ impl DaemonServer {
         // Build the Node — this is the ONLY thing we need.
         // No FileTransferManager, no BridgeManager, no DialFn, no axum.
         //
-        // Ensure the tsnet hostname starts with "truffle-" so that other
-        // truffle nodes recognise this peer (the peer-discovery filter in
-        // TailscaleProvider::is_truffle_peer checks for this prefix).
-        let tsnet_hostname = if config.node.name.starts_with("truffle-") {
-            config.node.name.clone()
-        } else {
-            format!("truffle-{}", config.node.name)
-        };
+        // RFC 017: the builder now takes `app_id` + `device_name` and constructs
+        // the Tailscale hostname (`truffle-{app_id}-{slug(device_name)}`)
+        // internally. No more manual `truffle-` prefixing.
         let mut builder = Node::<TailscaleProvider>::builder()
-            .name(&tsnet_hostname)
+            .app_id(&config.node.app_id)
+            .map_err(|e| format!("Invalid app_id in config: {e}"))?
+            .device_name(&config.node.device_name)
             .sidecar_path(&sidecar_path)
             .state_dir(&state_dir)
             .ws_port(9417);
@@ -89,7 +86,7 @@ impl DaemonServer {
             builder = builder.auth_key(&config.node.auth_key);
         }
 
-        let node = builder
+        let node: Node<TailscaleProvider> = builder
             .build()
             .await
             .map_err(|e| format!("Failed to build node: {e}"))?;
@@ -400,11 +397,9 @@ fn resolve_sidecar_path(config: &TruffleConfig) -> Result<PathBuf, String> {
         }
     }
 
-    Err(
-        "Could not find the Go sidecar binary. \
+    Err("Could not find the Go sidecar binary. \
          Install it with 'truffle install-sidecar' or set node.sidecar_path in config."
-            .to_string(),
-    )
+        .to_string())
 }
 
 /// Resolve the Tailscale state directory.

@@ -14,14 +14,12 @@ pub async fn run(
     json: bool,
 ) -> Result<(), (i32, String)> {
     // Parse target as node:port
-    let (node, port_str) = target
-        .rsplit_once(':')
-        .ok_or_else(|| {
-            (
-                exit_codes::USAGE,
-                format!("Invalid target format: {target}. Expected 'node:port'."),
-            )
-        })?;
+    let (node, port_str) = target.rsplit_once(':').ok_or_else(|| {
+        (
+            exit_codes::USAGE,
+            format!("Invalid target format: {target}. Expected 'node:port'."),
+        )
+    })?;
 
     let port: u16 = port_str
         .parse()
@@ -48,7 +46,7 @@ pub async fn run(
         match result {
             Ok(_) => {
                 if json {
-                    let mut map = json_output::envelope(&config.node.name);
+                    let mut map = json_output::envelope(&config.node.device_name);
                     map.insert("connected".to_string(), serde_json::json!(true));
                     map.insert("peer".to_string(), serde_json::json!(node));
                     map.insert("port".to_string(), serde_json::json!(port));
@@ -64,7 +62,7 @@ pub async fn run(
             }
             Err(e) => {
                 if json {
-                    let mut map = json_output::envelope(&config.node.name);
+                    let mut map = json_output::envelope(&config.node.device_name);
                     map.insert("connected".to_string(), serde_json::json!(false));
                     map.insert("peer".to_string(), serde_json::json!(node));
                     map.insert("port".to_string(), serde_json::json!(port));

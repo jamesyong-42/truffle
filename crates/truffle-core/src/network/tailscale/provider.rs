@@ -26,7 +26,18 @@ use crate::network::{
 pub struct TailscaleConfig {
     /// Path to the Go sidecar binary.
     pub binary_path: PathBuf,
-    /// Hostname for the tsnet node (e.g., "truffle-cli-{uuid}").
+    /// Application identifier (RFC 017 §5.1). Stored as a plain `String`
+    /// because validation happens in `NodeBuilder::app_id`; by the time the
+    /// config is constructed the value is already a valid `AppId`.
+    pub app_id: String,
+    /// Stable per-device ULID (RFC 017 §5.4).
+    pub device_id: String,
+    /// Original (unsanitised) device name — retained for display and for
+    /// building the `NodeIdentity` returned from `local_identity()`.
+    pub device_name: String,
+    /// Final Tailscale hostname, already composed by the caller as
+    /// `truffle-{app_id}-{slug(device_name)}`. The provider does NOT rebuild
+    /// this — it trusts the builder has applied the RFC 017 derivation once.
     pub hostname: String,
     /// State directory for tsnet persistent state.
     pub state_dir: String,
@@ -92,6 +103,13 @@ pub struct TailscaleProvider {
 
     /// Session token (32 bytes, generated on start).
     session_token: Arc<RwLock<[u8; 32]>>,
+
+    /// Local Tailscale stable ID, captured from the `tsnet:status` event
+    /// (netmap `self` entry). Used for self-filtering in the peer event
+    /// chain — we must filter by this, NOT by hostname, because hostname
+    /// collisions from crashed/restarted dev runs can cause the local
+    /// node to appear as its own peer under a different Tailscale ID.
+    local_tailscale_id: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl TailscaleProvider {
@@ -101,10 +119,23 @@ impl TailscaleProvider {
     pub fn new(config: TailscaleConfig) -> Self {
         let (peer_event_tx, _) = broadcast::channel(256);
 
+        // Seed the identity with the RFC 017 fields we already know from
+        // the config. `tailscale_id`, `dns_name`, and `ip` are filled in
+        // later when the sidecar reports `tsnet:status`.
+        let initial_identity = NodeIdentity {
+            app_id: config.app_id.clone(),
+            device_id: config.device_id.clone(),
+            device_name: config.device_name.clone(),
+            tailscale_hostname: config.hostname.clone(),
+            tailscale_id: String::new(),
+            dns_name: None,
+            ip: None,
+        };
+
         Self {
             config,
             state: Arc::new(RwLock::new(ProviderState::Stopped)),
-            identity: Arc::new(std::sync::RwLock::new(NodeIdentity::default())),
+            identity: Arc::new(std::sync::RwLock::new(initial_identity)),
             local_addr: Arc::new(std::sync::RwLock::new(PeerAddr::default())),
             peers: Arc::new(RwLock::new(HashMap::new())),
             peer_event_tx,
@@ -117,21 +148,21 @@ impl TailscaleProvider {
             bridge: Arc::new(Mutex::new(None)),
             bridge_shutdown_tx: Arc::new(Mutex::new(None)),
             session_token: Arc::new(RwLock::new([0u8; 32])),
+            local_tailscale_id: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
     /// Generate a random 32-byte session token.
     fn generate_session_token() -> Result<[u8; 32], NetworkError> {
         let mut token = [0u8; 32];
-        getrandom::getrandom(&mut token)
-            .map_err(|e| NetworkError::Internal(format!("failed to generate session token: {e}")))?;
+        getrandom::getrandom(&mut token).map_err(|e| {
+            NetworkError::Internal(format!("failed to generate session token: {e}"))
+        })?;
         Ok(token)
     }
 
     /// Convert a SidecarPeer to a NetworkPeer.
-    fn sidecar_peer_to_network_peer(
-        peer: &super::protocol::SidecarPeer,
-    ) -> NetworkPeer {
+    fn sidecar_peer_to_network_peer(peer: &super::protocol::SidecarPeer) -> NetworkPeer {
         let ip = peer
             .tailscale_ips
             .first()
@@ -166,6 +197,7 @@ impl TailscaleProvider {
 
     /// Spawn the background event processing loop that maps sidecar events
     /// to peer events and updates cached state.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_event_processor(
         mut sidecar_rx: broadcast::Receiver<SidecarInternalEvent>,
         peers: Arc<RwLock<HashMap<String, NetworkPeer>>>,
@@ -173,8 +205,10 @@ impl TailscaleProvider {
         health: Arc<RwLock<HealthInfo>>,
         identity: Arc<std::sync::RwLock<NodeIdentity>>,
         local_addr: Arc<std::sync::RwLock<PeerAddr>>,
+        local_tailscale_id: Arc<std::sync::RwLock<Option<String>>>,
         state: Arc<RwLock<ProviderState>>,
         started_tx: Option<oneshot::Sender<Result<(), NetworkError>>>,
+        app_id: String,
     ) {
         tokio::spawn(async move {
             let mut started_tx = started_tx;
@@ -193,13 +227,23 @@ impl TailscaleProvider {
 
                                 {
                                     let mut id = identity.write().unwrap();
-                                    id.hostname = hostname.clone();
+                                    // `tailscale_hostname` is already populated
+                                    // from the config at construction time. We
+                                    // overwrite it with whatever the sidecar
+                                    // actually registered (Tailscale may append
+                                    // `-2`, `-3`, … for hostname collisions).
+                                    id.tailscale_hostname = hostname.clone();
                                     id.dns_name = Some(dns_name.clone());
-                                    id.name = hostname.clone();
                                     id.ip = ip;
                                     if !node_id.is_empty() {
-                                        id.id = node_id;
+                                        id.tailscale_id = node_id.clone();
                                     }
+                                }
+
+                                // Capture the local Tailscale stable ID for
+                                // self-filtering in the peer event chain.
+                                if !node_id.is_empty() {
+                                    *local_tailscale_id.write().unwrap() = Some(node_id);
                                 }
 
                                 {
@@ -226,9 +270,8 @@ impl TailscaleProvider {
                                 tracing::info!("tailscale auth required: {auth_url}");
                                 // Emit auth URL via peer events so callers can display it.
                                 // Do NOT consume started_tx — keep waiting for Running state.
-                                let _ = peer_event_tx.send(NetworkPeerEvent::AuthRequired {
-                                    url: auth_url,
-                                });
+                                let _ = peer_event_tx
+                                    .send(NetworkPeerEvent::AuthRequired { url: auth_url });
                             }
                             SidecarInternalEvent::Stopped => {
                                 *state.write().await = ProviderState::Stopped;
@@ -253,10 +296,24 @@ impl TailscaleProvider {
                             }
                             SidecarInternalEvent::PeersReceived(sidecar_peers) => {
                                 let mut peer_map = peers.write().await;
-                                // Filter to truffle peers only
+                                // Self-filter by Tailscale stable ID, not by
+                                // hostname — hostname collisions from crashed/
+                                // restarted dev runs can cause the local node
+                                // to appear as its own peer under a different
+                                // Tailscale ID.
+                                let self_id = local_tailscale_id.read().unwrap().clone();
+                                // Filter to peers that belong to our app AND
+                                // are not ourselves.
                                 let new_peers: HashMap<String, NetworkPeer> = sidecar_peers
                                     .iter()
-                                    .filter(|p| is_truffle_peer(&p.hostname))
+                                    .filter(|p| {
+                                        if let Some(ref me) = self_id {
+                                            if p.id == *me {
+                                                return false;
+                                            }
+                                        }
+                                        is_app_peer(&p.hostname, &app_id)
+                                    })
                                     .map(|p| {
                                         let np = Self::sidecar_peer_to_network_peer(p);
                                         (np.id.clone(), np)
@@ -275,8 +332,8 @@ impl TailscaleProvider {
                                 }
                                 for id in peer_map.keys() {
                                     if !new_peers.contains_key(id) {
-                                        let _ = peer_event_tx
-                                            .send(NetworkPeerEvent::Left(id.clone()));
+                                        let _ =
+                                            peer_event_tx.send(NetworkPeerEvent::Left(id.clone()));
                                     }
                                 }
 
@@ -284,10 +341,18 @@ impl TailscaleProvider {
                             }
                             SidecarInternalEvent::PeerChanged(change) => {
                                 let mut peer_map = peers.write().await;
+                                // Self-filter by Tailscale stable ID, not
+                                // by hostname — see comment in PeersReceived.
+                                let self_id = local_tailscale_id.read().unwrap().clone();
                                 match change.change_type.as_str() {
                                     "joined" => {
                                         if let Some(p) = change.peer {
-                                            if is_truffle_peer(&p.hostname) {
+                                            if let Some(ref me) = self_id {
+                                                if p.id == *me {
+                                                    continue;
+                                                }
+                                            }
+                                            if is_app_peer(&p.hostname, &app_id) {
                                                 let np = Self::sidecar_peer_to_network_peer(&p);
                                                 peer_map.insert(np.id.clone(), np.clone());
                                                 let _ = peer_event_tx
@@ -303,7 +368,12 @@ impl TailscaleProvider {
                                     }
                                     "updated" => {
                                         if let Some(p) = change.peer {
-                                            if is_truffle_peer(&p.hostname) {
+                                            if let Some(ref me) = self_id {
+                                                if p.id == *me {
+                                                    continue;
+                                                }
+                                            }
+                                            if is_app_peer(&p.hostname, &app_id) {
                                                 let np = Self::sidecar_peer_to_network_peer(&p);
                                                 peer_map.insert(np.id.clone(), np.clone());
                                                 let _ = peer_event_tx
@@ -320,9 +390,9 @@ impl TailscaleProvider {
                                 tracing::error!("sidecar error [{code}]: {message}");
                                 // If start() is still waiting and this is a fatal error
                                 if let Some(tx) = started_tx.take() {
-                                    let _ = tx.send(Err(NetworkError::SidecarError(
-                                        format!("[{code}] {message}"),
-                                    )));
+                                    let _ = tx.send(Err(NetworkError::SidecarError(format!(
+                                        "[{code}] {message}"
+                                    ))));
                                 }
                             }
                             SidecarInternalEvent::ProcessExited { exit_code } => {
@@ -332,9 +402,9 @@ impl TailscaleProvider {
                                 h.state = "crashed".to_string();
                                 h.healthy = false;
                                 if let Some(tx) = started_tx.take() {
-                                    let _ = tx.send(Err(NetworkError::SidecarError(
-                                        format!("process exited with code {exit_code:?}"),
-                                    )));
+                                    let _ = tx.send(Err(NetworkError::SidecarError(format!(
+                                        "process exited with code {exit_code:?}"
+                                    ))));
                                 }
                                 return;
                             }
@@ -356,10 +426,18 @@ impl TailscaleProvider {
     }
 }
 
-/// Check if a hostname belongs to a truffle node.
-/// Truffle nodes use hostnames like "truffle-cli-{uuid}" or "truffle-{name}".
-pub(crate) fn is_truffle_peer(hostname: &str) -> bool {
-    hostname.starts_with("truffle-")
+/// Check if a hostname belongs to a truffle node in the given app.
+///
+/// RFC 017 §4: every truffle-managed Tailscale hostname has the shape
+/// `truffle-{app_id}-{slug(device_name)}`. The prefix `truffle-{app_id}-`
+/// is used to admit peers from our own application and reject peers from
+/// other apps on the same tailnet. A hostname that matches the prefix but
+/// has no trailing slug is rejected — we require at least one character
+/// after the separator so that `truffle-playground-` (empty slug edge)
+/// cannot masquerade as a real peer.
+pub(crate) fn is_app_peer(hostname: &str, app_id: &str) -> bool {
+    let prefix = format!("truffle-{app_id}-");
+    hostname.len() > prefix.len() && hostname.starts_with(&prefix)
 }
 
 impl super::super::NetworkProvider for TailscaleProvider {
@@ -422,8 +500,10 @@ impl super::super::NetworkProvider for TailscaleProvider {
             self.health.clone(),
             self.identity.clone(),
             self.local_addr.clone(),
+            self.local_tailscale_id.clone(),
             self.state.clone(),
             Some(started_tx),
+            self.config.app_id.clone(),
         );
 
         // Send start command to sidecar
@@ -437,10 +517,13 @@ impl super::super::NetworkProvider for TailscaleProvider {
         let auth_timeout = Duration::from_secs(300);
         let result = tokio::time::timeout(auth_timeout, started_rx)
             .await
-            .map_err(|_| NetworkError::StartFailed(
-                "timed out waiting for authentication (5 min). \
-                 Subscribe to peer_events() to display auth URLs.".into()
-            ))?
+            .map_err(|_| {
+                NetworkError::StartFailed(
+                    "timed out waiting for authentication (5 min). \
+                 Subscribe to peer_events() to display auth URLs."
+                        .into(),
+                )
+            })?
             .map_err(|_| NetworkError::StartFailed("start signal channel dropped".into()))?;
 
         match result {
@@ -523,9 +606,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Scope the sidecar lock: subscribe + send, then release
         let mut event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
-            let sidecar = sidecar_guard
-                .as_ref()
-                .ok_or(NetworkError::NotRunning)?;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
             let event_rx = sidecar.subscribe();
 
@@ -553,9 +634,10 @@ impl super::super::NetworkProvider for TailscaleProvider {
             let fail_watcher: JoinHandle<()> = tokio::spawn(async move {
                 loop {
                     match event_rx.recv().await {
-                        Ok(SidecarInternalEvent::DialFailed { request_id: rid, error })
-                            if rid == fail_request_id =>
-                        {
+                        Ok(SidecarInternalEvent::DialFailed {
+                            request_id: rid,
+                            error,
+                        }) if rid == fail_request_id => {
                             let _ = fail_tx.send(error);
                             return;
                         }
@@ -594,10 +676,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         result
     }
 
-    async fn listen_tcp(
-        &self,
-        port: u16,
-    ) -> Result<NetworkTcpListener, NetworkError> {
+    async fn listen_tcp(&self, port: u16) -> Result<NetworkTcpListener, NetworkError> {
         if *self.state.read().await != ProviderState::Running {
             return Err(NetworkError::NotRunning);
         }
@@ -615,9 +694,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Scope the sidecar lock: subscribe + send listen, then release
         let mut event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
-            let sidecar = sidecar_guard
-                .as_ref()
-                .ok_or(NetworkError::NotRunning)?;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
             let event_rx = sidecar.subscribe();
             sidecar.send_listen(port, None).await?;
@@ -630,9 +707,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         let actual_port = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match event_rx.recv().await {
-                    Ok(SidecarInternalEvent::Listening { port: p })
-                        if port == 0 || p == port =>
-                    {
+                    Ok(SidecarInternalEvent::Listening { port: p }) if port == 0 || p == port => {
                         return Ok(p);
                     }
                     Ok(SidecarInternalEvent::Error { code, message }) => {
@@ -651,7 +726,10 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Register the channel with the bridge using the actual port
         bridge.register_listener(actual_port, tx).await;
 
-        Ok(NetworkTcpListener { port: actual_port, incoming: rx })
+        Ok(NetworkTcpListener {
+            port: actual_port,
+            incoming: rx,
+        })
     }
 
     async fn unlisten_tcp(&self, port: u16) -> Result<(), NetworkError> {
@@ -672,9 +750,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Tell sidecar to stop listening
         {
             let sidecar_guard = self.sidecar.lock().await;
-            let sidecar = sidecar_guard
-                .as_ref()
-                .ok_or(NetworkError::NotRunning)?;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
             sidecar.send_unlisten(port).await?;
         }
 
@@ -691,9 +767,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Scope the sidecar lock: subscribe + send ping, then release
         let mut event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
-            let sidecar = sidecar_guard
-                .as_ref()
-                .ok_or(NetworkError::NotRunning)?;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
             let event_rx = sidecar.subscribe();
             sidecar.send_ping(target.clone(), None).await?;
@@ -746,9 +820,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Scope the sidecar lock: subscribe + send listenPacket, then release
         let mut event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
-            let sidecar = sidecar_guard
-                .as_ref()
-                .ok_or(NetworkError::NotRunning)?;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
             let event_rx = sidecar.subscribe();
             sidecar.send_listen_packet(port).await?;
@@ -771,9 +843,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
                         )));
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(NetworkError::SidecarError(
-                            "event channel closed".into(),
-                        ));
+                        return Err(NetworkError::SidecarError("event channel closed".into()));
                     }
                     _ => continue,
                 }
@@ -787,22 +857,18 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // Bind a local UDP socket and connect it to the relay
         let local_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
             .await
-            .map_err(|e| {
-                NetworkError::Internal(format!("failed to bind local UDP socket: {e}"))
-            })?;
+            .map_err(|e| NetworkError::Internal(format!("failed to bind local UDP socket: {e}")))?;
 
         local_socket
             .connect(format!("127.0.0.1:{local_port}"))
             .await
             .map_err(|e| {
-                NetworkError::Internal(format!(
-                    "failed to connect local UDP socket to relay: {e}"
-                ))
+                NetworkError::Internal(format!("failed to connect local UDP socket to relay: {e}"))
             })?;
 
-        let rust_local_addr = local_socket.local_addr().map_err(|e| {
-            NetworkError::Internal(format!("failed to get local UDP addr: {e}"))
-        })?;
+        let rust_local_addr = local_socket
+            .local_addr()
+            .map_err(|e| NetworkError::Internal(format!("failed to get local UDP addr: {e}")))?;
 
         // Send a registration packet so the relay learns our address.
         // Without this, the relay drops inbound packets because it doesn't
@@ -811,9 +877,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         local_socket
             .send(b"TRUFFLE_UDP_REGISTER")
             .await
-            .map_err(|e| {
-                NetworkError::Internal(format!("failed to send UDP registration: {e}"))
-            })?;
+            .map_err(|e| NetworkError::Internal(format!("failed to send UDP registration: {e}")))?;
 
         tracing::info!(
             tsnet_port = port,

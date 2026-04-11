@@ -82,7 +82,11 @@ pub trait NetworkProvider: Send + Sync {
     ///
     /// Returns a plain `TcpStream` — all bridge internals (pending_dials,
     /// session token, binary headers) are hidden inside the provider.
-    fn dial_tcp(&self, addr: &str, port: u16) -> impl std::future::Future<Output = Result<TcpStream, NetworkError>> + Send;
+    fn dial_tcp(
+        &self,
+        addr: &str,
+        port: u16,
+    ) -> impl std::future::Future<Output = Result<TcpStream, NetworkError>> + Send;
 
     /// Listen for incoming TCP connections on a port via the Tailscale tunnel.
     ///
@@ -93,7 +97,10 @@ pub trait NetworkProvider: Send + Sync {
     ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send;
 
     /// Stop listening on a previously opened port.
-    fn unlisten_tcp(&self, port: u16) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
+    fn unlisten_tcp(
+        &self,
+        port: u16,
+    ) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Bind a UDP socket on a port via the network tunnel.
     ///
@@ -103,12 +110,18 @@ pub trait NetworkProvider: Send + Sync {
     ///
     /// Not all providers support UDP. Returns [`NetworkError::Internal`] if
     /// the provider has not implemented UDP transport yet.
-    fn bind_udp(&self, port: u16) -> impl std::future::Future<Output = Result<NetworkUdpSocket, NetworkError>> + Send;
+    fn bind_udp(
+        &self,
+        port: u16,
+    ) -> impl std::future::Future<Output = Result<NetworkUdpSocket, NetworkError>> + Send;
 
     // ── Diagnostics ──
 
     /// Ping a peer via the network layer (Tailscale TSMP).
-    fn ping(&self, addr: &str) -> impl std::future::Future<Output = Result<PingResult, NetworkError>> + Send;
+    fn ping(
+        &self,
+        addr: &str,
+    ) -> impl std::future::Future<Output = Result<PingResult, NetworkError>> + Send;
 
     /// Node health info (key expiry, connection quality, warnings).
     fn health(&self) -> impl std::future::Future<Output = HealthInfo> + Send;
@@ -176,14 +189,23 @@ pub struct PeerAddr {
 }
 
 /// Identity of the local node on the network.
+///
+/// Carries the RFC 017 identity triple: `app_id` (namespace), `device_id`
+/// (stable per-device ULID), and `device_name` (human-readable). The
+/// Tailscale hostname and stable ID are kept alongside as escape hatches
+/// and for internal filtering.
 #[derive(Debug, Clone, Default)]
 pub struct NodeIdentity {
-    /// Stable node ID from the network provider.
-    pub id: String,
-    /// Hostname on the network.
-    pub hostname: String,
-    /// Human-readable display name.
-    pub name: String,
+    /// Application namespace identifier (RFC 017 §5.1).
+    pub app_id: String,
+    /// Stable per-device ULID (RFC 017 §5.4).
+    pub device_id: String,
+    /// Human-readable device name, original (unsanitised) string.
+    pub device_name: String,
+    /// Tailscale hostname — `truffle-{app_id}-{slug(device_name)}`.
+    pub tailscale_hostname: String,
+    /// Tailscale stable node ID (populated after the sidecar reaches Running).
+    pub tailscale_id: String,
     /// DNS name on the tailnet.
     pub dns_name: Option<String>,
     /// Tailscale IP address.
@@ -295,11 +317,7 @@ impl NetworkUdpSocket {
             "NetworkUdpSocket: sending framed datagram to relay"
         );
 
-        let n = self
-            .inner
-            .send(&framed)
-            .await
-            .map_err(NetworkError::Io)?;
+        let n = self.inner.send(&framed).await.map_err(NetworkError::Io)?;
 
         tracing::debug!(
             bytes_sent = n,
@@ -318,11 +336,7 @@ impl NetworkUdpSocket {
 
         // Read into a temporary buffer that includes space for the header
         let mut tmp = vec![0u8; UDP_ADDR_HEADER_SIZE + buf.len()];
-        let n = self
-            .inner
-            .recv(&mut tmp)
-            .await
-            .map_err(NetworkError::Io)?;
+        let n = self.inner.recv(&mut tmp).await.map_err(NetworkError::Io)?;
 
         if n < UDP_ADDR_HEADER_SIZE {
             return Err(NetworkError::Internal(

@@ -130,7 +130,10 @@ pub async fn run(
                     "truffle ls    see who's on the mesh",
                 );
             }
-            Err((crate::exit_codes::TIMEOUT, format!("Timed out waiting for {node}")))
+            Err((
+                crate::exit_codes::TIMEOUT,
+                format!("Timed out waiting for {node}"),
+            ))
         }
         Err(e) => Err((crate::exit_codes::ERROR, e.to_string())),
     }

@@ -32,9 +32,9 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(welcome_box::WELCOME_BOX_HEIGHT), // welcome box
-            Constraint::Min(3),                                   // activity feed
-            Constraint::Length(input_bar::INPUT_BAR_HEIGHT),      // input (sep + prompt + sep)
-            Constraint::Length(1),                                 // status line
+            Constraint::Min(3),                                  // activity feed
+            Constraint::Length(input_bar::INPUT_BAR_HEIGHT),     // input (sep + prompt + sep)
+            Constraint::Length(1),                               // status line
         ])
         .split(full);
 

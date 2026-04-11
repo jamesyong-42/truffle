@@ -151,8 +151,8 @@ pub async fn download_asset_with_progress(
     let total_size = response.content_length().unwrap_or(asset.size);
     let mut stream = response.bytes_stream();
 
-    let mut file = std::fs::File::create(dest_path)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let mut file =
+        std::fs::File::create(dest_path).map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     let mut downloaded: u64 = 0;
     let start = std::time::Instant::now();
@@ -198,8 +198,7 @@ pub async fn download_asset_silent(
         .await
         .map_err(|e| format!("Failed to read response body: {e}"))?;
 
-    std::fs::write(dest_path, &bytes)
-        .map_err(|e| format!("Failed to write archive: {e}"))?;
+    std::fs::write(dest_path, &bytes).map_err(|e| format!("Failed to write archive: {e}"))?;
 
     Ok(())
 }
@@ -258,7 +257,8 @@ pub fn extract_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
 // ==========================================================================
 
 pub fn find_install_dir() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot find current executable: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("Cannot find current executable: {e}"))?;
     exe.parent()
         .map(|p| p.to_path_buf())
         .ok_or_else(|| "Cannot determine install directory".to_string())
@@ -369,20 +369,12 @@ pub async fn run(json: bool) -> Result<(), (i32, String)> {
         if json {
             let mut map = json_output::envelope("");
             map.insert("updated".to_string(), serde_json::json!(false));
-            map.insert(
-                "from".to_string(),
-                serde_json::json!(current_version),
-            );
-            map.insert(
-                "to".to_string(),
-                serde_json::json!(current_version),
-            );
+            map.insert("from".to_string(), serde_json::json!(current_version));
+            map.insert("to".to_string(), serde_json::json!(current_version));
             json_output::print_json(&serde_json::Value::Object(map));
         } else {
             println!();
-            output::print_success(&format!(
-                "Already up to date (v{current_version})"
-            ));
+            output::print_success(&format!("Already up to date (v{current_version})"));
             println!();
         }
         return Ok(());
@@ -427,8 +419,12 @@ pub async fn run(json: bool) -> Result<(), (i32, String)> {
     }
 
     // 4. Download the asset with progress
-    let tmp_dir = tempfile::tempdir()
-        .map_err(|e| (exit_codes::ERROR, format!("Failed to create temp directory: {e}")))?;
+    let tmp_dir = tempfile::tempdir().map_err(|e| {
+        (
+            exit_codes::ERROR,
+            format!("Failed to create temp directory: {e}"),
+        )
+    })?;
     let archive_path = tmp_dir.path().join(asset_name);
 
     if json {
@@ -446,8 +442,12 @@ pub async fn run(json: bool) -> Result<(), (i32, String)> {
         println!("  Extracting...");
     }
     let extract_dir = tmp_dir.path().join("extracted");
-    std::fs::create_dir_all(&extract_dir)
-        .map_err(|e| (exit_codes::ERROR, format!("Failed to create extraction dir: {e}")))?;
+    std::fs::create_dir_all(&extract_dir).map_err(|e| {
+        (
+            exit_codes::ERROR,
+            format!("Failed to create extraction dir: {e}"),
+        )
+    })?;
 
     extract_archive(&archive_path, &extract_dir).map_err(|e| (exit_codes::ERROR, e))?;
 
@@ -500,10 +500,7 @@ pub async fn run(json: bool) -> Result<(), (i32, String)> {
     if json {
         let mut map = json_output::envelope("");
         map.insert("updated".to_string(), serde_json::json!(true));
-        map.insert(
-            "from".to_string(),
-            serde_json::json!(current_version),
-        );
+        map.insert("from".to_string(), serde_json::json!(current_version));
         map.insert("to".to_string(), serde_json::json!(latest_version));
         json_output::print_json(&serde_json::Value::Object(map));
     } else {

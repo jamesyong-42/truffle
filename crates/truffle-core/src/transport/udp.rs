@@ -110,9 +110,7 @@ impl<N: NetworkProvider + 'static> DatagramTransport for UdpTransport<N> {
             .await
             .map_err(|e| TransportError::ListenFailed(format!("udp bind {bind_addr}: {e}")))?;
 
-        let local_addr = socket
-            .local_addr()
-            .map_err(TransportError::Io)?;
+        let local_addr = socket.local_addr().map_err(TransportError::Io)?;
         tracing::debug!(local_addr = %local_addr, "udp: socket bound directly");
 
         Ok(DatagramSocket::direct(socket))

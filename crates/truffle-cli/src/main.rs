@@ -56,9 +56,12 @@ pub struct Cli {
 enum Commands {
     /// Start your node and join the mesh
     Up {
-        /// Custom node name
-        #[arg(long)]
-        name: Option<String>,
+        /// Human-readable device name (Unicode OK; defaults to the OS hostname)
+        #[arg(long = "device-name")]
+        device_name: Option<String>,
+        /// Application identifier for the CLI namespace (defaults to `cli`)
+        #[arg(long = "app-id")]
+        app_id: Option<String>,
         /// Run in foreground (for debugging)
         #[arg(long)]
         foreground: bool,
@@ -196,8 +199,9 @@ async fn main() {
     let global_json = cli.json;
 
     // Determine if we're launching the TUI (bare command on a TTY)
-    let is_tui_mode =
-        cli.command.is_none() && !global_json && std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let is_tui_mode = cli.command.is_none()
+        && !global_json
+        && std::io::IsTerminal::is_terminal(&std::io::stdin());
 
     // Initialize tracing — suppress in TUI mode to prevent log corruption,
     // write to a log file instead.
@@ -215,8 +219,7 @@ async fn main() {
         {
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info")),
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
                 )
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
@@ -293,14 +296,26 @@ async fn main() {
 
     let result = match command {
         // -- Node lifecycle --
-        Commands::Up { name, foreground } => {
-            // CLI fallback: if no config exists and no explicit name, use smart name
+        Commands::Up {
+            device_name,
+            app_id,
+            foreground,
+        } => {
+            // CLI fallback: if no config exists and no explicit device name,
+            // populate the smart default and persist.
             let mut config = config.clone();
-            if !crate::config::TruffleConfig::config_exists() && name.is_none() {
-                config.node.name = crate::config::smart_node_name();
+            if !crate::config::TruffleConfig::config_exists() && device_name.is_none() {
+                config.node.device_name = crate::config::smart_node_name();
                 let _ = config.save(None);
             }
-            commands::up::run(&config, name.as_deref(), foreground, global_json).await
+            commands::up::run(
+                &config,
+                device_name.as_deref(),
+                app_id.as_deref(),
+                foreground,
+                global_json,
+            )
+            .await
         }
 
         Commands::Down { force } => commands::down::run(&config, force, global_json).await,
@@ -390,12 +405,7 @@ async fn main() {
 fn handle_error(json: bool, code: i32, msg: &str) {
     if json {
         if !msg.is_empty() {
-            json_output::print_json(&json_output::error_envelope(
-                code,
-                "command_error",
-                msg,
-                "",
-            ));
+            json_output::print_json(&json_output::error_envelope(code, "command_error", msg, ""));
         }
     } else if !msg.is_empty() && !msg.contains('\u{2717}') {
         output::print_error(msg, "", "");

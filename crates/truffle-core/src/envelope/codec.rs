@@ -105,7 +105,9 @@ mod tests {
             "trace_id": "abc-123"
         }"#;
 
-        let decoded = codec.decode(json_bytes).expect("should decode with unknown fields");
+        let decoded = codec
+            .decode(json_bytes)
+            .expect("should decode with unknown fields");
         assert_eq!(decoded.namespace, "v2");
         assert_eq!(decoded.msg_type, "new_feature");
     }

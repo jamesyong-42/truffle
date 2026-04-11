@@ -14,7 +14,7 @@ pub async fn run(config: &TruffleConfig, force: bool, json: bool) -> Result<(), 
 
     if !client.is_daemon_running() {
         if json {
-            let mut map = json_output::envelope(&config.node.name);
+            let mut map = json_output::envelope(&config.node.device_name);
             map.insert("status".to_string(), serde_json::json!("not_running"));
             json_output::print_json(&serde_json::Value::Object(map));
         } else {
@@ -23,10 +23,13 @@ pub async fn run(config: &TruffleConfig, force: bool, json: bool) -> Result<(), 
         return Ok(());
     }
 
-    match client.request(method::SHUTDOWN, serde_json::json!({})).await {
+    match client
+        .request(method::SHUTDOWN, serde_json::json!({}))
+        .await
+    {
         Ok(_) => {
             if json {
-                let mut map = json_output::envelope(&config.node.name);
+                let mut map = json_output::envelope(&config.node.device_name);
                 map.insert("status".to_string(), serde_json::json!("stopped"));
                 json_output::print_json(&serde_json::Value::Object(map));
             } else {
@@ -38,17 +41,14 @@ pub async fn run(config: &TruffleConfig, force: bool, json: bool) -> Result<(), 
             let err_str = e.to_string();
             if err_str.contains("closed connection") || err_str.contains("I/O error") {
                 if json {
-                    let mut map = json_output::envelope(&config.node.name);
+                    let mut map = json_output::envelope(&config.node.device_name);
                     map.insert("status".to_string(), serde_json::json!("stopped"));
                     json_output::print_json(&serde_json::Value::Object(map));
                 } else {
                     output::print_success("Daemon stopped.");
                 }
             } else {
-                return Err((
-                    exit_codes::ERROR,
-                    format!("Failed to stop daemon: {e}"),
-                ));
+                return Err((exit_codes::ERROR, format!("Failed to stop daemon: {e}")));
             }
         }
     }

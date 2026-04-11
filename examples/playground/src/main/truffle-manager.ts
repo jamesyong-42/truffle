@@ -8,11 +8,13 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { basename } from 'node:path';
-import { shell } from 'electron';
+import { mkdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { app, shell } from 'electron';
 import {
   createMeshNode,
   type NapiNode,
+  type NapiNodeIdentity,
   type NapiSyncedStore,
   type NapiFileTransfer,
   type NapiPeer,
@@ -142,13 +144,30 @@ export class TruffleManager extends EventEmitter {
     try {
       const sidecarPath = resolveSidecarPath();
 
+      // RFC 017 §6.3 — pin the Tailscale state directory to Electron's
+      // user-data dir so node identity persists across restarts. The core
+      // library would otherwise default to `dirs::data_dir()/truffle/...`,
+      // which is semantically equivalent but lives alongside other apps;
+      // keeping truffle state under the playground's own userData makes
+      // "reset everything" a single-directory operation for the user.
+      const deviceName = config.deviceName ?? 'default';
+      const stateDir =
+        config.stateDir ??
+        join(app.getPath('userData'), 'truffle-state', config.appId, deviceName);
+      // Make sure the directory exists before the Rust side tries to read
+      // `device-id.txt` / write `tailscaled.state` into it.
+      mkdirSync(stateDir, { recursive: true });
+
       // Install the auth handler BEFORE `createMeshNode` calls start() — the
       // 0.3.x `createMeshNode` passes our `onAuthRequired` to its post-start
       // `onPeerChange` subscription, so the callback fires as soon as the
       // tailnet reports `auth_required`.
       const node = await createMeshNode({
-        name: config.name,
-        ...(config.stateDir !== undefined ? { stateDir: config.stateDir } : {}),
+        appId: config.appId,
+        deviceName,
+        ...(config.deviceId !== undefined ? { deviceId: config.deviceId } : {}),
+        stateDir,
+        sidecarPath,
         ...(config.ephemeral !== undefined ? { ephemeral: config.ephemeral } : {}),
         ...(config.wsPort !== undefined ? { wsPort: config.wsPort } : {}),
         autoAuth: false,
@@ -170,9 +189,10 @@ export class TruffleManager extends EventEmitter {
       this.identity = toNodeIdentity(localInfo);
 
       // Seed peer cache so `fromName` resolution works immediately.
+      // Key by RFC 017 `deviceId` (ULID), not the Tailscale stable ID.
       const initialPeers = await node.getPeers();
       for (const peer of initialPeers) {
-        this.peerCache.set(peer.id, peer);
+        this.peerCache.set(peer.deviceId, peer);
       }
 
       // Subscribe to chat messages.
@@ -249,9 +269,11 @@ export class TruffleManager extends EventEmitter {
     const node = this.requireNode();
     const peers = await node.getPeers();
     // Refresh the cache so the latest info is available for fromName lookups.
+    // Cache key is `deviceId` (RFC 017 ULID) — the same key used by
+    // `NapiNamespacedMessage.from` and incoming peer events.
     this.peerCache.clear();
     for (const peer of peers) {
-      this.peerCache.set(peer.id, peer);
+      this.peerCache.set(peer.deviceId, peer);
     }
     return peers.map(toPeer);
   }
@@ -322,7 +344,7 @@ export class TruffleManager extends EventEmitter {
 
   async storeGet(): Promise<StoreSlice | null> {
     const store = this.requireStore();
-    const localId = this.requireIdentity().id;
+    const localId = this.requireIdentity().deviceId;
     const slice = await store.get(localId);
     if (!slice) return null;
     return toStoreSlice(slice, true);
@@ -330,7 +352,7 @@ export class TruffleManager extends EventEmitter {
 
   async storeAll(): Promise<StoreSlice[]> {
     const store = this.requireStore();
-    const localId = this.identity?.id;
+    const localId = this.identity?.deviceId;
     const slices = await store.all();
     return slices.map((slice) => toStoreSlice(slice, slice.deviceId === localId));
   }
@@ -388,7 +410,10 @@ export class TruffleManager extends EventEmitter {
     if (!payload || typeof payload.text !== 'string') {
       return;
     }
-    const fromName = this.peerCache.get(msg.from)?.name ?? msg.from;
+    // `msg.from` is the sender's `deviceId` (ULID). Resolve it to the
+    // human-readable `deviceName` via the peer cache; fall back to the
+    // raw ULID if we don't know the peer yet (first-ever hello race).
+    const fromName = this.peerCache.get(msg.from)?.deviceName ?? msg.from;
     const chat: ChatMessage = {
       from: msg.from,
       fromName,
@@ -576,17 +601,13 @@ export class TruffleManager extends EventEmitter {
 
 // ─── NAPI → IPC shape converters ────────────────────────────────────────
 
-function toNodeIdentity(info: {
-  id: string;
-  hostname: string;
-  name: string;
-  dnsName?: string;
-  ip?: string;
-}): NodeIdentity {
+function toNodeIdentity(info: NapiNodeIdentity): NodeIdentity {
   const out: NodeIdentity = {
-    id: info.id,
-    hostname: info.hostname,
-    name: info.name,
+    appId: info.appId,
+    deviceId: info.deviceId,
+    deviceName: info.deviceName,
+    tailscaleHostname: info.tailscaleHostname,
+    tailscaleId: info.tailscaleId,
   };
   if (info.dnsName !== undefined) out.dnsName = info.dnsName;
   if (info.ip !== undefined) out.ip = info.ip;
@@ -595,8 +616,9 @@ function toNodeIdentity(info: {
 
 function toPeer(peer: NapiPeer): Peer {
   const out: Peer = {
-    id: peer.id,
-    name: peer.name,
+    deviceId: peer.deviceId,
+    deviceName: peer.deviceName,
+    tailscaleId: peer.tailscaleId,
     ip: peer.ip,
     online: peer.online,
     wsConnected: peer.wsConnected,

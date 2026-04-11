@@ -13,6 +13,7 @@
 //! - Connections are lazy — established on first `send()`
 //! - Layer 5 does NOT implement any transport protocol — it delegates to Layer 4
 
+pub mod hello;
 pub mod reconnect;
 
 #[cfg(test)]
@@ -25,6 +26,9 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc, RwLock};
 
+pub use self::hello::{
+    HelloEnvelope, HelloKind, PeerIdentity, CLOSE_APP_MISMATCH, CLOSE_HELLO_PROTOCOL, HELLO_TIMEOUT,
+};
 use self::reconnect::ReconnectBackoff;
 
 use crate::network::{NetworkPeer, NetworkPeerEvent, NetworkProvider, PeerAddr};
@@ -43,9 +47,11 @@ use crate::transport::{FramedStream, StreamTransport};
 /// are established.
 #[derive(Debug, Clone)]
 pub struct PeerState {
-    /// Stable node ID from the network provider.
+    /// Tailscale stable node ID from the network provider. Used as the
+    /// primary key for routing inside the session layer.
     pub id: String,
-    /// Human-readable name (hostname from Layer 3).
+    /// Tailscale hostname (as seen by Layer 3). This is the slugged form,
+    /// NOT the user-facing `device_name`.
     pub name: String,
     /// Network IP address.
     pub ip: IpAddr,
@@ -55,10 +61,16 @@ pub struct PeerState {
     pub ws_connected: bool,
     /// Connection type description (e.g., "direct" or "relay:ord").
     pub connection_type: String,
-    /// Operating system of the peer, if known.
+    /// Operating system of the peer, if known (from Layer 3).
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
+    /// Peer identity advertised in the remote's hello envelope (RFC 017 §8).
+    ///
+    /// `None` until the WebSocket hello handshake has completed; `Some`
+    /// once we have received the remote's identity block. This is the
+    /// source of truth for `device_id` and the display `device_name`.
+    pub identity: Option<PeerIdentity>,
 }
 
 /// Events emitted by the session layer when peer state changes.
@@ -88,7 +100,9 @@ pub enum PeerEvent {
 /// raw bytes along with the sender's identity and a timestamp.
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
-    /// Stable node ID of the sender.
+    /// Sender's stable `device_id` (ULID) from the hello envelope.
+    /// RFC 017: application code always sees peer identity as `device_id`,
+    /// never as the Tailscale stable ID.
     pub from: String,
     /// Raw bytes received (Layer 6 will interpret this).
     pub data: Vec<u8>,
@@ -311,11 +325,15 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                     Ok(NetworkPeerEvent::Updated(network_peer)) => {
                         let mut state = network_peer_to_state(&network_peer);
 
-                        // Preserve the `ws_connected` flag from existing state
+                        // Preserve Layer 5 state (ws_connected, identity)
+                        // from the existing entry — Layer 3 Updated events
+                        // only carry discovery metadata, not connection or
+                        // hello state.
                         {
                             let mut map = peers.write().await;
                             if let Some(existing) = map.get(&network_peer.id) {
                                 state.ws_connected = existing.ws_connected;
+                                state.identity = existing.identity.clone();
                             }
                             map.insert(network_peer.id.clone(), state.clone());
                         }
@@ -366,8 +384,10 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                 match listener.accept().await {
                     Some(stream) => {
                         let peer_id = stream.remote_peer_id().to_string();
+                        let remote_identity = stream.remote_identity().cloned();
                         tracing::info!(
                             peer_id = %peer_id,
+                            device_id = remote_identity.as_ref().map(|i| i.device_id.as_str()),
                             "session: accepted incoming WS connection"
                         );
 
@@ -386,11 +406,14 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                             conns.insert(peer_id.clone(), handle);
                         }
 
-                        // Mark peer as connected
+                        // Mark peer as connected and stamp identity from hello
                         {
                             let mut map = peers.write().await;
                             if let Some(state) = map.get_mut(&peer_id) {
                                 state.ws_connected = true;
+                                if remote_identity.is_some() {
+                                    state.identity = remote_identity.clone();
+                                }
                             }
                         }
 
@@ -436,17 +459,25 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// - [`SessionError::ConnectFailed`] if the WS connection cannot be established
     /// - [`SessionError::SendFailed`] if the send operation fails
     pub async fn send(&self, peer_id: &str, data: &[u8]) -> Result<(), SessionError> {
-        // 0. Resolve peer_id: accept either the Tailscale node ID or the
-        //    peer name (hostname).  This mirrors Node::ping() which also
-        //    searches by both id and name.
+        // 0. Resolve peer_id to the session's internal routing key
+        //    (the Tailscale stable node ID). Accepts any of:
+        //    - Tailscale stable ID (direct match on `state.id`)
+        //    - Device ID (ULID) from the hello envelope
+        //    - Device name from the hello envelope
+        //    - Layer 3 hostname (the sanitised slug)
         let peer_id = {
             let map = self.peers.read().await;
             if map.contains_key(peer_id) {
                 peer_id.to_string()
             } else {
-                // Fall back to searching by name
                 map.values()
-                    .find(|p| p.name == peer_id)
+                    .find(|p| {
+                        p.name == peer_id
+                            || p.identity
+                                .as_ref()
+                                .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                                .unwrap_or(false)
+                    })
                     .map(|p| p.id.clone())
                     .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))?
             }
@@ -539,6 +570,10 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         };
 
+        // Capture the remote identity from the hello BEFORE moving the
+        // stream into the connection task.
+        let remote_identity = ws_stream.remote_identity().cloned();
+
         // 6. Create connection handle and spawn connection task
         let handle = spawn_connection_task(
             ws_stream,
@@ -561,11 +596,14 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             conns.insert(peer_id.to_string(), handle);
         }
 
-        // Mark peer as connected
+        // Mark peer as connected and stamp identity from hello
         {
             let mut map = self.peers.write().await;
             if let Some(state) = map.get_mut(peer_id) {
                 state.ws_connected = true;
+                if remote_identity.is_some() {
+                    state.identity = remote_identity;
+                }
             }
         }
 
@@ -601,6 +639,21 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// does not interpret the payload.
     pub fn subscribe(&self) -> broadcast::Receiver<IncomingMessage> {
         self.incoming_tx.subscribe()
+    }
+
+    /// Test-only: stamp a synthetic [`PeerIdentity`] onto an existing
+    /// peer in the registry, simulating the effect of a completed hello
+    /// exchange without running a real WebSocket handshake. Returns
+    /// `true` if the peer was found and updated.
+    #[doc(hidden)]
+    pub async fn test_stamp_identity(&self, peer_id: &str, identity: PeerIdentity) -> bool {
+        let mut map = self.peers.write().await;
+        if let Some(state) = map.get_mut(peer_id) {
+            state.identity = Some(identity);
+            true
+        } else {
+            false
+        }
     }
 
     /// Disconnect a specific peer's WebSocket connection.
@@ -667,6 +720,17 @@ fn spawn_connection_task(
         connected_at: Instant::now(),
     };
 
+    // Resolve the sender identifier the session will stamp on every
+    // inbound message: RFC 017 says this is the remote's `device_id`
+    // from the hello envelope (not the Tailscale stable ID). Fall back
+    // to the routing key if we somehow received a stream without a
+    // hello — in production that should never happen because the hello
+    // exchange runs before this function is called.
+    let from_device_id = stream
+        .remote_identity()
+        .map(|i| i.device_id.clone())
+        .unwrap_or_else(|| peer_id.clone());
+
     tokio::spawn(async move {
         let mut stream = stream;
         let mut closed = false;
@@ -690,7 +754,7 @@ fn spawn_connection_task(
                     match result {
                         Ok(Some(data)) => {
                             let msg = IncomingMessage {
-                                from: peer_id.clone(),
+                                from: from_device_id.clone(),
                                 data,
                                 received_at: Instant::now(),
                             };
@@ -774,5 +838,6 @@ fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
         connection_type,
         os: peer.os.clone(),
         last_seen: peer.last_seen.clone(),
+        identity: None,
     }
 }

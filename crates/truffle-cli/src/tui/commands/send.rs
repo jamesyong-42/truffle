@@ -29,7 +29,7 @@ pub async fn execute(args: &str, app: &mut AppState) -> CommandResult {
                 .peers
                 .iter()
                 .filter(|p| p.online)
-                .map(|p| p.name.clone())
+                .map(|p| p.device_name.clone())
                 .collect();
             let hint = if available.is_empty() {
                 "No peers online.".to_string()
@@ -47,12 +47,12 @@ pub async fn execute(args: &str, app: &mut AppState) -> CommandResult {
     // Optimistic display: show outgoing message immediately
     app.push_item(DisplayItem::ChatOutgoing {
         time: chrono::Local::now(),
-        to: peer.name.clone(),
+        to: peer.device_name.clone(),
         text: message.clone(),
     });
 
     // Send via Node API
-    match messaging::send_message(&*app.node, &peer.id, &message).await {
+    match messaging::send_message(&*app.node, &peer.device_id, &message).await {
         Ok(()) => CommandResult::Handled,
         Err(e) => {
             app.push_item(DisplayItem::System {
@@ -94,17 +94,14 @@ fn parse_send_args(args: &str) -> Option<(String, String)> {
 }
 
 /// Resolve a device name to an online PeerInfo (case-insensitive, prefix match).
-fn resolve_peer(
-    app: &AppState,
-    name: &str,
-) -> Option<crate::tui::app::PeerInfo> {
+fn resolve_peer(app: &AppState, name: &str) -> Option<crate::tui::app::PeerInfo> {
     let lower = name.to_lowercase();
     let online_peers: Vec<_> = app.peers.iter().filter(|p| p.online).collect();
 
     // Exact match (case-insensitive)
     if let Some(peer) = online_peers
         .iter()
-        .find(|p| p.name.to_lowercase() == lower)
+        .find(|p| p.device_name.to_lowercase() == lower)
     {
         return Some((*peer).clone());
     }
@@ -112,7 +109,7 @@ fn resolve_peer(
     // Prefix match
     let matches: Vec<_> = online_peers
         .iter()
-        .filter(|p| p.name.to_lowercase().starts_with(&lower))
+        .filter(|p| p.device_name.to_lowercase().starts_with(&lower))
         .collect();
 
     if matches.len() == 1 {

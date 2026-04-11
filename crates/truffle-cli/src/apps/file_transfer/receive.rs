@@ -22,11 +22,17 @@ pub fn spawn_receive_handler(
     output_dir: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        info!(output_dir = output_dir.as_str(), "Starting file transfer receive handler (core auto_accept)");
+        info!(
+            output_dir = output_dir.as_str(),
+            "Starting file transfer receive handler (core auto_accept)"
+        );
 
         // Create output directory if it doesn't exist
         if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
-            tracing::error!(dir = output_dir.as_str(), "Failed to create output dir: {e}");
+            tracing::error!(
+                dir = output_dir.as_str(),
+                "Failed to create output dir: {e}"
+            );
             return;
         }
 

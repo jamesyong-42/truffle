@@ -22,14 +22,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let sep_line = "\u{2500}".repeat(area.width as usize);
 
     // Top separator (row 0)
-    let top_sep = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let top_sep = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(&sep_line, sep_style))),
         top_sep,
     );
 
     // Prompt line (row 1)
-    let prompt_area = Rect { x: area.x, y: area.y + 1, width: area.width, height: 1 };
+    let prompt_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: 1,
+    };
     let prompt = "\u{276f} "; // ❯
 
     let paragraph = Paragraph::new(Line::from(vec![
@@ -52,7 +62,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     }
 
     // Bottom separator (row 2)
-    let bot_sep = Rect { x: area.x, y: area.y + 2, width: area.width, height: 1 };
+    let bot_sep = Rect {
+        x: area.x,
+        y: area.y + 2,
+        width: area.width,
+        height: 1,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(&sep_line, sep_style))),
         bot_sep,

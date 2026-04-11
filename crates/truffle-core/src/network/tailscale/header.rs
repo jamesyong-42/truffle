@@ -228,7 +228,7 @@ impl BridgeHeader {
         }
         if remote_addr_bytes.len() > MAX_REMOTE_ADDR_LEN as usize {
             return Err(HeaderError::RemoteAddrTooLong(
-                remote_addr_bytes.len() as u16,
+                remote_addr_bytes.len() as u16
             ));
         }
         if remote_dns_name_bytes.len() > MAX_REMOTE_DNS_NAME_LEN as usize {
@@ -240,7 +240,7 @@ impl BridgeHeader {
         // Validate incoming direction invariant
         if self.direction == Direction::Incoming && !self.request_id.is_empty() {
             return Err(HeaderError::IncomingWithRequestId(
-                request_id_bytes.len() as u16,
+                request_id_bytes.len() as u16
             ));
         }
 

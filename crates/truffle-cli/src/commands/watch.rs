@@ -121,11 +121,7 @@ fn print_human_event(notif: &crate::daemon::protocol::DaemonNotification) {
             } else {
                 output::Indicator::Offline
             };
-            println!(
-                "  {}{} {} updated",
-                time_str, indicator,
-                output::bold(peer),
-            );
+            println!("  {}{} {} updated", time_str, indicator, output::bold(peer),);
         }
         "peer.ws_connected" => {
             let peer = params["peer"].as_str().unwrap_or("?");
@@ -174,12 +170,7 @@ fn print_human_event(notif: &crate::daemon::protocol::DaemonNotification) {
         }
         _ => {
             // Generic fallback
-            println!(
-                "  {}{} {}",
-                time_str,
-                output::dim("\u{2022}"),
-                event_type,
-            );
+            println!("  {}{} {}", time_str, output::dim("\u{2022}"), event_type,);
         }
     }
 }

@@ -110,4 +110,3 @@ impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
         Ok(RawListener::new(rx, actual_port))
     }
 }
-

@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
-    "@vibecook/truffle": "^0.3.25"
+    "@vibecook/truffle": "workspace:*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

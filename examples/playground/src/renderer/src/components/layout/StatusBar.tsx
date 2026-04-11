@@ -51,7 +51,7 @@ export function StatusBar({ identity, health, peerCount }: StatusBarProps) {
         aria-hidden="true"
       />
       <span className="text-[var(--color-text-primary)]">
-        {identity?.name ?? 'starting…'}
+        {identity?.deviceName ?? 'starting…'}
       </span>
       {identity?.ip ? (
         <span className="mono ml-2 text-[var(--color-text-secondary)]">
@@ -73,12 +73,12 @@ export function StatusBar({ identity, health, peerCount }: StatusBarProps) {
         </>
       ) : null}
       <div className="flex-1" />
-      {identity?.id ? (
+      {identity?.deviceId ? (
         <span
           className="mono text-[10.5px] text-[var(--color-text-muted)]"
-          title={identity.id}
+          title={identity.deviceId}
         >
-          {identity.id.slice(0, 12)}…
+          {identity.deviceId.slice(0, 12)}…
         </span>
       ) : null}
     </footer>

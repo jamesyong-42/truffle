@@ -20,15 +20,15 @@ pub async fn run(config: &TruffleConfig, json: bool, _watch: bool) -> Result<(),
         .map_err(|e| (exit_codes::ERROR, e.to_string()))?;
 
     if json {
-        let node_name = result["name"]
+        let node_name = result["device_name"]
             .as_str()
-            .unwrap_or(&config.node.name);
+            .unwrap_or(&config.node.device_name);
         let mut map = json_output::envelope(node_name);
 
         // Merge daemon response fields into the envelope
         if let Some(obj) = result.as_object() {
             for (k, v) in obj {
-                if k != "name" {
+                if k != "device_name" {
                     map.insert(k.clone(), v.clone());
                 }
             }
@@ -38,7 +38,7 @@ pub async fn run(config: &TruffleConfig, json: bool, _watch: bool) -> Result<(),
         return Ok(());
     }
 
-    let name = result["name"].as_str().unwrap_or("-");
+    let name = result["device_name"].as_str().unwrap_or("-");
     let status = result["status"].as_str().unwrap_or("offline");
     let ip = result["ip"].as_str().unwrap_or("");
     let dns = result["dns_name"].as_str().unwrap_or("");

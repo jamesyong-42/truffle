@@ -11,7 +11,9 @@ export declare class NapiFileTransfer {
   /**
    * Send a file to a peer.
    *
-   * Resolves with transfer result on success.
+   * `peer_id` is the recipient's stable `device_id` (RFC 017). The
+   * underlying `resolve_peer_id` also accepts device names, prefixes,
+   * and legacy Tailscale IDs. Resolves with transfer result on success.
    */
   sendFile(peerId: string, localPath: string, remotePath: string): Promise<NapiTransferResult>
   /**
@@ -181,9 +183,9 @@ export declare class NapiSyncedStore {
 
 /** An incoming file offer from a remote peer. */
 export interface NapiFileOffer {
-  /** Stable node ID of the sending peer. */
+  /** Sender's stable `device_id` (ULID) from the RFC 017 hello envelope. */
   fromPeer: string
-  /** Human-readable name of the sending peer. */
+  /** Human-readable device name of the sending peer. */
   fromName: string
   /** File name being offered. */
   fileName: string
@@ -242,7 +244,7 @@ export interface NapiHealthInfo {
 
 /** A message received on a specific namespace. */
 export interface NapiNamespacedMessage {
-  /** Stable node ID of the sender. */
+  /** Sender's stable `device_id` (ULID) from the RFC 017 hello envelope. */
   from: string
   /** Namespace the message was sent on. */
   namespace: string
@@ -254,14 +256,31 @@ export interface NapiNamespacedMessage {
   timestamp?: number
 }
 
-/** Configuration for starting a Node. */
+/** Configuration for starting a Node (RFC 017 §7 shape). */
 export interface NapiNodeConfig {
-  /** Human-readable node name (used as Tailscale hostname). */
-  name: string
+  /**
+   * Application namespace identifier. Required. Must match
+   * `^[a-z][a-z0-9-]{1,31}$`; validated on the Rust side.
+   */
+  appId: string
+  /**
+   * Optional human-readable device name. Defaults to the OS hostname.
+   * May contain any Unicode characters; the Tailscale hostname is
+   * derived automatically.
+   */
+  deviceName?: string
+  /**
+   * Optional stable ULID override. Auto-generated (and persisted) when
+   * omitted.
+   */
+  deviceId?: string
+  /**
+   * Tailscale state directory. Defaults to
+   * `{userDataDir}/truffle/{app_id}/{slug(device_name)}`.
+   */
+  stateDir?: string
   /** Path to the Go sidecar binary. */
   sidecarPath: string
-  /** Tailscale state directory. Defaults to `/tmp/truffle-{name}`. */
-  stateDir?: string
   /** Tailscale auth key for headless authentication. */
   authKey?: string
   /** Whether the node is ephemeral (auto-removed from tailnet on shutdown). */
@@ -270,26 +289,30 @@ export interface NapiNodeConfig {
   wsPort?: number
 }
 
-/** Identity of the local node. */
+/** Identity of the local node (RFC 017 §7.2). */
 export interface NapiNodeIdentity {
-  /** Stable node ID. */
-  id: string
-  /** Hostname on the network. */
-  hostname: string
-  /** Human-readable display name. */
-  name: string
+  /** Application namespace identifier. */
+  appId: string
+  /** Stable per-device ULID. Primary key for device identity. */
+  deviceId: string
+  /** Original (unsanitised) device name, as passed by the application. */
+  deviceName: string
+  /** The Tailscale hostname (`truffle-{app_id}-{slug}`). Debug use only. */
+  tailscaleHostname: string
+  /** Tailscale stable node ID. Escape hatch for diagnostics. */
+  tailscaleId: string
   /** DNS name on the tailnet, if available. */
   dnsName?: string
   /** Tailscale IP address as a string, if available. */
   ip?: string
 }
 
-/** A peer as seen by application code. */
+/** A peer as seen by application code (RFC 017 §7.3). */
 export interface NapiPeer {
-  /** Stable node ID. */
-  id: string
-  /** Human-readable name (hostname). */
-  name: string
+  /** Stable per-device ULID from the remote node. Primary key. */
+  deviceId: string
+  /** Human-readable device name from the remote node. */
+  deviceName: string
   /** Network IP address as a string. */
   ip: string
   /** Whether the peer is online (from Layer 3). */
@@ -302,13 +325,18 @@ export interface NapiPeer {
   os?: string
   /** Last time the peer was seen online (RFC 3339 string). */
   lastSeen?: string
+  /** Tailscale stable ID. Escape hatch; most code should use `deviceId`. */
+  tailscaleId: string
 }
 
 /** A peer change event delivered to JS. */
 export interface NapiPeerEvent {
   /** Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required". */
   eventType: string
-  /** Peer ID (present for peer events, empty for auth_required). */
+  /**
+   * Stable `device_id` (ULID) of the affected peer. Empty string for
+   * `auth_required` events (no associated peer).
+   */
   peerId: string
   /** Full peer info (present for joined/updated events). */
   peer?: NapiPeer
@@ -328,7 +356,10 @@ export interface NapiPingResult {
 
 /** A versioned slice of data owned by a single device. */
 export interface NapiSlice {
-  /** Device that owns this slice (stable node ID). */
+  /**
+   * Owning device's stable `device_id` (ULID) from the RFC 017 hello
+   * envelope.
+   */
   deviceId: string
   /** The data (JSON value). */
   data: any
@@ -342,7 +373,10 @@ export interface NapiSlice {
 export interface NapiStoreEvent {
   /** Event type: "local_changed", "peer_updated", "peer_removed". */
   eventType: string
-  /** Device ID (present for peer_updated/peer_removed events). */
+  /**
+   * Stable `device_id` (ULID) of the affected device (present for
+   * peer_updated / peer_removed events).
+   */
   deviceId?: string
   /** Data payload (present for local_changed/peer_updated events). */
   data?: any

@@ -18,8 +18,8 @@ pub async fn send_message<N: NetworkProvider + 'static>(
         "text": message,
     });
 
-    let data = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Failed to serialize message: {e}"))?;
+    let data =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize message: {e}"))?;
 
     node.send(peer_id, "chat", &data)
         .await
@@ -30,10 +30,7 @@ pub async fn send_message<N: NetworkProvider + 'static>(
 
 /// Broadcast a text message to all connected peers.
 #[allow(dead_code)]
-pub async fn broadcast_message<N: NetworkProvider + 'static>(
-    node: &Node<N>,
-    message: &str,
-) {
+pub async fn broadcast_message<N: NetworkProvider + 'static>(node: &Node<N>, message: &str) {
     let payload = serde_json::json!({
         "type": "text",
         "text": message,

@@ -6,11 +6,11 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::network::NetworkProvider;
 use crate::network::{
     HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
     NetworkTcpListener, NodeIdentity, PeerAddr, PingResult,
 };
-use crate::network::NetworkProvider;
 use crate::transport::{
     DatagramTransport, FramedStream, Handshake, RawTransport, StreamTransport, TransportError,
     WsConfig, PROTOCOL_VERSION,
@@ -35,9 +35,13 @@ impl MockNetworkProvider {
         let (peer_event_tx, _) = broadcast::channel(16);
         Self {
             identity: NodeIdentity {
-                id: id.to_string(),
-                hostname: format!("truffle-test-{id}"),
-                name: format!("Test Node {id}"),
+                app_id: "test".to_string(),
+                // RFC 017: align `device_id` with the fixture input so
+                // transport-level peer ID assertions stay simple.
+                device_id: id.to_string(),
+                device_name: format!("Test Node {id}"),
+                tailscale_hostname: format!("truffle-test-{id}"),
+                tailscale_id: id.to_string(),
                 dns_name: None,
                 ip: Some("127.0.0.1".parse().unwrap()),
             },
@@ -281,10 +285,9 @@ async fn ws_connect_and_exchange_messages() {
     };
 
     // Connect client and accept on server concurrently
-    let (client_result, server_stream) = tokio::join!(
-        client_ws.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.expect("client connect should succeed");
     let mut server_stream = server_stream.expect("server should accept a connection");
@@ -301,14 +304,22 @@ async fn ws_connect_and_exchange_messages() {
     let msg = b"hello from client";
     client_stream.send(msg).await.unwrap();
 
-    let received = server_stream.recv().await.unwrap().expect("should receive message");
+    let received = server_stream
+        .recv()
+        .await
+        .unwrap()
+        .expect("should receive message");
     assert_eq!(received, msg);
 
     // Server sends, client receives
     let reply = b"hello from server";
     server_stream.send(reply).await.unwrap();
 
-    let received = client_stream.recv().await.unwrap().expect("should receive reply");
+    let received = client_stream
+        .recv()
+        .await
+        .unwrap()
+        .expect("should receive reply");
     assert_eq!(received, reply);
 
     // Clean close
@@ -373,20 +384,19 @@ async fn ws_binary_frame_roundtrip() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_ws.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
 
     // Test various binary payloads
     let test_cases: Vec<Vec<u8>> = vec![
-        vec![],                                  // empty
-        vec![0x00],                              // single null byte
-        vec![0xFF; 1024],                        // 1KB of 0xFF
-        (0..=255).map(|b| b as u8).collect(),    // all byte values
+        vec![],                               // empty
+        vec![0x00],                           // single null byte
+        vec![0xFF; 1024],                     // 1KB of 0xFF
+        (0..=255).map(|b| b as u8).collect(), // all byte values
         b"utf8 text as binary".to_vec(),
     ];
 
@@ -394,7 +404,8 @@ async fn ws_binary_frame_roundtrip() {
         client_stream.send(payload).await.unwrap();
         let received = server_stream.recv().await.unwrap().expect("should receive");
         assert_eq!(
-            &received, payload,
+            &received,
+            payload,
             "binary roundtrip failed for payload of len {}",
             payload.len()
         );
@@ -600,10 +611,9 @@ async fn quic_connect_and_handshake() {
     };
 
     // Connect client and accept on server concurrently
-    let (client_result, server_stream) = tokio::join!(
-        client_quic.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let client_stream = client_result.expect("client connect should succeed");
     let server_stream = server_stream.expect("server should accept a connection");
@@ -645,10 +655,9 @@ async fn quic_send_recv() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_quic.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
@@ -657,14 +666,22 @@ async fn quic_send_recv() {
     let msg = b"hello from quic client";
     client_stream.send(msg).await.unwrap();
 
-    let received = server_stream.recv().await.unwrap().expect("should receive message");
+    let received = server_stream
+        .recv()
+        .await
+        .unwrap()
+        .expect("should receive message");
     assert_eq!(received, msg);
 
     // Server sends, client receives
     let reply = b"hello from quic server";
     server_stream.send(reply).await.unwrap();
 
-    let received = client_stream.recv().await.unwrap().expect("should receive reply");
+    let received = client_stream
+        .recv()
+        .await
+        .unwrap()
+        .expect("should receive reply");
     assert_eq!(received, reply);
 
     // Clean close
@@ -700,20 +717,19 @@ async fn quic_bidirectional() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_quic.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
 
     // Test various binary payloads bidirectionally
     let test_cases: Vec<Vec<u8>> = vec![
-        vec![],                                  // empty
-        vec![0x00],                              // single null byte
-        vec![0xFF; 1024],                        // 1KB of 0xFF
-        (0..=255).map(|b| b as u8).collect(),    // all byte values
+        vec![],                               // empty
+        vec![0x00],                           // single null byte
+        vec![0xFF; 1024],                     // 1KB of 0xFF
+        (0..=255).map(|b| b as u8).collect(), // all byte values
         b"utf8 text as binary".to_vec(),
     ];
 
@@ -722,7 +738,8 @@ async fn quic_bidirectional() {
         client_stream.send(payload).await.unwrap();
         let received = server_stream.recv().await.unwrap().expect("should receive");
         assert_eq!(
-            &received, payload,
+            &received,
+            payload,
             "client->server roundtrip failed for payload of len {}",
             payload.len()
         );
@@ -731,7 +748,8 @@ async fn quic_bidirectional() {
         server_stream.send(payload).await.unwrap();
         let received = client_stream.recv().await.unwrap().expect("should receive");
         assert_eq!(
-            &received, payload,
+            &received,
+            payload,
             "server->client roundtrip failed for payload of len {}",
             payload.len()
         );
@@ -769,10 +787,9 @@ async fn quic_multiple_sequential_messages() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_quic.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_quic.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
@@ -832,10 +849,9 @@ async fn ws_heartbeat_keeps_connection_alive() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_ws.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
@@ -862,8 +878,8 @@ async fn ws_heartbeat_keeps_connection_alive() {
 
 #[tokio::test]
 async fn stream_listener_returns_none_on_channel_close() {
-    use crate::transport::StreamListener;
     use crate::transport::websocket::WsFramedStream;
+    use crate::transport::StreamListener;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<WsFramedStream>(1);
     let mut listener = StreamListener::new(rx, 9999);
@@ -920,10 +936,9 @@ async fn ws_heartbeat_timeout_detects_dead_peer() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_ws.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
@@ -987,10 +1002,9 @@ async fn ws_remote_close_returns_none() {
         dns_name: None,
     };
 
-    let (client_result, server_stream) = tokio::join!(
-        client_ws.connect(&peer_addr),
-        async { listener.accept().await }
-    );
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
 
     let mut client_stream = client_result.unwrap();
     let mut server_stream = server_stream.unwrap();
@@ -1035,7 +1049,10 @@ async fn ws_connect_to_unreachable_returns_connect_failed() {
     };
 
     let result = ws.connect(&peer_addr).await;
-    assert!(result.is_err(), "should fail to connect to unreachable port");
+    assert!(
+        result.is_err(),
+        "should fail to connect to unreachable port"
+    );
 
     match result.unwrap_err() {
         TransportError::ConnectFailed(msg) => {

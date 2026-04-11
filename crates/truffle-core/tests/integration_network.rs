@@ -41,6 +41,9 @@ fn make_config() -> TailscaleConfig {
 
     TailscaleConfig {
         binary_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test-sidecar"),
+        app_id: "test-integ".to_string(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
+        device_name: format!("integ-{short_id}"),
         hostname: format!("truffle-test-integ-{short_id}"),
         state_dir: format!("/tmp/truffle-test-{test_id}"),
         auth_key: std::env::var("TS_AUTHKEY").ok(),
@@ -96,7 +99,7 @@ async fn test_provider_start_and_auth() {
             // Provider is running — verify we have an IP
             let identity = provider.local_identity_async().await;
             println!("  Provider started successfully");
-            println!("  Hostname: {}", identity.hostname);
+            println!("  Tailscale hostname: {}", identity.tailscale_hostname);
             println!("  DNS name: {:?}", identity.dns_name);
             println!("  IP: {:?}", identity.ip);
 
@@ -105,7 +108,7 @@ async fn test_provider_start_and_auth() {
                 "provider should have a Tailscale IP after starting"
             );
             assert!(
-                !identity.hostname.is_empty(),
+                !identity.tailscale_hostname.is_empty(),
                 "provider should have a hostname after starting"
             );
 
@@ -152,7 +155,10 @@ async fn test_peer_discovery() {
     let mut provider = TailscaleProvider::new(config);
 
     let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(start_result, Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)) {
+    if matches!(
+        start_result,
+        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
+    ) {
         println!("  Skipping: provider did not start (auth required or timeout)");
         cleanup_state_dir(&state_dir);
         return;
@@ -215,7 +221,10 @@ async fn test_peer_events() {
     let mut event_rx = provider.peer_events();
 
     let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(start_result, Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)) {
+    if matches!(
+        start_result,
+        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
+    ) {
         println!("  Skipping: provider did not start (auth required or timeout)");
         cleanup_state_dir(&state_dir);
         return;
@@ -248,13 +257,19 @@ async fn test_peer_events() {
     for event in &events {
         match event {
             NetworkPeerEvent::Joined(peer) => {
-                println!("    + Joined: {} (ip={}, online={})", peer.hostname, peer.ip, peer.online);
+                println!(
+                    "    + Joined: {} (ip={}, online={})",
+                    peer.hostname, peer.ip, peer.online
+                );
             }
             NetworkPeerEvent::Left(id) => {
                 println!("    - Left: {id}");
             }
             NetworkPeerEvent::Updated(peer) => {
-                println!("    ~ Updated: {} (ip={}, online={})", peer.hostname, peer.ip, peer.online);
+                println!(
+                    "    ~ Updated: {} (ip={}, online={})",
+                    peer.hostname, peer.ip, peer.online
+                );
             }
             NetworkPeerEvent::AuthRequired { url } => {
                 println!("    ! Auth required: {url}");
@@ -264,7 +279,10 @@ async fn test_peer_events() {
 
     // We should get at least some events from the initial peer fetch,
     // unless there are truly no truffle peers on the network.
-    println!("  Event stream is working (received {} events)", events.len());
+    println!(
+        "  Event stream is working (received {} events)",
+        events.len()
+    );
 
     provider.stop().await.expect("stop should succeed");
     cleanup_state_dir(&state_dir);
@@ -288,7 +306,10 @@ async fn test_dial_tcp() {
     let mut provider = TailscaleProvider::new(config);
 
     let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(start_result, Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)) {
+    if matches!(
+        start_result,
+        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
+    ) {
         println!("  Skipping: provider did not start (auth required or timeout)");
         cleanup_state_dir(&state_dir);
         return;
@@ -303,30 +324,31 @@ async fn test_dial_tcp() {
 
     match dial_result {
         Ok(Ok(stream)) => {
-            println!("  Successfully dialed! Remote addr: {:?}", stream.peer_addr());
+            println!(
+                "  Successfully dialed! Remote addr: {:?}",
+                stream.peer_addr()
+            );
 
             // SSH servers send a banner — try to read it to verify it's a real connection
             let mut buf = [0u8; 256];
             let read_result = timeout(Duration::from_secs(5), stream.readable()).await;
             match read_result {
-                Ok(Ok(())) => {
-                    match stream.try_read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            let banner = String::from_utf8_lossy(&buf[..n]);
-                            println!("  SSH banner: {}", banner.trim());
-                            assert!(
-                                banner.contains("SSH"),
-                                "expected SSH banner from port 22, got: {banner}"
-                            );
-                        }
-                        Ok(_) => {
-                            println!("  Connection established but no data read (may be expected)");
-                        }
-                        Err(e) => {
-                            println!("  try_read error (non-fatal): {e}");
-                        }
+                Ok(Ok(())) => match stream.try_read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        let banner = String::from_utf8_lossy(&buf[..n]);
+                        println!("  SSH banner: {}", banner.trim());
+                        assert!(
+                            banner.contains("SSH"),
+                            "expected SSH banner from port 22, got: {banner}"
+                        );
                     }
-                }
+                    Ok(_) => {
+                        println!("  Connection established but no data read (may be expected)");
+                    }
+                    Err(e) => {
+                        println!("  try_read error (non-fatal): {e}");
+                    }
+                },
                 Ok(Err(e)) => {
                     println!("  readable() error (non-fatal): {e}");
                 }
@@ -365,7 +387,10 @@ async fn test_ping() {
     let mut provider = TailscaleProvider::new(config);
 
     let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(start_result, Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)) {
+    if matches!(
+        start_result,
+        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
+    ) {
         println!("  Skipping: provider did not start (auth required or timeout)");
         cleanup_state_dir(&state_dir);
         return;
@@ -425,7 +450,10 @@ async fn test_health() {
     let mut provider = TailscaleProvider::new(config);
 
     let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(start_result, Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)) {
+    if matches!(
+        start_result,
+        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
+    ) {
         println!("  Skipping: provider did not start (auth required or timeout)");
         cleanup_state_dir(&state_dir);
         return;

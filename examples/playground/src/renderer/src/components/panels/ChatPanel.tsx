@@ -32,7 +32,7 @@ export function ChatPanel() {
 
   // If the selected peer disappears, fall back to broadcast.
   useEffect(() => {
-    if (target.kind === 'peer' && !sendablePeers.find((p) => p.id === target.peer.id)) {
+    if (target.kind === 'peer' && !sendablePeers.find((p) => p.deviceId === target.peer.deviceId)) {
       setTarget({ kind: 'broadcast' });
     }
   }, [sendablePeers, target]);
@@ -61,7 +61,7 @@ export function ChatPanel() {
     if (target.kind === 'broadcast') {
       await broadcast(text);
     } else {
-      await send(target.peer.id, text);
+      await send(target.peer.deviceId, text);
     }
     setInput('');
     // Always stick to bottom after a send.
@@ -127,7 +127,7 @@ export function ChatPanel() {
           >
             {target.kind === 'broadcast'
               ? 'To: broadcast'
-              : `To: ${target.peer.name}`}
+              : `To: ${target.peer.deviceName}`}
             <svg
               width="10"
               height="10"
@@ -166,11 +166,11 @@ export function ChatPanel() {
               ) : (
                 sendablePeers.map((peer) => (
                   <button
-                    key={peer.id}
+                    key={peer.deviceId}
                     type="button"
                     role="option"
                     aria-selected={
-                      target.kind === 'peer' && target.peer.id === peer.id
+                      target.kind === 'peer' && target.peer.deviceId === peer.deviceId
                     }
                     onClick={() => {
                       setTarget({ kind: 'peer', peer });
@@ -179,7 +179,7 @@ export function ChatPanel() {
                     className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--color-text-primary)] hover:bg-[var(--color-surface-raised)]"
                   >
                     <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-status-green)]" />
-                    <span className="truncate">{peer.name}</span>
+                    <span className="truncate">{peer.deviceName}</span>
                   </button>
                 ))
               )}
@@ -193,7 +193,7 @@ export function ChatPanel() {
           placeholder={
             target.kind === 'broadcast'
               ? 'Broadcast to all peers…'
-              : `Message ${target.peer.name}…`
+              : `Message ${target.peer.deviceName}…`
           }
           aria-label="Message text"
         />

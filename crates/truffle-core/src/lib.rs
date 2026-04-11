@@ -55,22 +55,25 @@
 //! The [`Node`] struct is the single public entry point. It exposes ~12 methods
 //! covering discovery, messaging, raw streams, and diagnostics.
 
-pub mod network;
-pub mod transport;
-pub mod session;
 pub mod envelope;
-pub mod node;
 pub mod file_transfer;
+pub mod identity;
+pub mod network;
+pub mod node;
 pub mod request_reply;
+pub mod session;
 pub mod synced_store;
+pub mod transport;
 
 // Re-export the main public types for convenience.
-pub use node::{Node, NodeBuilder, Peer, NamespacedMessage, NodeError};
 pub use envelope::Envelope;
 pub use file_transfer::{
-    FileTransfer, FileTransferEvent, FileOffer, OfferResponder, OfferDecision,
-    TransferResult, TransferError, TransferProgress, TransferDirection,
-    FtMessage,
+    FileOffer, FileTransfer, FileTransferEvent, FtMessage, OfferDecision, OfferResponder,
+    TransferDirection, TransferError, TransferProgress, TransferResult,
 };
+pub use identity::{slug, tailscale_hostname, AppId, DeviceId, DeviceName, IdentityError};
+pub use node::{NamespacedMessage, Node, NodeBuilder, NodeError, Peer};
 pub use request_reply::{send_and_wait, RequestError};
-pub use synced_store::{SyncedStore, Slice, StoreEvent, StoreBackend, MemoryBackend, FileBackend, SyncMessage};
+pub use synced_store::{
+    FileBackend, MemoryBackend, Slice, StoreBackend, StoreEvent, SyncMessage, SyncedStore,
+};

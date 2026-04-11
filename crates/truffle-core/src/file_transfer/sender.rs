@@ -60,7 +60,11 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     }
 
     // 2. Stream-hash the file in chunks (constant memory)
-    info!(path = local_path, size = file_size, "Hashing file (streaming)");
+    info!(
+        path = local_path,
+        size = file_size,
+        "Hashing file (streaming)"
+    );
     let token = uuid::Uuid::new_v4().to_string();
     let sha256 = {
         let mut hasher = Sha256::new();
@@ -123,7 +127,12 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     let offer_payload = serde_json::to_value(&offer)
         .map_err(|e| TransferError::Protocol(format!("Failed to serialize offer: {e}")))?;
 
-    info!(peer = peer_id, file = file_name.as_str(), size = file_size, "Sending OFFER");
+    info!(
+        peer = peer_id,
+        file = file_name.as_str(),
+        size = file_size,
+        "Sending OFFER"
+    );
 
     // Notify UI that we're waiting for the receiver's decision
     let _ = event_tx.send(FileTransferEvent::WaitingForAccept {
@@ -169,7 +178,11 @@ pub async fn send_file<N: NetworkProvider + 'static>(
     info!(tcp_port = accept_port, "Received ACCEPT from peer");
 
     // 5. Open raw TCP stream to the port advertised in ACCEPT
-    info!(accept_port = accept_port, peer = peer_id, "Opening TCP stream to peer");
+    info!(
+        accept_port = accept_port,
+        peer = peer_id,
+        "Opening TCP stream to peer"
+    );
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         node.open_tcp(peer_id, accept_port),
@@ -225,7 +238,11 @@ pub async fn send_file<N: NetworkProvider + 'static>(
 
     // Final progress event at 100%
     let elapsed = progress_start.elapsed().as_secs_f64();
-    let speed = if elapsed > 0.0 { bytes_sent as f64 / elapsed } else { 0.0 };
+    let speed = if elapsed > 0.0 {
+        bytes_sent as f64 / elapsed
+    } else {
+        0.0
+    };
     let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
         token: token.clone(),
         direction: TransferDirection::Send,

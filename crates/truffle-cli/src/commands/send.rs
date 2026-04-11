@@ -36,7 +36,7 @@ pub async fn run(
     let sent = result["sent"].as_bool().unwrap_or(false);
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("sent".to_string(), serde_json::json!(sent));
         map.insert("to".to_string(), serde_json::json!(node));
         map.insert("message".to_string(), serde_json::json!(message));

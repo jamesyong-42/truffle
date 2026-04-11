@@ -182,8 +182,12 @@ function AppInner() {
   const openAuth = (url: string) => window.truffle.openAuthUrl(url);
 
   const retry = () => {
+    // Retry with a randomised `deviceName` so two playgrounds on the
+    // same machine don't trip over the same Tailscale hostname slug.
+    // `ephemeral: true` keeps the tailnet entry from sticking around.
     void startNode({
-      name: `playground-${Math.random().toString(36).slice(2, 8)}`,
+      appId: 'playground',
+      deviceName: `playground-${Math.random().toString(36).slice(2, 8)}`,
       ephemeral: true,
     });
   };

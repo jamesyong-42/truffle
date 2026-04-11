@@ -19,16 +19,20 @@ use crate::types::{
 };
 
 /// Helper: convert a truffle-core `Peer` to a `NapiPeer`.
+///
+/// RFC 017: the user-facing identity is `device_id` / `device_name`, with
+/// the Tailscale stable ID preserved as an escape hatch for diagnostics.
 fn peer_to_napi(p: &truffle_core::node::Peer) -> NapiPeer {
     NapiPeer {
-        id: p.id.clone(),
-        name: p.name.clone(),
+        device_id: p.device_id.clone(),
+        device_name: p.device_name.clone(),
         ip: p.ip.to_string(),
         online: p.online,
         ws_connected: p.ws_connected,
         connection_type: p.connection_type.clone(),
         os: p.os.clone(),
         last_seen: p.last_seen.clone(),
+        tailscale_id: p.tailscale_id.clone(),
     }
 }
 
@@ -94,10 +98,22 @@ impl NapiNode {
     /// no other calls are made on this NapiNode while `start()` is in progress.
     #[napi]
     pub async unsafe fn start(&mut self, config: NapiNodeConfig) -> Result<()> {
+        // RFC 017: app_id is required and validated; device_name /
+        // device_id are optional overrides that the builder defaults when
+        // absent (OS hostname / auto-generated ULID).
         let mut builder = Node::<TailscaleProvider>::builder()
-            .name(&config.name)
+            .app_id(&config.app_id)
+            .map_err(|e| Error::from_reason(e.to_string()))?
             .sidecar_path(&config.sidecar_path);
 
+        if let Some(ref device_name) = config.device_name {
+            builder = builder.device_name(device_name);
+        }
+        if let Some(ref device_id) = config.device_id {
+            builder = builder
+                .device_id(device_id)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+        }
         if let Some(ref dir) = config.state_dir {
             builder = builder.state_dir(dir);
         }
@@ -156,9 +172,11 @@ impl NapiNode {
         let node = self.require_node()?;
         let info = node.local_info();
         Ok(NapiNodeIdentity {
-            id: info.id,
-            hostname: info.hostname,
-            name: info.name,
+            app_id: info.app_id,
+            device_id: info.device_id,
+            device_name: info.device_name,
+            tailscale_hostname: info.tailscale_hostname,
+            tailscale_id: info.tailscale_id,
             dns_name: info.dns_name,
             ip: info.ip.map(|ip| ip.to_string()),
         })
@@ -237,6 +255,7 @@ impl NapiNode {
     ) -> Result<()> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
+        let node_for_lookup = node.clone();
 
         // Use napi-rs's managed Tokio runtime. Bare `tokio::spawn` panics
         // with "there is no reactor running" because this is a sync NAPI
@@ -246,7 +265,7 @@ impl NapiNode {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let napi_event = convert_peer_event(&event);
+                        let napi_event = convert_peer_event(&event, Some(&node_for_lookup)).await;
                         let status =
                             callback.call(napi_event, ThreadsafeFunctionCallMode::NonBlocking);
                         if status != Status::Ok {
@@ -349,55 +368,81 @@ impl NapiNode {
 // PeerEvent conversion
 // ---------------------------------------------------------------------------
 
-fn convert_peer_event(event: &truffle_core::session::PeerEvent) -> NapiPeerEvent {
+/// Convert a core `PeerEvent` into its NAPI shape.
+///
+/// For `joined` / `updated` events we derive `peer_id` from the
+/// RFC 017 device_id carried on the hello envelope (via `Peer::from`).
+/// For `left` / `ws_connected` / `ws_disconnected` the session layer
+/// only gives us a Tailscale stable ID; if a `node` is provided we
+/// attempt to resolve that to a `device_id` via the node's peer cache
+/// so JS callers can key every `peer_id` by the same identifier.
+/// If resolution fails (e.g. transient races during disconnect) we
+/// fall back to the Tailscale stable ID — callers should be aware.
+async fn convert_peer_event(
+    event: &truffle_core::session::PeerEvent,
+    node: Option<&Arc<Node<TailscaleProvider>>>,
+) -> NapiPeerEvent {
     use truffle_core::session::PeerEvent;
 
+    // Helper: funnel through `Peer::from(PeerState)` so the `device_id`
+    // / `device_name` fallback logic lives in one place (see core/node.rs).
+    // The resulting `Peer` has `device_id == identity.device_id` when the
+    // hello has landed, otherwise it falls back to the Tailscale stable ID.
+    let from_state = |state: &truffle_core::session::PeerState| -> NapiPeer {
+        let peer: truffle_core::node::Peer = state.clone().into();
+        peer_to_napi(&peer)
+    };
+
+    // Resolve a Tailscale stable ID to the hello-advertised device_id by
+    // scanning the node's cached peer list. Returns the input on miss.
+    async fn resolve_device_id(
+        node: Option<&Arc<Node<TailscaleProvider>>>,
+        tailscale_id: &str,
+    ) -> String {
+        if let Some(node) = node {
+            for p in node.peers().await {
+                if p.tailscale_id == tailscale_id {
+                    return p.device_id.clone();
+                }
+            }
+        }
+        tailscale_id.to_string()
+    }
+
     match event {
-        PeerEvent::Joined(state) => NapiPeerEvent {
-            event_type: "joined".to_string(),
-            peer_id: state.id.clone(),
-            peer: Some(NapiPeer {
-                id: state.id.clone(),
-                name: state.name.clone(),
-                ip: state.ip.to_string(),
-                online: state.online,
-                ws_connected: state.ws_connected,
-                connection_type: state.connection_type.clone(),
-                os: state.os.clone(),
-                last_seen: state.last_seen.clone(),
-            }),
-            auth_url: None,
-        },
+        PeerEvent::Joined(state) => {
+            let peer = from_state(state);
+            NapiPeerEvent {
+                event_type: "joined".to_string(),
+                peer_id: peer.device_id.clone(),
+                peer: Some(peer),
+                auth_url: None,
+            }
+        }
         PeerEvent::Left(id) => NapiPeerEvent {
             event_type: "left".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },
-        PeerEvent::Updated(state) => NapiPeerEvent {
-            event_type: "updated".to_string(),
-            peer_id: state.id.clone(),
-            peer: Some(NapiPeer {
-                id: state.id.clone(),
-                name: state.name.clone(),
-                ip: state.ip.to_string(),
-                online: state.online,
-                ws_connected: state.ws_connected,
-                connection_type: state.connection_type.clone(),
-                os: state.os.clone(),
-                last_seen: state.last_seen.clone(),
-            }),
-            auth_url: None,
-        },
+        PeerEvent::Updated(state) => {
+            let peer = from_state(state);
+            NapiPeerEvent {
+                event_type: "updated".to_string(),
+                peer_id: peer.device_id.clone(),
+                peer: Some(peer),
+                auth_url: None,
+            }
+        }
         PeerEvent::WsConnected(id) => NapiPeerEvent {
             event_type: "ws_connected".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },
         PeerEvent::WsDisconnected(id) => NapiPeerEvent {
             event_type: "ws_disconnected".to_string(),
-            peer_id: id.clone(),
+            peer_id: resolve_device_id(node, id).await,
             peer: None,
             auth_url: None,
         },

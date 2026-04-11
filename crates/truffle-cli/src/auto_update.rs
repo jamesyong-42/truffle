@@ -48,8 +48,8 @@ pub fn load_cache(path: &Path) -> Option<UpdateCheckCache> {
 
 /// Save the cache to disk.
 pub fn save_cache(path: &Path, cache: &UpdateCheckCache) -> Result<(), String> {
-    let json =
-        serde_json::to_string_pretty(cache).map_err(|e| format!("Failed to serialize cache: {e}"))?;
+    let json = serde_json::to_string_pretty(cache)
+        .map_err(|e| format!("Failed to serialize cache: {e}"))?;
     std::fs::write(path, json).map_err(|e| format!("Failed to write cache: {e}"))
 }
 
@@ -59,9 +59,7 @@ pub fn should_check_now(cache: Option<&UpdateCheckCache>, check_interval: u64) -
     match cache {
         None => true,
         Some(c) => {
-            let elapsed = Utc::now()
-                .signed_duration_since(c.last_check)
-                .num_seconds();
+            let elapsed = Utc::now().signed_duration_since(c.last_check).num_seconds();
             elapsed < 0 || elapsed >= check_interval as i64
         }
     }
@@ -104,7 +102,9 @@ pub fn spawn_background_update(update_config: UpdateConfig) {
     });
 }
 
-async fn try_background_update(update_config: &UpdateConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn try_background_update(
+    update_config: &UpdateConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 0. Bail if auto-update is disabled.
     if !update_config.auto_update {
         tracing::debug!("auto-update: disabled in config");
@@ -172,9 +172,7 @@ async fn try_background_update(update_config: &UpdateConfig) -> Result<(), Box<d
                 update_available: true,
             },
         )?;
-        tracing::info!(
-            "auto-update: v{latest_version} downloaded (restart to update)"
-        );
+        tracing::info!("auto-update: v{latest_version} downloaded (restart to update)");
         return Ok(());
     }
 
@@ -193,9 +191,7 @@ async fn try_background_update(update_config: &UpdateConfig) -> Result<(), Box<d
             },
         )?;
 
-        tracing::info!(
-            "auto-update: updated to v{latest_version} (takes effect on next launch)"
-        );
+        tracing::info!("auto-update: updated to v{latest_version} (takes effect on next launch)");
     }
 
     Ok(())

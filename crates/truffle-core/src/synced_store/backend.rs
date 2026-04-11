@@ -72,15 +72,15 @@ impl FileBackend {
     fn path(&self, store_id: &str, device_id: &str) -> PathBuf {
         let safe_store = sanitize(store_id);
         let safe_device = sanitize(device_id);
-        self.base_dir.join(safe_store).join(format!("{safe_device}.json"))
+        self.base_dir
+            .join(safe_store)
+            .join(format!("{safe_device}.json"))
     }
 }
 
 /// Replace characters that could cause path traversal or filesystem issues.
 fn sanitize(s: &str) -> String {
-    s.replace('/', "_")
-        .replace('\\', "_")
-        .replace("..", "_")
+    s.replace('/', "_").replace('\\', "_").replace("..", "_")
 }
 
 impl StoreBackend for FileBackend {

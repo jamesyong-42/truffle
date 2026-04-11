@@ -36,7 +36,10 @@ where
         let mut msg_rx = node.subscribe(&namespace);
         let mut peer_rx = node.on_peer_change();
 
-        tracing::info!(store = inner.store_id.as_str(), "synced_store: sync task started");
+        tracing::info!(
+            store = inner.store_id.as_str(),
+            "synced_store: sync task started"
+        );
 
         loop {
             tokio::select! {
@@ -99,7 +102,10 @@ where
             }
         }
 
-        tracing::info!(store = inner.store_id.as_str(), "synced_store: sync task stopped");
+        tracing::info!(
+            store = inner.store_id.as_str(),
+            "synced_store: sync task stopped"
+        );
     })
 }
 
@@ -243,7 +249,9 @@ async fn apply_remote_slice<T>(
 
     // Persist remote slice to backend.
     if let Ok(serialized) = serde_json::to_vec(&typed_data) {
-        inner.backend.save(&inner.store_id, device_id, &serialized, version);
+        inner
+            .backend
+            .save(&inner.store_id, device_id, &serialized, version);
     }
 
     let _ = inner.event_tx.send(StoreEvent::PeerUpdated {
@@ -273,7 +281,10 @@ async fn handle_peer_joined<N, T>(
     // Send Request to the new peer.
     let request = SyncMessage::Request {};
     if let Ok(payload) = serde_json::to_value(&request) {
-        if let Err(e) = node.send_typed(peer_id, namespace, "request", &payload).await {
+        if let Err(e) = node
+            .send_typed(peer_id, namespace, "request", &payload)
+            .await
+        {
             tracing::warn!(
                 store = inner.store_id.as_str(),
                 peer = peer_id,
