@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.0...truffle-v0.4.1) (2026-04-11)
+
+
+### Bug Fixes
+
+* **ci:** truffle doctest API drift + pre-commit prettier and doctest checks ([a1a4330](https://github.com/jamesyong-42/truffle/commit/a1a4330de9a9348c65cabf08b0f9ddbe81ccdd84))
+* **cli:** migrate dev command to RFC 017 deviceId/appId ([6fe1f39](https://github.com/jamesyong-42/truffle/commit/6fe1f39dceea810de25ac3f4ec99f1f3797981f1))
+
 ## [0.4.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.3.25...truffle-v0.4.0) (2026-04-11)
 
 
