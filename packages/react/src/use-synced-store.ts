@@ -74,7 +74,7 @@ export function useSyncedStore<T>(node: NapiNode | null, storeId: string): UseSy
     let cancelled = false;
 
     try {
-      deviceIdRef.current = node.getLocalInfo().id;
+      deviceIdRef.current = node.getLocalInfo().deviceId;
     } catch {
       return;
     }

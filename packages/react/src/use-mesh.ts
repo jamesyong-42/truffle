@@ -70,7 +70,7 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
         case 'joined':
           if (event.peer) {
             setPeers((prev) => {
-              const idx = prev.findIndex((p) => p.id === event.peer!.id);
+              const idx = prev.findIndex((p) => p.deviceId === event.peer!.deviceId);
               if (idx >= 0) {
                 const next = [...prev];
                 next[idx] = event.peer!;
@@ -82,24 +82,24 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
           break;
 
         case 'left':
-          setPeers((prev) => prev.filter((p) => p.id !== event.peerId));
+          setPeers((prev) => prev.filter((p) => p.deviceId !== event.peerId));
           break;
 
         case 'updated':
           if (event.peer) {
-            setPeers((prev) => prev.map((p) => (p.id === event.peer!.id ? event.peer! : p)));
+            setPeers((prev) => prev.map((p) => (p.deviceId === event.peer!.deviceId ? event.peer! : p)));
           }
           break;
 
         case 'ws_connected':
           setPeers((prev) =>
-            prev.map((p) => (p.id === event.peerId ? { ...p, wsConnected: true } : p)),
+            prev.map((p) => (p.deviceId === event.peerId ? { ...p, wsConnected: true } : p)),
           );
           break;
 
         case 'ws_disconnected':
           setPeers((prev) =>
-            prev.map((p) => (p.id === event.peerId ? { ...p, wsConnected: false } : p)),
+            prev.map((p) => (p.deviceId === event.peerId ? { ...p, wsConnected: false } : p)),
           );
           break;
       }
