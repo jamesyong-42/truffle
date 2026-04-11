@@ -90,9 +90,18 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                 let peers = node_clone.peers().await;
                 for peer in peers {
                     if peer.online {
-                        // Re-emit as a synthetic Joined event so the TUI updates
+                        // Re-emit as a synthetic Joined event so the TUI updates.
+                        // Reconstruct a hello-envelope identity from the Peer
+                        // so downstream UI sees the user-facing device_name.
+                        let identity = Some(truffle_core::session::PeerIdentity {
+                            app_id: String::new(),
+                            device_id: peer.device_id.clone(),
+                            device_name: peer.device_name.clone(),
+                            os: peer.os.clone().unwrap_or_default(),
+                            tailscale_id: peer.tailscale_id.clone(),
+                        });
                         let state = truffle_core::session::PeerState {
-                            id: peer.id.clone(),
+                            id: peer.tailscale_id.clone(),
                             name: peer.name.clone(),
                             ip: peer.ip,
                             online: peer.online,
@@ -100,6 +109,7 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                             connection_type: peer.connection_type.clone(),
                             os: peer.os.clone(),
                             last_seen: peer.last_seen.clone(),
+                            identity,
                         };
                         let _ = tx.send(event::AppEvent::PeerEvent(
                             truffle_core::session::PeerEvent::Updated(state),

@@ -126,7 +126,7 @@ async fn upload(
     let sha256 = result["sha256"].as_str().unwrap_or("").to_string();
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("file".to_string(), serde_json::json!(local_path));
         map.insert("bytes".to_string(), serde_json::json!(bytes));
         if !sha256.is_empty() {
@@ -196,7 +196,7 @@ async fn download(
     let sha256 = result["sha256"].as_str().unwrap_or("").to_string();
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("file".to_string(), serde_json::json!(remote_path));
         map.insert("bytes".to_string(), serde_json::json!(bytes));
         if !sha256.is_empty() {

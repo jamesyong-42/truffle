@@ -80,7 +80,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
     let info = app.node.local_info();
-    let node_name = info.name.trim_start_matches("truffle-").to_string();
+    let node_name = info.device_name.clone();
+    let short_device_id: String = info.device_id.chars().take(8).collect();
     let ip_str = info.ip.map(|ip| ip.to_string()).unwrap_or_default();
     let peer_count = app.online_peer_count();
     let uptime = app.uptime_str();
@@ -121,6 +122,12 @@ fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::raw("  "),
         Span::styled(&node_name, Style::default().bold()),
     ];
+    if !short_device_id.is_empty() {
+        info_spans.push(Span::styled(
+            format!(" \u{00b7} {short_device_id}\u{2026}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
     if !ip_str.is_empty() {
         info_spans.push(Span::raw(" \u{00b7} "));
         info_spans.push(Span::raw(ip_str));

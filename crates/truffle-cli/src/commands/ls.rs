@@ -27,7 +27,7 @@ pub async fn run(
     let peers = result["peers"].as_array().cloned().unwrap_or_default();
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("peers".to_string(), serde_json::json!(peers));
         json_output::print_json(&serde_json::Value::Object(map));
         return Ok(());

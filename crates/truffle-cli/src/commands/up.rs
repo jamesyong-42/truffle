@@ -13,19 +13,23 @@ use crate::output;
 /// Start the daemon.
 pub async fn run(
     config: &TruffleConfig,
-    name: Option<&str>,
+    device_name: Option<&str>,
+    app_id: Option<&str>,
     foreground: bool,
     json: bool,
 ) -> Result<(), (i32, String)> {
     let mut config = config.clone();
-    if let Some(name) = name {
-        config.node.name = name.to_string();
+    if let Some(name) = device_name {
+        config.node.device_name = name.to_string();
+    }
+    if let Some(id) = app_id {
+        config.node.app_id = id.to_string();
     }
 
     let client = DaemonClient::new();
     if client.is_daemon_running() {
         if json {
-            let mut map = json_output::envelope(&config.node.name);
+            let mut map = json_output::envelope(&config.node.device_name);
             map.insert("status".to_string(), serde_json::json!("already_running"));
             if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
                 if let Some(pid) = result["pid"].as_u64() {
@@ -34,7 +38,10 @@ pub async fn run(
             }
             json_output::print_json(&serde_json::Value::Object(map));
         } else if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
-            let name = result["name"].as_str().unwrap_or("-");
+            let name = result["device_name"]
+                .as_str()
+                .or_else(|| result["name"].as_str())
+                .unwrap_or("-");
             let uptime = result["uptime_secs"]
                 .as_u64()
                 .map(output::format_uptime)
@@ -53,7 +60,7 @@ pub async fn run(
     if foreground {
         run_foreground(&config).await
     } else {
-        run_background(&config, name, json).await
+        run_background(&config, device_name, app_id, json).await
     }
 }
 
@@ -62,7 +69,7 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
     println!("  {}", output::bold("truffle v2"));
     println!("  {}", output::dim(&"\u{2500}".repeat(39)));
     println!();
-    println!("  {:<12}{}", "Node", output::bold(&config.node.name));
+    println!("  {:<12}{}", "Node", output::bold(&config.node.device_name));
     println!(
         "  {:<12}{} {}",
         "Status",
@@ -95,7 +102,7 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
     println!();
     println!("  {}", output::dim(&"\u{2500}".repeat(39)));
     println!();
-    println!("  {:<12}{}", "Node", output::bold(&info.name));
+    println!("  {:<12}{}", "Node", output::bold(&info.device_name));
     println!(
         "  {:<12}{} {}",
         "Status",
@@ -132,10 +139,15 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
                     use truffle_core::session::PeerEvent;
                     match event {
                         PeerEvent::Joined(state) => {
+                            let display_name = state
+                                .identity
+                                .as_ref()
+                                .map(|i| i.device_name.clone())
+                                .unwrap_or_else(|| state.name.clone());
                             println!(
                                 "  {} peer discovered: {} ({})",
                                 output::status_indicator("online"),
-                                output::bold(&state.name),
+                                output::bold(&display_name),
                                 state.ip,
                             );
                         }
@@ -178,7 +190,8 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
 
 async fn run_background(
     config: &TruffleConfig,
-    name: Option<&str>,
+    device_name: Option<&str>,
+    app_id: Option<&str>,
     json: bool,
 ) -> Result<(), (i32, String)> {
     let exe = std::env::current_exe().map_err(|e| {
@@ -191,8 +204,12 @@ async fn run_background(
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("up").arg("--foreground");
 
-    if let Some(name) = name {
-        cmd.arg("--name").arg(name);
+    if let Some(name) = device_name {
+        cmd.arg("--device-name").arg(name);
+    }
+
+    if let Some(id) = app_id {
+        cmd.arg("--app-id").arg(id);
     }
 
     cmd.stdin(std::process::Stdio::null())
@@ -248,7 +265,7 @@ async fn run_background(
 
     if json {
         // JSON output: query the daemon for PID and status
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("status".to_string(), serde_json::json!("started"));
 
         if let Ok(result) = client.request(method::STATUS, serde_json::json!({})).await {
@@ -270,7 +287,7 @@ async fn run_background(
     // Show update notification from a previous background download.
     auto_update::show_update_notification();
 
-    println!("  {:<12}{}", "Node", output::bold(&config.node.name));
+    println!("  {:<12}{}", "Node", output::bold(&config.node.device_name));
 
     // Poll for status
     let status_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);

@@ -37,33 +37,93 @@ pub struct TruffleConfig {
 }
 
 /// Node identity and behavior configuration.
+///
+/// RFC 017 renamed `name` to `device_name` and introduced `app_id`. For
+/// back-compat with existing configs on disk, a deprecated `name` field is
+/// still accepted at deserialization time and is interpreted as `device_name`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(from = "NodeConfigRaw", into = "NodeConfigRaw")]
 pub struct NodeConfig {
-    /// Display name for this node (defaults to hostname).
-    #[serde(default = "default_node_name")]
-    pub name: String,
+    /// Application identifier (RFC 017 §5.1). Defaults to `"cli"` — the
+    /// CLI has one shared namespace so multiple `truffle` devices see each
+    /// other by default.
+    pub app_id: String,
+    /// Human-readable device name (defaults to a compact form of the OS
+    /// hostname). May contain any Unicode; truffle derives a safe Tailscale
+    /// hostname from this automatically.
+    pub device_name: String,
     /// Whether to auto-start the daemon when a command needs it.
-    #[serde(default = "default_true")]
     pub auto_up: bool,
     /// Path to the Go sidecar binary (auto-detected if empty).
-    #[serde(default)]
     pub sidecar_path: String,
     /// Tailscale state directory (defaults to `~/.config/truffle/state`).
-    #[serde(default)]
     pub state_dir: String,
     /// Tailscale auth key (for headless setup).
-    #[serde(default)]
     pub auth_key: String,
 }
 
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            name: default_node_name(),
+            app_id: default_app_id(),
+            device_name: default_device_name(),
             auto_up: true,
             sidecar_path: String::new(),
             state_dir: String::new(),
             auth_key: String::new(),
+        }
+    }
+}
+
+/// Raw on-disk shape used for serde, with back-compat for the pre-RFC-017
+/// `name` field.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct NodeConfigRaw {
+    #[serde(default = "default_app_id")]
+    app_id: String,
+    #[serde(default)]
+    device_name: Option<String>,
+    /// Deprecated: pre-RFC-017 field. If `device_name` is absent this value
+    /// is used instead.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default = "default_true")]
+    auto_up: bool,
+    #[serde(default)]
+    sidecar_path: String,
+    #[serde(default)]
+    state_dir: String,
+    #[serde(default)]
+    auth_key: String,
+}
+
+impl From<NodeConfigRaw> for NodeConfig {
+    fn from(raw: NodeConfigRaw) -> Self {
+        let device_name = raw
+            .device_name
+            .or(raw.name)
+            .unwrap_or_else(default_device_name);
+        NodeConfig {
+            app_id: raw.app_id,
+            device_name,
+            auto_up: raw.auto_up,
+            sidecar_path: raw.sidecar_path,
+            state_dir: raw.state_dir,
+            auth_key: raw.auth_key,
+        }
+    }
+}
+
+impl From<NodeConfig> for NodeConfigRaw {
+    fn from(cfg: NodeConfig) -> Self {
+        NodeConfigRaw {
+            app_id: cfg.app_id,
+            device_name: Some(cfg.device_name),
+            name: None,
+            auto_up: cfg.auto_up,
+            sidecar_path: cfg.sidecar_path,
+            state_dir: cfg.state_dir,
+            auth_key: cfg.auth_key,
         }
     }
 }
@@ -132,8 +192,12 @@ impl Default for UpdateConfig {
 // Default value functions (for serde)
 // ==========================================================================
 
-fn default_node_name() -> String {
+fn default_device_name() -> String {
     smart_node_name()
+}
+
+fn default_app_id() -> String {
+    "cli".to_string()
 }
 
 /// Generate a clean, compact device name from the OS hostname.
@@ -383,6 +447,8 @@ mod tests {
     fn test_config_load_defaults() {
         let config = TruffleConfig::default();
         assert!(config.node.auto_up);
+        assert_eq!(config.node.app_id, "cli");
+        assert!(!config.node.device_name.is_empty());
         assert_eq!(config.output.format, "pretty");
         assert_eq!(config.output.color, "auto");
         assert_eq!(config.daemon.log_level, "info");
@@ -393,7 +459,8 @@ mod tests {
     fn test_config_load_from_toml() {
         let toml_content = r#"
 [node]
-name = "my-laptop"
+app_id = "cli"
+device_name = "my-laptop"
 auto_up = false
 sidecar_path = "/usr/local/bin/truffle-sidecar"
 
@@ -412,7 +479,8 @@ log_file = "/tmp/truffle.log"
 
         let config: TruffleConfig = toml::from_str(toml_content).unwrap();
 
-        assert_eq!(config.node.name, "my-laptop");
+        assert_eq!(config.node.app_id, "cli");
+        assert_eq!(config.node.device_name, "my-laptop");
         assert!(!config.node.auto_up);
         assert_eq!(config.node.sidecar_path, "/usr/local/bin/truffle-sidecar");
 
@@ -421,6 +489,20 @@ log_file = "/tmp/truffle.log"
 
         assert_eq!(config.output.format, "json");
         assert_eq!(config.daemon.log_level, "debug");
+    }
+
+    #[test]
+    fn test_config_load_legacy_name_field() {
+        // Pre-RFC-017 configs only had `name`; we migrate it to `device_name`.
+        let toml_content = r#"
+[node]
+name = "my-laptop"
+auto_up = true
+"#;
+
+        let config: TruffleConfig = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.node.device_name, "my-laptop");
+        assert_eq!(config.node.app_id, "cli"); // defaulted
     }
 
     #[test]

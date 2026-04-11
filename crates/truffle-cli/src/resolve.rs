@@ -230,6 +230,9 @@ mod tests {
             Peer {
                 id: "abc-123".to_string(),
                 name: "laptop".to_string(),
+                device_id: "abc-123".to_string(),
+                device_name: "laptop".to_string(),
+                tailscale_id: "abc-123".to_string(),
                 ip: "100.64.0.3".parse::<IpAddr>().unwrap(),
                 online: true,
                 ws_connected: false,
@@ -240,6 +243,9 @@ mod tests {
             Peer {
                 id: "def-456".to_string(),
                 name: "server".to_string(),
+                device_id: "def-456".to_string(),
+                device_name: "server".to_string(),
+                tailscale_id: "def-456".to_string(),
                 ip: "100.64.0.1".parse::<IpAddr>().unwrap(),
                 online: true,
                 ws_connected: true,

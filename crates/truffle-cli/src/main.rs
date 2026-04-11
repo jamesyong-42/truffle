@@ -56,9 +56,12 @@ pub struct Cli {
 enum Commands {
     /// Start your node and join the mesh
     Up {
-        /// Custom node name
-        #[arg(long)]
-        name: Option<String>,
+        /// Human-readable device name (Unicode OK; defaults to the OS hostname)
+        #[arg(long = "device-name")]
+        device_name: Option<String>,
+        /// Application identifier for the CLI namespace (defaults to `cli`)
+        #[arg(long = "app-id")]
+        app_id: Option<String>,
         /// Run in foreground (for debugging)
         #[arg(long)]
         foreground: bool,
@@ -293,14 +296,26 @@ async fn main() {
 
     let result = match command {
         // -- Node lifecycle --
-        Commands::Up { name, foreground } => {
-            // CLI fallback: if no config exists and no explicit name, use smart name
+        Commands::Up {
+            device_name,
+            app_id,
+            foreground,
+        } => {
+            // CLI fallback: if no config exists and no explicit device name,
+            // populate the smart default and persist.
             let mut config = config.clone();
-            if !crate::config::TruffleConfig::config_exists() && name.is_none() {
-                config.node.name = crate::config::smart_node_name();
+            if !crate::config::TruffleConfig::config_exists() && device_name.is_none() {
+                config.node.device_name = crate::config::smart_node_name();
                 let _ = config.save(None);
             }
-            commands::up::run(&config, name.as_deref(), foreground, global_json).await
+            commands::up::run(
+                &config,
+                device_name.as_deref(),
+                app_id.as_deref(),
+                foreground,
+                global_json,
+            )
+            .await
         }
 
         Commands::Down { force } => commands::down::run(&config, force, global_json).await,

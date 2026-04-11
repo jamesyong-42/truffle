@@ -245,16 +245,38 @@ fn peer_event_to_notification(
     event: &PeerEvent,
     peer_filter: &Option<String>,
 ) -> Option<DaemonNotification> {
+    // Extract a user-facing display name from a PeerState. Prefer the
+    // identity advertised in the hello envelope (RFC 017 §8); fall back to
+    // the Layer 3 Tailscale hostname when the hello has not yet landed.
+    let display_name = |state: &truffle_core::session::PeerState| -> String {
+        state
+            .identity
+            .as_ref()
+            .map(|i| i.device_name.clone())
+            .unwrap_or_else(|| state.name.clone())
+    };
+    let peer_device_id = |state: &truffle_core::session::PeerState| -> String {
+        state
+            .identity
+            .as_ref()
+            .map(|i| i.device_id.clone())
+            .unwrap_or_else(|| state.id.clone())
+    };
+
     let (method_name, params) = match event {
         PeerEvent::Joined(state) => {
-            if !matches_peer_filter(&state.name, peer_filter) {
+            let name = display_name(state);
+            if !matches_peer_filter(&name, peer_filter) {
                 return None;
             }
             (
                 notification::PEER_JOINED,
                 serde_json::json!({
                     "type": notification::PEER_JOINED,
-                    "peer": state.name,
+                    "peer": name,
+                    "device_id": peer_device_id(state),
+                    "device_name": name,
+                    "tailscale_id": state.id,
                     "ip": state.ip.to_string(),
                     "os": state.os,
                     "time": chrono::Utc::now().to_rfc3339(),
@@ -270,19 +292,24 @@ fn peer_event_to_notification(
                 serde_json::json!({
                     "type": notification::PEER_LEFT,
                     "peer": id,
+                    "tailscale_id": id,
                     "time": chrono::Utc::now().to_rfc3339(),
                 }),
             )
         }
         PeerEvent::Updated(state) => {
-            if !matches_peer_filter(&state.name, peer_filter) {
+            let name = display_name(state);
+            if !matches_peer_filter(&name, peer_filter) {
                 return None;
             }
             (
                 notification::PEER_UPDATED,
                 serde_json::json!({
                     "type": notification::PEER_UPDATED,
-                    "peer": state.name,
+                    "peer": name,
+                    "device_id": peer_device_id(state),
+                    "device_name": name,
+                    "tailscale_id": state.id,
                     "ip": state.ip.to_string(),
                     "online": state.online,
                     "ws_connected": state.ws_connected,
@@ -488,9 +515,11 @@ async fn handle_status(
     DaemonResponse::success(
         id,
         serde_json::json!({
-            "name": info.name,
-            "hostname": info.hostname,
-            "id": info.id,
+            "app_id": info.app_id,
+            "device_id": info.device_id,
+            "device_name": info.device_name,
+            "tailscale_hostname": info.tailscale_hostname,
+            "tailscale_id": info.tailscale_id,
             "ip": ip_str,
             "dns_name": info.dns_name.unwrap_or_default(),
             "status": status,
@@ -517,8 +546,9 @@ async fn handle_peers(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonRes
         .iter()
         .map(|p| {
             serde_json::json!({
-                "id": p.id,
-                "name": p.name,
+                "device_id": p.device_id,
+                "device_name": p.device_name,
+                "tailscale_id": p.tailscale_id,
                 "ip": p.ip.to_string(),
                 "online": p.online,
                 "ws_connected": p.ws_connected,
@@ -879,8 +909,10 @@ async fn handle_doctor(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonRe
                 "peer_count": peers.len(),
                 "key_expiry": health.key_expiry,
                 "warnings": health.warnings,
-                "node_id": info.id,
-                "node_name": info.name,
+                "device_id": info.device_id,
+                "device_name": info.device_name,
+                "tailscale_id": info.tailscale_id,
+                "tailscale_hostname": info.tailscale_hostname,
             }
         }),
     )

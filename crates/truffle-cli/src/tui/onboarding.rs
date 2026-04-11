@@ -135,7 +135,7 @@ pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleCo
 
     // Save config with chosen name
     let mut config = base_config.clone();
-    config.node.name = state.name_input.clone();
+    config.node.device_name = state.name_input.clone();
     if let Err(e) = config.save(None) {
         restore_terminal();
         return Err(format!("Failed to save config: {e}"));

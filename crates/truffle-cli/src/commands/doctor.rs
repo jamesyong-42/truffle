@@ -29,7 +29,7 @@ pub async fn run(config: &TruffleConfig, json: bool) -> Result<(), (i32, String)
                 "pass": false,
                 "detail": "not running",
             }));
-            let mut map = json_output::envelope(&config.node.name);
+            let mut map = json_output::envelope(&config.node.device_name);
             map.insert("checks".to_string(), serde_json::json!(checks_json));
             json_output::print_json(&serde_json::Value::Object(map));
         } else {
@@ -148,7 +148,7 @@ pub async fn run(config: &TruffleConfig, json: bool) -> Result<(), (i32, String)
     }
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("checks".to_string(), serde_json::json!(checks_json));
         json_output::print_json(&serde_json::Value::Object(map));
     } else {

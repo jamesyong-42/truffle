@@ -46,7 +46,7 @@ pub async fn run(
         match result {
             Ok(_) => {
                 if json {
-                    let mut map = json_output::envelope(&config.node.name);
+                    let mut map = json_output::envelope(&config.node.device_name);
                     map.insert("connected".to_string(), serde_json::json!(true));
                     map.insert("peer".to_string(), serde_json::json!(node));
                     map.insert("port".to_string(), serde_json::json!(port));
@@ -62,7 +62,7 @@ pub async fn run(
             }
             Err(e) => {
                 if json {
-                    let mut map = json_output::envelope(&config.node.name);
+                    let mut map = json_output::envelope(&config.node.device_name);
                     map.insert("connected".to_string(), serde_json::json!(false));
                     map.insert("peer".to_string(), serde_json::json!(node));
                     map.insert("port".to_string(), serde_json::json!(port));

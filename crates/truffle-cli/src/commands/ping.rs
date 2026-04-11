@@ -93,7 +93,7 @@ pub async fn run(
     };
 
     if json {
-        let mut map = json_output::envelope(&config.node.name);
+        let mut map = json_output::envelope(&config.node.device_name);
         map.insert("target".to_string(), serde_json::json!(node));
         map.insert("results".to_string(), serde_json::json!(results_json));
         map.insert(
