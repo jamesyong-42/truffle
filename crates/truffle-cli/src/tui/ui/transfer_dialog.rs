@@ -264,8 +264,8 @@ fn render_overwrite_confirm(f: &mut Frame, area: Rect, app: &AppState) {
 fn resolve_peer_name(app: &AppState, peer_id: &str, fallback: &str) -> String {
     app.peers
         .iter()
-        .find(|p| p.id == peer_id)
-        .map(|p| p.name.clone())
+        .find(|p| p.device_id == peer_id)
+        .map(|p| p.device_name.clone())
         .unwrap_or_else(|| {
             if fallback.is_empty() {
                 peer_id.to_string()

@@ -16,19 +16,19 @@ use crate::output;
 
 /// Peer info cached for the device panel.
 ///
-/// `id` and `name` hold the RFC 017 primary identity (device_id ULID and
-/// user-facing device_name), populated from the remote's hello envelope.
-/// `tailscale_id` is kept as an escape hatch so session-layer events
+/// `device_id` and `device_name` hold the RFC 017 primary identity (device_id
+/// ULID and user-facing device_name), populated from the remote's hello
+/// envelope. `tailscale_id` is kept as an escape hatch so session-layer events
 /// (`PeerEvent::WsConnected` / `WsDisconnected`) — which key by Tailscale
 /// stable ID — can still look up this cache entry.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     /// RFC 017 device_id (ULID) if the hello has been received, otherwise
     /// the Tailscale stable ID as a pre-hello fallback.
-    pub id: String,
+    pub device_id: String,
     /// Human-readable device_name from the hello envelope (NOT the
     /// Tailscale hostname slug).
-    pub name: String,
+    pub device_name: String,
     /// Tailscale stable node ID — used to correlate session-layer
     /// WsConnected/WsDisconnected events which carry this as their key.
     pub tailscale_id: String,
@@ -316,8 +316,8 @@ impl AppState {
         self.peers
             .iter()
             .filter(|p| p.online)
-            .filter(|p| p.name.to_lowercase().contains(&lower))
-            .map(|p| p.name.clone())
+            .filter(|p| p.device_name.to_lowercase().contains(&lower))
+            .map(|p| p.device_name.clone())
             .collect()
     }
 

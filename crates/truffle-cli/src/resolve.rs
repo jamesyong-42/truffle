@@ -326,4 +326,60 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_resolve_picks_first_match_when_device_names_collide() {
+        // RFC §13.3: device_name is NOT required to be unique within an app.
+        // Two laptops literally named "Alice's MacBook" can both run the
+        // same app and both appear in the peer list. The resolver picks the
+        // first match by linear scan order, which matches the order peers
+        // are listed by the daemon. Callers that need disambiguation should
+        // use device_id directly.
+        let mut peers = make_peers();
+        // Inject a second peer with the same device_name as the first.
+        peers.push(Peer {
+            id: "duplicate-ts-003".to_string(),
+            name: "cli-alice-s-macbook-2".to_string(),
+            device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string(),
+            device_name: "Alice's MacBook".to_string(), // <-- intentional collision
+            tailscale_id: "duplicate-ts-003".to_string(),
+            ip: "100.64.0.5".parse::<IpAddr>().unwrap(),
+            online: true,
+            ws_connected: false,
+            connection_type: "direct".to_string(),
+            os: Some("macos".to_string()),
+            last_seen: None,
+        });
+        let resolver = NameResolver::new(HashMap::new(), peers);
+        let result = resolver.resolve("Alice's MacBook").unwrap();
+        // The resolver returns the first match — same device_id as
+        // test_resolve_peer_name uses.
+        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+    }
+
+    #[test]
+    fn test_resolve_disambiguates_collided_names_by_device_id() {
+        // When device_names collide, the user can disambiguate by passing
+        // the device_id directly.
+        let mut peers = make_peers();
+        peers.push(Peer {
+            id: "duplicate-ts-003".to_string(),
+            name: "cli-alice-s-macbook-2".to_string(),
+            device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string(),
+            device_name: "Alice's MacBook".to_string(),
+            tailscale_id: "duplicate-ts-003".to_string(),
+            ip: "100.64.0.5".parse::<IpAddr>().unwrap(),
+            online: true,
+            ws_connected: false,
+            connection_type: "direct".to_string(),
+            os: Some("macos".to_string()),
+            last_seen: None,
+        });
+        let resolver = NameResolver::new(HashMap::new(), peers);
+        let result = resolver.resolve("01J4K9M2Z8AB3RNYQPW6H5TC0Z").unwrap();
+        assert_eq!(result.display_name, "Alice's MacBook");
+        // Specifically the SECOND peer, not the first.
+        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0Z");
+        assert_eq!(result.resolved_via, ResolvedVia::PeerId);
+    }
 }

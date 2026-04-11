@@ -31,7 +31,7 @@ pub fn render(f: &mut Frame, input_area: Rect, state: &AppState) {
                     let ip = state
                         .peers
                         .iter()
-                        .find(|p| &p.name == name)
+                        .find(|p| &p.device_name == name)
                         .map(|p| p.ip.clone())
                         .unwrap_or_default();
                     (format!("@{name}"), ip)

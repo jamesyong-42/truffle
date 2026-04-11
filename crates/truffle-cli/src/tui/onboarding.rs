@@ -13,9 +13,33 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::{self, TruffleConfig};
 use crate::daemon::server::DaemonServer;
+
+/// Maximum length of a device name in graphemes, enforced by the onboarding
+/// text input. RFC 017 §5.2 allows any Unicode up to 256 graphemes; this 64
+/// cap is a comfortable UX ceiling for an on-screen prompt. The 256-grapheme
+/// hard cap from §5.2 is enforced downstream by `DeviceName::parse`, and the
+/// slug derivation handles further truncation independently.
+const MAX_DEVICE_NAME_GRAPHEMES: usize = 64;
+
+/// Validate a single character typed into the device name input.
+///
+/// Per RFC 017 §5.2, device names may contain any printable Unicode. We
+/// reject only control characters (`\n`, `\t`, ESC, etc.) to keep the
+/// single-line text input well-behaved. Length enforcement is separate
+/// and grapheme-based — see `is_device_name_len_ok`.
+fn is_device_name_char_ok(c: char) -> bool {
+    !c.is_control()
+}
+
+/// Check that a candidate device name fits within the onboarding cap.
+fn is_device_name_len_ok(name: &str) -> bool {
+    name.graphemes(true).count() <= MAX_DEVICE_NAME_GRAPHEMES
+}
 
 // ── State machine ────────────────────────────────────────────────────────
 
@@ -90,8 +114,10 @@ pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleCo
                         let name = state.name_input.trim().to_string();
                         if name.is_empty() {
                             state.error = Some("Name cannot be empty".to_string());
-                        } else if name.len() > 15 {
-                            state.error = Some("Name must be 15 characters or less".to_string());
+                        } else if !is_device_name_len_ok(&name) {
+                            state.error = Some(format!(
+                                "Name must be {MAX_DEVICE_NAME_GRAPHEMES} characters or less"
+                            ));
                         } else {
                             state.error = None;
                             state.phase = Phase::Starting;
@@ -100,25 +126,55 @@ pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleCo
                         }
                     }
                     KeyCode::Char(c) if state.phase == Phase::NamePrompt => {
-                        if c.is_alphanumeric() || c == '-' || c == '_' {
-                            state.name_input.insert(state.cursor_pos, c);
-                            state.cursor_pos += 1;
-                            state.error = None;
+                        // RFC 017 §5.2: device_name accepts any printable
+                        // Unicode. Reject only control characters (\n, \t,
+                        // ESC). The 64-grapheme cap is a UX ceiling for the
+                        // onboarding prompt; the 256-grapheme hard cap is
+                        // enforced downstream by `DeviceName::parse`.
+                        if is_device_name_char_ok(c) {
+                            // Build the candidate string and reject if it
+                            // would exceed the grapheme budget. Cursor is a
+                            // byte offset into `name_input`.
+                            let mut candidate = state.name_input.clone();
+                            candidate.insert(state.cursor_pos, c);
+                            if is_device_name_len_ok(&candidate) {
+                                state.name_input = candidate;
+                                state.cursor_pos += c.len_utf8();
+                                state.error = None;
+                            }
                         }
                     }
                     KeyCode::Backspace if state.phase == Phase::NamePrompt => {
                         if state.cursor_pos > 0 {
-                            state.cursor_pos -= 1;
-                            state.name_input.remove(state.cursor_pos);
+                            // Walk back to the previous char boundary so we
+                            // delete a whole codepoint, not a byte.
+                            let new_cursor = state.name_input[..state.cursor_pos]
+                                .char_indices()
+                                .next_back()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                            state.name_input.drain(new_cursor..state.cursor_pos);
+                            state.cursor_pos = new_cursor;
                             state.error = None;
                         }
                     }
                     KeyCode::Left if state.phase == Phase::NamePrompt => {
-                        state.cursor_pos = state.cursor_pos.saturating_sub(1);
+                        // Step back one codepoint.
+                        state.cursor_pos = state.name_input[..state.cursor_pos]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
                     }
                     KeyCode::Right if state.phase == Phase::NamePrompt => {
                         if state.cursor_pos < state.name_input.len() {
-                            state.cursor_pos += 1;
+                            // Step forward one codepoint.
+                            let next = state.name_input[state.cursor_pos..]
+                                .chars()
+                                .next()
+                                .map(|c| state.cursor_pos + c.len_utf8())
+                                .unwrap_or(state.cursor_pos);
+                            state.cursor_pos = next;
                         }
                     }
                     KeyCode::Home if state.phase == Phase::NamePrompt => {
@@ -308,8 +364,11 @@ fn render(frame: &mut Frame, state: &OnboardingState) {
                 )));
             }
 
-            // Place cursor
-            let cursor_x = inner.x + 4 + state.cursor_pos as u16;
+            // Place cursor — compute display width of the substring before
+            // the byte-offset cursor so wide glyphs (CJK, emoji) track
+            // correctly.
+            let prefix_width = state.name_input[..state.cursor_pos].width() as u16;
+            let cursor_x = inner.x + 4 + prefix_width;
             let cursor_y = inner.y + 9; // line index of the input
             if cursor_x < inner.x + inner.width {
                 frame.set_cursor_position((cursor_x, cursor_y));
@@ -382,4 +441,54 @@ fn render(frame: &mut Frame, state: &OnboardingState) {
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_name_len_accepts_64_graphemes() {
+        let name = "a".repeat(64);
+        assert!(is_device_name_len_ok(&name));
+    }
+
+    #[test]
+    fn device_name_len_rejects_65_graphemes() {
+        let name = "a".repeat(65);
+        assert!(!is_device_name_len_ok(&name));
+    }
+
+    #[test]
+    fn device_name_accepts_ascii_with_apostrophe_and_space() {
+        let name = "Alice's MacBook Pro";
+        assert!(is_device_name_len_ok(name));
+        assert!(name.chars().all(is_device_name_char_ok));
+    }
+
+    #[test]
+    fn device_name_accepts_cjk() {
+        // "Tanaka" in kanji — two graphemes, six bytes, common device name
+        // pattern for Japanese users.
+        let name = "田中";
+        assert!(is_device_name_len_ok(name));
+        assert!(name.chars().all(is_device_name_char_ok));
+    }
+
+    #[test]
+    fn device_name_rejects_control_characters() {
+        assert!(!is_device_name_char_ok('\n'));
+        assert!(!is_device_name_char_ok('\t'));
+        assert!(!is_device_name_char_ok('\x1b')); // ESC
+        assert!(!is_device_name_char_ok('\0'));
+    }
+
+    #[test]
+    fn device_name_accepts_emoji() {
+        // Emoji count as graphemes — a rocket in a device name is allowed
+        // even though it's four UTF-8 bytes.
+        let name = "rocket \u{1f680} lab";
+        assert!(is_device_name_len_ok(name));
+        assert!(name.chars().all(is_device_name_char_ok));
+    }
 }

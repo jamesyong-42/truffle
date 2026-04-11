@@ -47,7 +47,7 @@ pub async fn execute(
                 .peers
                 .iter()
                 .filter(|p| p.online)
-                .map(|p| p.name.clone())
+                .map(|p| p.device_name.clone())
                 .collect();
             let hint = if available.is_empty() {
                 "No peers online.".to_string()
@@ -84,7 +84,7 @@ pub async fn execute(
 
     // Spawn the upload in a background task using the core file transfer API.
     let node = app.node.clone();
-    let peer_id = peer.id.clone();
+    let peer_id = peer.device_id.clone();
     let local = local_path.clone();
     let remote = remote_path.clone();
     let tx = event_tx.clone();
@@ -183,12 +183,15 @@ fn resolve_online_peer(app: &AppState, name: &str) -> Option<crate::tui::app::Pe
     let lower = name.to_lowercase();
     let online: Vec<_> = app.peers.iter().filter(|p| p.online).collect();
 
-    if let Some(p) = online.iter().find(|p| p.name.to_lowercase() == lower) {
+    if let Some(p) = online
+        .iter()
+        .find(|p| p.device_name.to_lowercase() == lower)
+    {
         return Some((*p).clone());
     }
     let matches: Vec<_> = online
         .iter()
-        .filter(|p| p.name.to_lowercase().starts_with(&lower))
+        .filter(|p| p.device_name.to_lowercase().starts_with(&lower))
         .collect();
     if matches.len() == 1 {
         return Some((*matches[0]).clone());

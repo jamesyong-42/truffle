@@ -210,8 +210,8 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             let display_name = app
                 .peers
                 .iter()
-                .find(|p| p.id == from_id)
-                .map(|p| p.name.clone())
+                .find(|p| p.device_id == from_id)
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| from_id.clone());
 
             // Toast if scrolled up (user would miss the message)
@@ -611,17 +611,17 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             if let Some(peer) = app
                 .peers
                 .iter_mut()
-                .find(|p| p.tailscale_id == tailscale_id || p.id == device_id)
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
             {
-                peer.id = device_id.clone();
+                peer.device_id = device_id.clone();
                 peer.tailscale_id = tailscale_id.clone();
                 peer.online = true;
                 peer.ip = state.ip.to_string();
-                peer.name = name.clone();
+                peer.device_name = name.clone();
             } else {
                 app.peers.push(app::PeerInfo {
-                    id: device_id,
-                    name: name.clone(),
+                    device_id,
+                    device_name: name.clone(),
                     tailscale_id,
                     ip: state.ip.to_string(),
                     online: true,
@@ -641,7 +641,7 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 .peers
                 .iter()
                 .find(|p| p.tailscale_id == id)
-                .map(|p| p.name.clone())
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
             if let Some(peer) = app.peers.iter_mut().find(|p| p.tailscale_id == id) {
                 peer.online = false;
@@ -661,7 +661,7 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 .peers
                 .iter()
                 .find(|p| p.tailscale_id == id)
-                .map(|p| p.name.clone())
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
@@ -675,7 +675,7 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 .peers
                 .iter()
                 .find(|p| p.tailscale_id == id)
-                .map(|p| p.name.clone())
+                .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| id.clone());
             app.push_item(app::DisplayItem::PeerEvent {
                 time: chrono::Local::now(),
@@ -703,27 +703,27 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             let was_online = app
                 .peers
                 .iter()
-                .find(|p| p.tailscale_id == tailscale_id || p.id == device_id)
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
                 .map(|p| p.online)
                 .unwrap_or(false);
 
             if let Some(peer) = app
                 .peers
                 .iter_mut()
-                .find(|p| p.tailscale_id == tailscale_id || p.id == device_id)
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
             {
-                peer.id = device_id.clone();
+                peer.device_id = device_id.clone();
                 peer.tailscale_id = tailscale_id.clone();
                 peer.online = state.online;
                 peer.ip = state.ip.to_string();
-                peer.name = name.clone();
+                peer.device_name = name.clone();
                 if !state.connection_type.is_empty() {
                     peer.connection = Some(state.connection_type.clone());
                 }
             } else {
                 app.peers.push(app::PeerInfo {
-                    id: device_id,
-                    name: name.clone(),
+                    device_id,
+                    device_name: name.clone(),
                     tailscale_id,
                     ip: state.ip.to_string(),
                     online: state.online,
@@ -781,8 +781,8 @@ fn handle_file_offer_received(
         let _peer_name = app
             .peers
             .iter()
-            .find(|p| p.id == offer.from_peer)
-            .map(|p| p.name.clone())
+            .find(|p| p.device_id == offer.from_peer)
+            .map(|p| p.device_name.clone())
             .unwrap_or_else(|| offer.from_name.clone());
         // Add FileTransfer item so receive progress can update it
         app.push_item(app::DisplayItem::FileTransfer {
@@ -906,8 +906,8 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                     let peer_name = app
                         .peers
                         .iter()
-                        .find(|p| p.id == peer_id)
-                        .map(|p| p.name.clone())
+                        .find(|p| p.device_id == peer_id)
+                        .map(|p| p.device_name.clone())
                         .unwrap_or_else(|| dialog.offer.from_name.clone());
 
                     if let Some(responder) = dialog.responder.take() {
@@ -1118,20 +1118,20 @@ async fn populate_peers(
         if let Some(existing) = app
             .peers
             .iter_mut()
-            .find(|p| p.tailscale_id == tailscale_id || p.id == device_id)
+            .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
         {
-            existing.id = device_id;
+            existing.device_id = device_id;
             existing.tailscale_id = tailscale_id;
             existing.online = peer.online;
             existing.ip = peer.ip.to_string();
-            existing.name = name;
+            existing.device_name = name;
             if !peer.connection_type.is_empty() {
                 existing.connection = Some(peer.connection_type.clone());
             }
         } else {
             app.peers.push(app::PeerInfo {
-                id: device_id,
-                name,
+                device_id,
+                device_name: name,
                 tailscale_id,
                 ip: peer.ip.to_string(),
                 online: peer.online,

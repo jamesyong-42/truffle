@@ -172,7 +172,11 @@ fn render_right(frame: &mut Frame, area: Rect, app: &AppState) {
 
     // Sort: online first, then alphabetical
     let mut sorted_peers: Vec<_> = app.peers.iter().collect();
-    sorted_peers.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
+    sorted_peers.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then(a.device_name.cmp(&b.device_name))
+    });
 
     for peer in &sorted_peers {
         let (indicator, style) = if peer.online {
@@ -193,7 +197,7 @@ fn render_right(frame: &mut Frame, area: Rect, app: &AppState) {
         lines.push(Line::from(vec![
             Span::styled(indicator, style),
             Span::raw(" "),
-            Span::raw(peer.name.clone()),
+            Span::raw(peer.device_name.clone()),
             Span::styled(conn, Style::default().fg(Color::DarkGray)),
         ]));
     }

@@ -5558,6 +5558,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "truffle-core",
+ "unicode-segmentation",
+ "unicode-width",
  "uuid",
  "windows-sys 0.59.0",
  "zip",
