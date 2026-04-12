@@ -112,6 +112,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::crdt_doc_list_push,
             commands::crdt_doc_text_insert,
             commands::crdt_doc_counter_increment,
+            commands::proxy_add,
+            commands::proxy_remove,
+            commands::proxy_list,
         ])
         .setup(|app, _| {
             app.manage(TruffleState {

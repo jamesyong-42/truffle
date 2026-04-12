@@ -166,6 +166,8 @@ export declare class NapiNode {
   onMessage(namespace: string, callback: (msg: NamespacedMessage) => void): void
   /** Get a `NapiFileTransfer` handle for file transfer operations. */
   fileTransfer(): NapiFileTransfer
+  /** Get a `NapiProxy` handle for reverse proxy operations. */
+  proxy(): NapiProxy
   /**
    * Get a `NapiSyncedStore` handle for synchronized state operations.
    *
@@ -197,6 +199,32 @@ export declare class NapiOfferResponder {
   accept(savePath: string): Promise<void>
   /** Reject the file offer with a reason. */
   reject(reason: string): Promise<void>
+}
+
+/**
+ * Reverse proxy handle exposed to JavaScript.
+ *
+ * Obtained via `NapiNode.proxy()`. Holds an `Arc<Node>` to create
+ * fresh `Proxy` handles on each method call (the Rust `Proxy` borrows
+ * `&Node`, so we can't store it across JS boundaries).
+ */
+export declare class NapiProxy {
+  /**
+   * Add a reverse proxy that forwards traffic from a TLS port on the mesh
+   * to a local target.
+   */
+  add(config: NapiProxyConfig): Promise<NapiProxyInfo>
+  /** Remove a reverse proxy by ID. */
+  remove(id: string): Promise<void>
+  /** List all active proxies on this node. */
+  list(): Promise<Array<NapiProxyInfo>>
+  /**
+   * Subscribe to proxy lifecycle events.
+   *
+   * The callback receives `NapiProxyEvent` objects whenever a proxy
+   * starts, stops, or encounters an error.
+   */
+  onEvent(callback: (event: NapiProxyEvent) => void): void
 }
 
 /**
@@ -417,6 +445,53 @@ export interface NapiPingResult {
   connection: string
   /** Direct peer endpoint address, if available. */
   peerAddr?: string
+}
+
+/** Configuration for adding a reverse proxy, received from JavaScript. */
+export interface NapiProxyConfig {
+  /** Unique identifier (user-chosen or auto-generated). */
+  id: string
+  /** Human-readable name for the proxy. */
+  name: string
+  /** Port on which the proxy listens on the tailnet (NAPI uses i32). */
+  listenPort: number
+  /** Target host (default: "localhost"). */
+  targetHost?: string
+  /** Target port (the local service port). */
+  targetPort: number
+  /** Target scheme: "http" or "https" (default: "http"). */
+  targetScheme?: string
+  /** Whether to announce this proxy on the mesh for discovery (default: true). */
+  announce?: boolean
+}
+
+/** A proxy lifecycle event delivered to JavaScript. */
+export interface NapiProxyEvent {
+  /** Event type: "started", "stopped", "error". */
+  eventType: string
+  /** Proxy ID. */
+  id: string
+  /** Fully qualified URL (present for "started" events). */
+  url?: string
+  /** Listen port (present for "started" events). */
+  listenPort?: number
+  /** Error code (present for "error" events). */
+  code?: string
+  /** Error message (present for "error" events). */
+  message?: string
+}
+
+/** Information about a running or configured proxy, returned to JavaScript. */
+export interface NapiProxyInfo {
+  id: string
+  name: string
+  listenPort: number
+  targetHost: string
+  targetPort: number
+  targetScheme: string
+  url: string
+  /** Status: "starting", "running", "stopped", or "error: <message>". */
+  status: string
 }
 
 /** A versioned slice of data owned by a single device. */

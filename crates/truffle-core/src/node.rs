@@ -233,7 +233,7 @@ pub enum NodeError {
 /// 3. Call `stop()` to shut down
 pub struct Node<N: NetworkProvider + 'static> {
     /// Layer 3 network provider.
-    network: Arc<N>,
+    pub(crate) network: Arc<N>,
     /// Layer 5 session / peer registry.
     session: Arc<PeerRegistry<N>>,
     /// Layer 6 envelope codec.
@@ -255,6 +255,8 @@ pub struct Node<N: NetworkProvider + 'static> {
     /// State directory for persistence (e.g., CRDT backends). Empty path
     /// when constructed via `from_parts` (tests); set by the builder.
     state_dir: PathBuf,
+    /// Reverse proxy subsystem state.
+    pub(crate) proxy_state: crate::proxy::ProxyState,
 }
 
 impl<N: NetworkProvider + 'static> Node<N> {
@@ -281,6 +283,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             namespace_filters: namespace_filters.clone(),
             file_transfer_state: FileTransferState::new(),
             state_dir: PathBuf::new(),
+            proxy_state: crate::proxy::ProxyState::new(),
         };
 
         // Spawn the envelope router task.
@@ -384,6 +387,16 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// that provides methods for sending, receiving, and pulling files.
     pub fn file_transfer(&self) -> file_transfer::FileTransfer<'_, N> {
         file_transfer::FileTransfer::new(self)
+    }
+
+    // ── Reverse Proxy ──────────────────────────────────────────────────
+
+    /// Access the reverse proxy subsystem.
+    ///
+    /// Returns a [`Proxy`](crate::proxy::Proxy) handle that provides
+    /// methods for adding, removing, and listing reverse proxies.
+    pub fn proxy(&self) -> crate::proxy::Proxy<'_, N> {
+        crate::proxy::Proxy::new(self)
     }
 
     /// Create a synchronized store for device-owned state.

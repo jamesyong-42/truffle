@@ -101,6 +101,9 @@ pub mod method {
     pub const TCP_CONNECT: &str = "tcp_connect";
     pub const DOCTOR: &str = "doctor";
     pub const SUBSCRIBE: &str = "subscribe";
+    pub const PROXY_ADD: &str = "proxy_add";
+    pub const PROXY_REMOVE: &str = "proxy_remove";
+    pub const PROXY_LIST: &str = "proxy_list";
 }
 
 pub mod notification {

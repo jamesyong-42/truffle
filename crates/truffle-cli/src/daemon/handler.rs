@@ -73,6 +73,9 @@ pub async fn dispatch(
             handle_get_file(request.id, &request.params, node, notification_tx).await
         }
         method::DOCTOR => handle_doctor(request.id, node).await,
+        method::PROXY_ADD => handle_proxy_add(request.id, &request.params, node).await,
+        method::PROXY_REMOVE => handle_proxy_remove(request.id, &request.params, node).await,
+        method::PROXY_LIST => handle_proxy_list(request.id, node).await,
         method::SUBSCRIBE => {
             return match parse_subscribe_params(&request.params) {
                 Ok(params) => DispatchResult::Subscribe(params),
@@ -889,6 +892,134 @@ async fn handle_get_file(
         ),
         Err(e) => DaemonResponse::error(id, error_code::INTERNAL_ERROR, e.to_string()),
     }
+}
+
+// ==========================================================================
+// Doctor
+// ==========================================================================
+
+// ==========================================================================
+// Reverse Proxy
+// ==========================================================================
+
+async fn handle_proxy_add(
+    id: u64,
+    params: &serde_json::Value,
+    node: &Arc<Node<TailscaleProvider>>,
+) -> DaemonResponse {
+    let proxy_id = params["id"].as_str().unwrap_or("").to_string();
+    let name = params["name"].as_str().unwrap_or(&proxy_id).to_string();
+    let listen_port = params["listen_port"].as_u64().unwrap_or(0) as u16;
+    let target_host = params["target_host"]
+        .as_str()
+        .unwrap_or("localhost")
+        .to_string();
+    let target_port = params["target_port"].as_u64().unwrap_or(0) as u16;
+    let target_scheme = params["target_scheme"]
+        .as_str()
+        .unwrap_or("http")
+        .to_string();
+    let announce = params["announce"].as_bool().unwrap_or(true);
+
+    if proxy_id.is_empty() {
+        return DaemonResponse::error(id, error_code::INVALID_PARAMS, "Missing 'id' parameter");
+    }
+    if listen_port == 0 {
+        return DaemonResponse::error(
+            id,
+            error_code::INVALID_PARAMS,
+            "Missing or invalid 'listen_port' parameter",
+        );
+    }
+    if target_port == 0 {
+        return DaemonResponse::error(
+            id,
+            error_code::INVALID_PARAMS,
+            "Missing or invalid 'target_port' parameter",
+        );
+    }
+
+    let config = truffle_core::proxy::ProxyConfig {
+        id: proxy_id,
+        name,
+        listen_port,
+        target: truffle_core::proxy::ProxyTarget {
+            host: target_host,
+            port: target_port,
+            scheme: target_scheme,
+        },
+        announce,
+    };
+
+    match node.proxy().add(config).await {
+        Ok(info) => {
+            let status_str = match &info.status {
+                truffle_core::proxy::ProxyStatus::Starting => "starting".to_string(),
+                truffle_core::proxy::ProxyStatus::Running => "running".to_string(),
+                truffle_core::proxy::ProxyStatus::Stopped => "stopped".to_string(),
+                truffle_core::proxy::ProxyStatus::Error(ref msg) => format!("error: {msg}"),
+            };
+            DaemonResponse::success(
+                id,
+                serde_json::json!({
+                    "id": info.id,
+                    "name": info.name,
+                    "listen_port": info.listen_port,
+                    "target_host": info.target.host,
+                    "target_port": info.target.port,
+                    "target_scheme": info.target.scheme,
+                    "url": info.url,
+                    "status": status_str,
+                }),
+            )
+        }
+        Err(e) => DaemonResponse::error(id, error_code::INTERNAL_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_proxy_remove(
+    id: u64,
+    params: &serde_json::Value,
+    node: &Arc<Node<TailscaleProvider>>,
+) -> DaemonResponse {
+    let proxy_id = match params["id"].as_str() {
+        Some(p) => p,
+        None => {
+            return DaemonResponse::error(id, error_code::INVALID_PARAMS, "Missing 'id' parameter")
+        }
+    };
+
+    match node.proxy().remove(proxy_id).await {
+        Ok(()) => DaemonResponse::success(id, serde_json::json!({ "removed": true })),
+        Err(e) => DaemonResponse::error(id, error_code::INTERNAL_ERROR, e.to_string()),
+    }
+}
+
+async fn handle_proxy_list(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonResponse {
+    let proxies = node.proxy().list();
+    let proxies_json: Vec<serde_json::Value> = proxies
+        .into_iter()
+        .map(|info| {
+            let status_str = match &info.status {
+                truffle_core::proxy::ProxyStatus::Starting => "starting".to_string(),
+                truffle_core::proxy::ProxyStatus::Running => "running".to_string(),
+                truffle_core::proxy::ProxyStatus::Stopped => "stopped".to_string(),
+                truffle_core::proxy::ProxyStatus::Error(ref msg) => format!("error: {msg}"),
+            };
+            serde_json::json!({
+                "id": info.id,
+                "name": info.name,
+                "listen_port": info.listen_port,
+                "target_host": info.target.host,
+                "target_port": info.target.port,
+                "target_scheme": info.target.scheme,
+                "url": info.url,
+                "status": status_str,
+            })
+        })
+        .collect();
+
+    DaemonResponse::success(id, serde_json::json!({ "proxies": proxies_json }))
 }
 
 // ==========================================================================

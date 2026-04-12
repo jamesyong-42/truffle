@@ -19,7 +19,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httputil"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -238,6 +241,76 @@ type healthWarningData struct {
 	Warnings []string `json:"warnings"`
 }
 
+// proxyAddData is the payload for proxy:add commands.
+type proxyAddData struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ListenPort   uint16 `json:"listenPort"`
+	TargetHost   string `json:"targetHost"`
+	TargetPort   uint16 `json:"targetPort"`
+	TargetScheme string `json:"targetScheme"`
+}
+
+// proxyRemoveData is the payload for proxy:remove commands.
+type proxyRemoveData struct {
+	ID string `json:"id"`
+}
+
+// proxyAddedEventData is the payload for proxy:added events.
+type proxyAddedEventData struct {
+	ID         string `json:"id"`
+	ListenPort uint16 `json:"listenPort"`
+	URL        string `json:"url"`
+}
+
+// proxyRemovedEventData is the payload for proxy:removed events.
+type proxyRemovedEventData struct {
+	ID string `json:"id"`
+}
+
+// proxyErrorEventData is the payload for proxy:error events.
+type proxyErrorEventData struct {
+	ID      string `json:"id"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// proxyInfoData is the payload for each proxy in proxy:list events.
+type proxyInfoData struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ListenPort   uint16 `json:"listenPort"`
+	TargetHost   string `json:"targetHost"`
+	TargetPort   uint16 `json:"targetPort"`
+	TargetScheme string `json:"targetScheme"`
+	URL          string `json:"url"`
+}
+
+// proxyListEventData is the payload for proxy:list events.
+type proxyListEventData struct {
+	Proxies []proxyInfoData `json:"proxies"`
+}
+
+// halfCloser is implemented by connections that support half-close (CloseWrite).
+// *net.TCPConn implements this, but *tls.Conn does not.
+type halfCloser interface {
+	CloseWrite() error
+}
+
+// proxyEntry is the internal state for a running reverse proxy.
+type proxyEntry struct {
+	id           string
+	name         string
+	listenPort   uint16
+	targetHost   string
+	targetPort   uint16
+	targetScheme string
+	targetURL    *url.URL
+	listener     net.Listener
+	server       *http.Server
+	cancel       context.CancelFunc
+}
+
 // listenPacketData is the payload for tsnet:listenPacket commands.
 type listenPacketData struct {
 	Port uint16 `json:"port"`
@@ -278,6 +351,12 @@ type shim struct {
 	udpRelayMu sync.Mutex
 	udpRelays  map[uint16]*udpRelay
 
+	// proxies tracks active reverse proxies created via proxy:add, keyed by ID.
+	proxyMu sync.Mutex
+	proxies map[string]*proxyEntry
+
+	dnsName string // set when status becomes "running"
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -290,6 +369,7 @@ func main() {
 		writer:           json.NewEncoder(os.Stdout),
 		dynamicListeners: make(map[uint16]net.Listener),
 		udpRelays:        make(map[uint16]*udpRelay),
+		proxies:          make(map[string]*proxyEntry),
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -336,6 +416,12 @@ func main() {
 			s.handleGetWaitingFile(cmd.Data)
 		case "tsnet:deleteWaitingFile":
 			s.handleDeleteWaitingFile(cmd.Data)
+		case "proxy:add":
+			s.handleProxyAdd(cmd.Data)
+		case "proxy:remove":
+			s.handleProxyRemove(cmd.Data)
+		case "proxy:list":
+			s.handleProxyList()
 		default:
 			s.sendError("UNKNOWN_CMD", fmt.Sprintf("unknown command: %s", cmd.Command))
 		}
@@ -430,6 +516,7 @@ func (s *shim) waitForRunning(hostname string) {
 			}
 			dnsName := strings.TrimSuffix(status.Self.DNSName, ".")
 			nodeID := string(status.Self.ID)
+			s.dnsName = dnsName
 
 			s.sendStatus("running", hostname, dnsName, ip, "")
 			s.sendEvent("tsnet:started", statusData{
@@ -547,6 +634,29 @@ func (s *shim) handleStop() {
 	}
 	s.udpRelays = make(map[uint16]*udpRelay)
 	s.udpRelayMu.Unlock()
+
+	// Close proxies — snapshot while holding lock, then shut down without lock
+	// to avoid blocking other goroutines during potentially slow Shutdown calls.
+	s.proxyMu.Lock()
+	proxyEntries := make([]*proxyEntry, 0, len(s.proxies))
+	for _, entry := range s.proxies {
+		if entry != nil {
+			proxyEntries = append(proxyEntries, entry)
+		}
+	}
+	s.proxies = make(map[string]*proxyEntry)
+	s.proxyMu.Unlock()
+
+	for _, entry := range proxyEntries {
+		log.Printf("shutting down proxy %s", entry.id)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		entry.server.Shutdown(ctx)
+		cancel()
+		if entry.cancel != nil {
+			entry.cancel()
+		}
+		entry.listener.Close()
+	}
 
 	if s.server != nil {
 		// Explicitly disconnect from the control plane before closing.
@@ -1458,6 +1568,266 @@ func (s *shim) handleDeleteWaitingFile(data json.RawMessage) {
 			FileName: d.FileName,
 		})
 	}()
+}
+
+func (s *shim) handleProxyAdd(raw json.RawMessage) {
+	if s.server == nil {
+		s.sendError("NOT_RUNNING", "node not running")
+		return
+	}
+
+	var data proxyAddData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		s.sendError("INVALID_COMMAND", "invalid proxy:add data: "+err.Error())
+		return
+	}
+
+	if data.TargetHost == "" {
+		data.TargetHost = "localhost"
+	}
+	if data.TargetScheme == "" {
+		data.TargetScheme = "http"
+	}
+
+	s.proxyMu.Lock()
+	if _, exists := s.proxies[data.ID]; exists {
+		s.proxyMu.Unlock()
+		s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "PROXY_EXISTS", Message: "proxy with this ID already exists"})
+		return
+	}
+	for _, entry := range s.proxies {
+		if entry != nil && entry.listenPort == data.ListenPort {
+			s.proxyMu.Unlock()
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "PORT_IN_USE", Message: fmt.Sprintf("port %d already used by proxy %s", data.ListenPort, entry.id)})
+			return
+		}
+	}
+	// Insert nil placeholder to prevent TOCTOU race — concurrent proxy:add
+	// with the same ID will see this entry and return PROXY_EXISTS.
+	s.proxies[data.ID] = nil
+	s.proxyMu.Unlock()
+
+	// Check dynamic listeners for port conflicts
+	s.dynamicListenerMu.Lock()
+	if _, exists := s.dynamicListeners[data.ListenPort]; exists {
+		s.dynamicListenerMu.Unlock()
+		// Clean up placeholder
+		s.proxyMu.Lock()
+		delete(s.proxies, data.ID)
+		s.proxyMu.Unlock()
+		s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "PORT_IN_USE", Message: fmt.Sprintf("port %d already used by a dynamic listener", data.ListenPort)})
+		return
+	}
+	s.dynamicListenerMu.Unlock()
+
+	targetURL := &url.URL{Scheme: data.TargetScheme, Host: fmt.Sprintf("%s:%d", data.TargetHost, data.TargetPort)}
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = fmt.Sprintf("%s:%d", data.TargetHost, data.TargetPort)
+	}
+
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	if data.TargetScheme == "https" {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	proxy.Transport = transport
+
+	proxyID := data.ID
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if strings.Contains(err.Error(), "connection refused") {
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: proxyID, Code: "CONNECTION_REFUSED", Message: err.Error()})
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, "Bad Gateway: %v", err)
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isProxyWebSocketRequest(r) {
+			s.handleProxyWebSocket(w, r, data.TargetHost, data.TargetPort, data.TargetScheme)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+
+	go func() {
+		addr := fmt.Sprintf(":%d", data.ListenPort)
+		ln, err := s.server.ListenTLS("tcp", addr)
+		if err != nil {
+			// Clean up placeholder on listen failure
+			s.proxyMu.Lock()
+			delete(s.proxies, data.ID)
+			s.proxyMu.Unlock()
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "LISTEN_ERROR", Message: err.Error()})
+			return
+		}
+
+		// Guard against empty dnsName (node not fully started yet)
+		if s.dnsName == "" {
+			ln.Close()
+			s.proxyMu.Lock()
+			delete(s.proxies, data.ID)
+			s.proxyMu.Unlock()
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "NOT_READY", Message: "node not fully started, DNS name not available"})
+			return
+		}
+
+		ctx, cancel := context.WithCancel(s.ctx)
+		srv := &http.Server{Handler: handler, BaseContext: func(net.Listener) context.Context { return ctx }}
+
+		// Replace the nil placeholder with the real entry
+		s.proxyMu.Lock()
+		s.proxies[data.ID] = &proxyEntry{
+			id: data.ID, name: data.Name, listenPort: data.ListenPort,
+			targetHost: data.TargetHost, targetPort: data.TargetPort,
+			targetScheme: data.TargetScheme, targetURL: targetURL,
+			listener: ln, server: srv, cancel: cancel,
+		}
+		s.proxyMu.Unlock()
+
+		proxyURL := fmt.Sprintf("https://%s:%d", s.dnsName, data.ListenPort)
+		s.sendEvent("proxy:added", proxyAddedEventData{ID: data.ID, ListenPort: data.ListenPort, URL: proxyURL})
+
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "SERVE_ERROR", Message: err.Error()})
+		}
+	}()
+}
+
+func isProxyWebSocketRequest(r *http.Request) bool {
+	connection := strings.ToLower(r.Header.Get("Connection"))
+	upgrade := strings.ToLower(r.Header.Get("Upgrade"))
+	return strings.Contains(connection, "upgrade") && upgrade == "websocket"
+}
+
+func (s *shim) handleProxyWebSocket(w http.ResponseWriter, r *http.Request, targetHost string, targetPort uint16, targetScheme string) {
+	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
+
+	var targetConn net.Conn
+	var err error
+	if targetScheme == "https" {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		targetConn, err = tls.DialWithDialer(dialer, "tcp", targetAddr, &tls.Config{InsecureSkipVerify: true})
+	} else {
+		targetConn, err = net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	}
+	if err != nil {
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		targetConn.Close()
+		http.Error(w, "WebSocket hijack not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		targetConn.Close() // Fix 6: close backend conn on hijack failure
+		// http.Error may not work after partial hijack, but attempt it
+		http.Error(w, "WebSocket hijack failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Rewrite Host header for the target
+	r.Host = targetAddr
+	r.Header.Set("Host", targetAddr)
+
+	// Forward the original request to the target
+	if err := r.Write(targetConn); err != nil {
+		targetConn.Close()
+		clientConn.Close()
+		return
+	}
+
+	// Bidirectional copy — goroutines own closing the connections.
+	// Use halfCloser interface since *tls.Conn doesn't implement CloseWrite;
+	// fall back to full Close when half-close is unavailable.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(targetConn, clientConn)
+		if hc, ok := targetConn.(halfCloser); ok {
+			hc.CloseWrite()
+		} else {
+			targetConn.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, targetConn)
+		if hc, ok := clientConn.(halfCloser); ok {
+			hc.CloseWrite()
+		} else {
+			clientConn.Close()
+		}
+	}()
+	wg.Wait()
+	// Ensure both sides are fully closed after both goroutines finish
+	targetConn.Close()
+	clientConn.Close()
+}
+
+func (s *shim) handleProxyRemove(raw json.RawMessage) {
+	var data proxyRemoveData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		s.sendError("INVALID_COMMAND", "invalid proxy:remove data: "+err.Error())
+		return
+	}
+
+	s.proxyMu.Lock()
+	entry, exists := s.proxies[data.ID]
+	if !exists || entry == nil {
+		s.proxyMu.Unlock()
+		s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "NOT_FOUND", Message: "proxy not found"})
+		return
+	}
+	delete(s.proxies, data.ID)
+	s.proxyMu.Unlock()
+
+	// Graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entry.server.Shutdown(ctx)
+	if entry.cancel != nil {
+		entry.cancel()
+	}
+	entry.listener.Close()
+
+	s.sendEvent("proxy:removed", proxyRemovedEventData{ID: data.ID})
+}
+
+func (s *shim) handleProxyList() {
+	s.proxyMu.Lock()
+	proxies := make([]proxyInfoData, 0, len(s.proxies))
+	for _, entry := range s.proxies {
+		if entry == nil {
+			continue // skip placeholders still being set up
+		}
+		proxyURL := fmt.Sprintf("https://%s:%d", s.dnsName, entry.listenPort)
+		proxies = append(proxies, proxyInfoData{
+			ID: entry.id, Name: entry.name,
+			ListenPort:   entry.listenPort,
+			TargetHost:   entry.targetHost, TargetPort: entry.targetPort,
+			TargetScheme: entry.targetScheme, URL: proxyURL,
+		})
+	}
+	s.proxyMu.Unlock()
+
+	s.sendEvent("proxy:list", proxyListEventData{Proxies: proxies})
 }
 
 // bridgeToRust connects to Rust's local bridge port, sends the binary header,

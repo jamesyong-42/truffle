@@ -85,6 +85,25 @@ pub(crate) struct ListenPacketCommandData {
     pub port: u16,
 }
 
+/// Data payload for `proxy:add`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyAddCommandData {
+    pub id: String,
+    pub name: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_scheme: String,
+}
+
+/// Data payload for `proxy:remove`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyRemoveCommandData {
+    pub id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Well-known command type strings
 // ---------------------------------------------------------------------------
@@ -99,6 +118,9 @@ pub(crate) mod command_type {
     pub const PING: &str = "tsnet:ping";
     pub const WATCH_PEERS: &str = "tsnet:watchPeers";
     pub const LISTEN_PACKET: &str = "tsnet:listenPacket";
+    pub const PROXY_ADD: &str = "proxy:add";
+    pub const PROXY_REMOVE: &str = "proxy:remove";
+    pub const PROXY_LIST: &str = "proxy:list";
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +156,10 @@ pub(crate) mod event_type {
     pub const PING_RESULT: &str = "tsnet:pingResult";
     pub const PEER_CHANGED: &str = "tsnet:peerChanged";
     pub const LISTENING_PACKET: &str = "tsnet:listeningPacket";
+    pub const PROXY_ADDED: &str = "proxy:added";
+    pub const PROXY_REMOVED: &str = "proxy:removed";
+    pub const PROXY_LIST_RESULT: &str = "proxy:list";
+    pub const PROXY_ERROR: &str = "proxy:error";
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +315,51 @@ pub(crate) struct PeerChangedEventData {
     pub peer: Option<SidecarPeer>,
     /// Peer ID (always present, used for "left" events).
     pub peer_id: String,
+}
+
+/// Data from `proxy:added` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyAddedEventData {
+    pub id: String,
+    pub listen_port: u16,
+    pub url: String,
+}
+
+/// Data from `proxy:removed` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyRemovedEventData {
+    pub id: String,
+}
+
+/// Data from `proxy:list` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyListEventData {
+    pub proxies: Vec<ProxyInfoEventData>,
+}
+
+/// Per-proxy info in list response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyInfoEventData {
+    pub id: String,
+    pub name: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_scheme: String,
+    pub url: String,
+}
+
+/// Data from `proxy:error` event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProxyErrorEventData {
+    pub id: String,
+    pub code: String,
+    pub message: String,
 }
 
 #[cfg(test)]
@@ -506,5 +577,78 @@ mod tests {
         let data: ListeningPacketEventData = serde_json::from_value(event.data).unwrap();
         assert_eq!(data.port, 19420);
         assert_eq!(data.local_port, 54321);
+    }
+
+    #[test]
+    fn serialize_proxy_add_command() {
+        let data = ProxyAddCommandData {
+            id: "dev-server".to_string(),
+            name: "Dev Server".to_string(),
+            listen_port: 3001,
+            target_host: "localhost".to_string(),
+            target_port: 3000,
+            target_scheme: "http".to_string(),
+        };
+        let cmd = SidecarCommand {
+            command: command_type::PROXY_ADD,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"proxy:add\""));
+        assert!(json.contains("\"listenPort\":3001"));
+        assert!(json.contains("\"targetHost\":\"localhost\""));
+        assert!(json.contains("\"targetPort\":3000"));
+    }
+
+    #[test]
+    fn serialize_proxy_remove_command() {
+        let data = ProxyRemoveCommandData {
+            id: "dev-server".to_string(),
+        };
+        let cmd = SidecarCommand {
+            command: command_type::PROXY_REMOVE,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"command\":\"proxy:remove\""));
+        assert!(json.contains("\"id\":\"dev-server\""));
+    }
+
+    #[test]
+    fn deserialize_proxy_added_event() {
+        let json = r#"{"event":"proxy:added","data":{"id":"dev-server","listenPort":3001,"url":"https://myhost.ts.net:3001"}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event, "proxy:added");
+        let data: ProxyAddedEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.id, "dev-server");
+        assert_eq!(data.listen_port, 3001);
+        assert_eq!(data.url, "https://myhost.ts.net:3001");
+    }
+
+    #[test]
+    fn deserialize_proxy_removed_event() {
+        let json = r#"{"event":"proxy:removed","data":{"id":"dev-server"}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        let data: ProxyRemovedEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.id, "dev-server");
+    }
+
+    #[test]
+    fn deserialize_proxy_error_event() {
+        let json = r#"{"event":"proxy:error","data":{"id":"dev-server","code":"CONNECTION_REFUSED","message":"target localhost:3000 not reachable"}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        let data: ProxyErrorEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.id, "dev-server");
+        assert_eq!(data.code, "CONNECTION_REFUSED");
+    }
+
+    #[test]
+    fn deserialize_proxy_list_event() {
+        let json = r#"{"event":"proxy:list","data":{"proxies":[{"id":"dev-server","name":"Dev Server","listenPort":3001,"targetHost":"localhost","targetPort":3000,"targetScheme":"http","url":"https://myhost.ts.net:3001"}]}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        let data: ProxyListEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.proxies.len(), 1);
+        assert_eq!(data.proxies[0].id, "dev-server");
+        assert_eq!(data.proxies[0].listen_port, 3001);
     }
 }

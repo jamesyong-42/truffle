@@ -125,6 +125,37 @@ pub trait NetworkProvider: Send + Sync {
 
     /// Node health info (key expiry, connection quality, warnings).
     fn health(&self) -> impl std::future::Future<Output = HealthInfo> + Send;
+
+    // ── Reverse proxy (optional, requires sidecar) ──
+
+    /// Start a reverse proxy. Only supported by providers with sidecar integration.
+    fn proxy_add(
+        &self,
+        _config: ProxyAddParams,
+    ) -> impl std::future::Future<Output = Result<ProxyAddResult, NetworkError>> + Send {
+        std::future::ready(Err(NetworkError::Unsupported(
+            "proxy_add not supported by this provider".into(),
+        )))
+    }
+
+    /// Stop a reverse proxy.
+    fn proxy_remove(
+        &self,
+        _id: &str,
+    ) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send {
+        std::future::ready(Err(NetworkError::Unsupported(
+            "proxy_remove not supported by this provider".into(),
+        )))
+    }
+
+    /// List active reverse proxies.
+    fn proxy_list(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<ProxyListEntry>, NetworkError>> + Send {
+        std::future::ready(Err(NetworkError::Unsupported(
+            "proxy_list not supported by this provider".into(),
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +423,50 @@ impl std::fmt::Debug for NetworkUdpSocket {
 }
 
 // ---------------------------------------------------------------------------
+// Reverse proxy types (used by NetworkProvider trait methods)
+// ---------------------------------------------------------------------------
+
+/// Parameters for starting a reverse proxy via the network provider.
+#[derive(Debug, Clone)]
+pub struct ProxyAddParams {
+    /// Unique identifier for this proxy.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Port on which the proxy listens on the tailnet (TLS).
+    pub listen_port: u16,
+    /// Target host to forward to (e.g., "localhost").
+    pub target_host: String,
+    /// Target port to forward to.
+    pub target_port: u16,
+    /// Target scheme ("http" or "https").
+    pub target_scheme: String,
+}
+
+/// Result of successfully starting a reverse proxy.
+#[derive(Debug, Clone)]
+pub struct ProxyAddResult {
+    /// Proxy ID (echoed back from sidecar).
+    pub id: String,
+    /// Actual listen port (may differ from requested if 0 was passed).
+    pub listen_port: u16,
+    /// Fully qualified URL (e.g., "https://hostname.ts.net:3001").
+    pub url: String,
+}
+
+/// Entry in the proxy list from the network provider.
+#[derive(Debug, Clone)]
+pub struct ProxyListEntry {
+    pub id: String,
+    pub name: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_scheme: String,
+    pub url: String,
+}
+
+// ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
 
@@ -453,4 +528,12 @@ pub enum NetworkError {
     /// Generic internal error.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// The operation is not supported by this provider.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
+    /// A reverse-proxy operation failed.
+    #[error("proxy error: {0}")]
+    ProxyError(String),
 }

@@ -13,6 +13,7 @@ use truffle_core::Node;
 
 use crate::crdt_doc::NapiCrdtDoc;
 use crate::file_transfer::NapiFileTransfer;
+use crate::proxy::NapiProxy;
 use crate::synced_store::NapiSyncedStore;
 use crate::types::{
     NapiHealthInfo, NapiNamespacedMessage, NapiNodeConfig, NapiNodeIdentity, NapiPeer,
@@ -343,6 +344,13 @@ impl NapiNode {
     pub fn file_transfer(&self) -> Result<NapiFileTransfer> {
         let node = self.require_node()?;
         Ok(NapiFileTransfer::new(node))
+    }
+
+    /// Get a `NapiProxy` handle for reverse proxy operations.
+    #[napi]
+    pub fn proxy(&self) -> Result<NapiProxy> {
+        let node = self.require_node()?;
+        Ok(NapiProxy::new(node))
     }
 
     /// Get a `NapiSyncedStore` handle for synchronized state operations.
