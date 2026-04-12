@@ -252,6 +252,9 @@ pub struct Node<N: NetworkProvider + 'static> {
     namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     /// File transfer subsystem state.
     pub(crate) file_transfer_state: FileTransferState,
+    /// State directory for persistence (e.g., CRDT backends). Empty path
+    /// when constructed via `from_parts` (tests); set by the builder.
+    state_dir: PathBuf,
 }
 
 impl<N: NetworkProvider + 'static> Node<N> {
@@ -277,6 +280,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             incoming_tx: incoming_tx.clone(),
             namespace_filters: namespace_filters.clone(),
             file_transfer_state: FileTransferState::new(),
+            state_dir: PathBuf::new(),
         };
 
         // Spawn the envelope router task.
@@ -413,6 +417,47 @@ impl<N: NetworkProvider + 'static> Node<N> {
         T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     {
         crate::synced_store::SyncedStore::new_with_backend(self.clone(), store_id, backend)
+    }
+
+    // ── CRDT Documents ───────────────────────────────���───────────────────
+
+    /// Create a CRDT document synchronized across the mesh.
+    ///
+    /// Returns an `Arc<CrdtDoc>` that syncs on namespace `"crdt:{doc_id}"`.
+    /// Uses the default [`MemoryCrdtBackend`](crate::crdt_doc::MemoryCrdtBackend)
+    /// (no persistence).
+    pub async fn crdt_doc(
+        self: &Arc<Self>,
+        doc_id: &str,
+    ) -> Result<Arc<crate::crdt_doc::CrdtDoc>, crate::crdt_doc::CrdtDocError> {
+        crate::crdt_doc::CrdtDoc::new(self.clone(), doc_id).await
+    }
+
+    /// Create a CRDT document with a custom persistence backend.
+    ///
+    /// Same as [`crdt_doc`](Self::crdt_doc) but restores persisted data on
+    /// startup and writes through to the backend on every change.
+    pub async fn crdt_doc_with_backend(
+        self: &Arc<Self>,
+        doc_id: &str,
+        backend: Arc<dyn crate::crdt_doc::CrdtBackend>,
+    ) -> Result<Arc<crate::crdt_doc::CrdtDoc>, crate::crdt_doc::CrdtDocError> {
+        crate::crdt_doc::CrdtDoc::new_with_backend(self.clone(), doc_id, backend).await
+    }
+
+    // ── State directory ───────────────────��────────────────────────────��
+
+    /// Set the state directory (called by the builder after construction).
+    pub(crate) fn with_state_dir(mut self, dir: PathBuf) -> Self {
+        self.state_dir = dir;
+        self
+    }
+
+    /// The state directory for persistence backends.
+    ///
+    /// Returns an empty path for test nodes created via `from_parts`.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────
@@ -977,6 +1022,7 @@ impl NodeBuilder {
     pub async fn build(self) -> Result<Node<TailscaleProvider>, NodeError> {
         let ws_port = self.ws_port;
         let config = self.prepare_config()?;
+        let state_dir = PathBuf::from(&config.state_dir);
 
         let mut provider = TailscaleProvider::new(config);
         provider.start().await.map_err(NodeError::Network)?;
@@ -996,7 +1042,7 @@ impl NodeBuilder {
 
         // 4. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec);
+        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
 
         tracing::info!("node: started successfully");
         Ok(node)
@@ -1019,6 +1065,7 @@ impl NodeBuilder {
     ) -> Result<Node<TailscaleProvider>, NodeError> {
         let ws_port = self.ws_port;
         let config = self.prepare_config()?;
+        let state_dir = PathBuf::from(&config.state_dir);
 
         let mut provider = TailscaleProvider::new(config);
 
@@ -1063,7 +1110,7 @@ impl NodeBuilder {
 
         // 8. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec);
+        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
 
         tracing::info!("node: started successfully (with auth handler)");
         Ok(node)

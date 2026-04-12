@@ -9,10 +9,11 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::RwLock;
 
+use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
-use truffle_core::Node;
+use truffle_core::{CrdtDoc, Node};
 
-use crate::types::{FileOfferJs, FileTransferEventJs, PeerEventJs};
+use crate::types::{CrdtDocEventJs, FileOfferJs, FileTransferEventJs, PeerEventJs};
 
 /// Spawn background tasks that forward truffle-core events to the Tauri frontend.
 ///
@@ -94,4 +95,36 @@ pub fn start_event_forwarding<R: Runtime>(
             }
         }
     });
+}
+
+/// Spawn a background task that forwards CrdtDoc events to the Tauri frontend.
+///
+/// Subscribes to the document's event channel and emits them as
+/// `truffle://crdt-change` events.
+pub fn spawn_crdt_doc_events<R: Runtime>(app: AppHandle<R>, doc: Arc<CrdtDoc>) -> JoinHandle<()> {
+    let mut rx = doc.subscribe();
+    let doc_id = doc.doc_id().to_string();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let js_event = CrdtDocEventJs::from_event(&doc_id, event);
+                    if let Err(e) = app.emit("truffle://crdt-change", &js_event) {
+                        tracing::warn!("Failed to emit crdt-change event: {e}");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        doc_id = doc_id.as_str(),
+                        "CRDT event listener lagged, missed {n} events"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(doc_id = doc_id.as_str(), "CRDT event channel closed");
+                    break;
+                }
+            }
+        }
+    })
 }

@@ -325,6 +325,44 @@ pub enum FileTransferEventJs {
     },
 }
 
+// ---------------------------------------------------------------------------
+// CrdtDocEventJs
+// ---------------------------------------------------------------------------
+
+/// CRDT document event, serialized for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum CrdtDocEventJs {
+    LocalChange { doc_id: String },
+    RemoteChange { doc_id: String, from: String },
+    PeerSynced { doc_id: String, peer_id: String },
+    PeerLeft { doc_id: String, peer_id: String },
+}
+
+impl CrdtDocEventJs {
+    /// Convert a core `CrdtDocEvent` into a JS-facing event, attaching the doc ID.
+    pub fn from_event(doc_id: &str, event: truffle_core::CrdtDocEvent) -> Self {
+        use truffle_core::CrdtDocEvent;
+        match event {
+            CrdtDocEvent::LocalChange => CrdtDocEventJs::LocalChange {
+                doc_id: doc_id.to_string(),
+            },
+            CrdtDocEvent::RemoteChange { from } => CrdtDocEventJs::RemoteChange {
+                doc_id: doc_id.to_string(),
+                from,
+            },
+            CrdtDocEvent::PeerSynced { peer_id } => CrdtDocEventJs::PeerSynced {
+                doc_id: doc_id.to_string(),
+                peer_id,
+            },
+            CrdtDocEvent::PeerLeft { peer_id } => CrdtDocEventJs::PeerLeft {
+                doc_id: doc_id.to_string(),
+                peer_id,
+            },
+        }
+    }
+}
+
 fn direction_str(d: truffle_core::TransferDirection) -> String {
     match d {
         truffle_core::TransferDirection::Send => "send".to_string(),

@@ -576,6 +576,7 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.NapiCrdtDoc = nativeBinding.NapiCrdtDoc
 module.exports.NapiFileTransfer = nativeBinding.NapiFileTransfer
 module.exports.NapiNode = nativeBinding.NapiNode
 module.exports.NapiOfferResponder = nativeBinding.NapiOfferResponder
