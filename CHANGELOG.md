@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.2...truffle-v0.4.3) (2026-04-12)
+
+
+### Features
+
+* **proxy:** add reverse proxy to expose local ports to Tailscale mesh ([#36](https://github.com/jamesyong-42/truffle/issues/36)) ([69f951f](https://github.com/jamesyong-42/truffle/commit/69f951fac6b2e168a6d90abb92c049b1ed584eff))
+
 ## [0.4.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.1...truffle-v0.4.2) (2026-04-12)
 
 
