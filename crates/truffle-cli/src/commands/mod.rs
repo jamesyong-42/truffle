@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod down;
 pub mod ls;
 pub mod ping;
+pub mod proxy;
 pub mod recv;
 pub mod send;
 pub mod status;

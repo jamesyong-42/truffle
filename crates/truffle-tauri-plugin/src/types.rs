@@ -370,6 +370,102 @@ fn direction_str(d: truffle_core::TransferDirection) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Proxy types
+// ---------------------------------------------------------------------------
+
+/// Configuration for adding a reverse proxy, received from the frontend.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConfigJs {
+    /// Unique identifier (user-chosen or auto-generated).
+    pub id: String,
+    /// Human-readable name for the proxy.
+    pub name: String,
+    /// Port on which the proxy listens on the tailnet.
+    pub listen_port: u16,
+    /// Target host (default: "localhost").
+    pub target_host: Option<String>,
+    /// Target port (the local service port).
+    pub target_port: u16,
+    /// Target scheme: "http" or "https" (default: "http").
+    pub target_scheme: Option<String>,
+    /// Whether to announce this proxy on the mesh for discovery (default: true).
+    pub announce: Option<bool>,
+}
+
+/// Information about a running or configured proxy, serialized for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyInfoJs {
+    pub id: String,
+    pub name: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_scheme: String,
+    pub url: String,
+    pub status: String,
+}
+
+impl From<truffle_core::proxy::ProxyInfo> for ProxyInfoJs {
+    fn from(info: truffle_core::proxy::ProxyInfo) -> Self {
+        Self {
+            id: info.id,
+            name: info.name,
+            listen_port: info.listen_port,
+            target_host: info.target.host,
+            target_port: info.target.port,
+            target_scheme: info.target.scheme,
+            url: info.url,
+            status: match info.status {
+                truffle_core::proxy::ProxyStatus::Starting => "starting".to_string(),
+                truffle_core::proxy::ProxyStatus::Running => "running".to_string(),
+                truffle_core::proxy::ProxyStatus::Stopped => "stopped".to_string(),
+                truffle_core::proxy::ProxyStatus::Error(msg) => format!("error: {msg}"),
+            },
+        }
+    }
+}
+
+/// Proxy lifecycle event, serialized for the frontend.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum ProxyEventJs {
+    Started {
+        id: String,
+        url: String,
+        listen_port: u16,
+    },
+    Stopped {
+        id: String,
+    },
+    Error {
+        id: String,
+        code: String,
+        message: String,
+    },
+}
+
+impl From<truffle_core::proxy::ProxyEvent> for ProxyEventJs {
+    fn from(e: truffle_core::proxy::ProxyEvent) -> Self {
+        use truffle_core::proxy::ProxyEvent;
+        match e {
+            ProxyEvent::Started {
+                id,
+                url,
+                listen_port,
+            } => ProxyEventJs::Started {
+                id,
+                url,
+                listen_port,
+            },
+            ProxyEvent::Stopped { id } => ProxyEventJs::Stopped { id },
+            ProxyEvent::Error { id, code, message } => ProxyEventJs::Error { id, code, message },
+        }
+    }
+}
+
 impl From<truffle_core::FileTransferEvent> for FileTransferEventJs {
     fn from(e: truffle_core::FileTransferEvent) -> Self {
         use truffle_core::FileTransferEvent;

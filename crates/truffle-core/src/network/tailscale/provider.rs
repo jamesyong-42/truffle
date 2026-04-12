@@ -15,10 +15,12 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use super::bridge::{Bridge, DIAL_TIMEOUT};
+use super::protocol::ProxyAddCommandData;
 use super::sidecar::{GoSidecar, SidecarConfig, SidecarInternalEvent};
 use crate::network::{
     HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
-    NetworkTcpListener, NodeIdentity, PeerAddr, PingResult,
+    NetworkTcpListener, NodeIdentity, PeerAddr, PingResult, ProxyAddParams, ProxyAddResult,
+    ProxyListEntry,
 };
 
 /// Configuration for creating a TailscaleProvider.
@@ -891,6 +893,168 @@ impl super::super::NetworkProvider for TailscaleProvider {
 
     async fn health(&self) -> HealthInfo {
         self.health.read().await.clone()
+    }
+
+    // ── Reverse proxy ─────────────────────────────────────────────────
+
+    async fn proxy_add(&self, config: ProxyAddParams) -> Result<ProxyAddResult, NetworkError> {
+        if *self.state.read().await != ProviderState::Running {
+            return Err(NetworkError::NotRunning);
+        }
+
+        // Scope the sidecar lock: subscribe + send command, then release
+        let mut event_rx = {
+            let sidecar_guard = self.sidecar.lock().await;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
+            let event_rx = sidecar.subscribe();
+            sidecar
+                .send_proxy_add(ProxyAddCommandData {
+                    id: config.id.clone(),
+                    name: config.name.clone(),
+                    listen_port: config.listen_port,
+                    target_host: config.target_host.clone(),
+                    target_port: config.target_port,
+                    target_scheme: config.target_scheme.clone(),
+                })
+                .await?;
+            event_rx
+        };
+
+        // Wait for confirmation or error
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(SidecarInternalEvent::ProxyAdded {
+                        id,
+                        listen_port,
+                        url,
+                    }) if id == config.id => {
+                        return Ok(ProxyAddResult {
+                            id,
+                            listen_port,
+                            url,
+                        });
+                    }
+                    Ok(SidecarInternalEvent::ProxyError { id, code, message })
+                        if id == config.id =>
+                    {
+                        return Err(NetworkError::ProxyError(format!("[{code}] {message}")));
+                    }
+                    Ok(SidecarInternalEvent::Error { code, message }) => {
+                        return Err(NetworkError::ProxyError(format!("[{code}] {message}")));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(NetworkError::SidecarError("event channel closed".into()));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return Err(NetworkError::SidecarError(
+                            "event channel lagged: proxy confirmation may have been lost".into(),
+                        ));
+                    }
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| NetworkError::ProxyError("proxy add timed out".into()))?
+    }
+
+    async fn proxy_remove(&self, id: &str) -> Result<(), NetworkError> {
+        if *self.state.read().await != ProviderState::Running {
+            return Err(NetworkError::NotRunning);
+        }
+
+        let target_id = id.to_string();
+
+        // Scope the sidecar lock: subscribe + send command, then release
+        let mut event_rx = {
+            let sidecar_guard = self.sidecar.lock().await;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
+            let event_rx = sidecar.subscribe();
+            sidecar.send_proxy_remove(id).await?;
+            event_rx
+        };
+
+        // Wait for confirmation or error
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(SidecarInternalEvent::ProxyRemoved { id }) if id == target_id => {
+                        return Ok(());
+                    }
+                    Ok(SidecarInternalEvent::ProxyError { id, code, message })
+                        if id == target_id =>
+                    {
+                        return Err(NetworkError::ProxyError(format!("[{code}] {message}")));
+                    }
+                    Ok(SidecarInternalEvent::Error { code, message }) => {
+                        return Err(NetworkError::ProxyError(format!("[{code}] {message}")));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(NetworkError::SidecarError("event channel closed".into()));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return Err(NetworkError::SidecarError(
+                            "event channel lagged: proxy confirmation may have been lost".into(),
+                        ));
+                    }
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| NetworkError::ProxyError("proxy remove timed out".into()))?
+    }
+
+    async fn proxy_list(&self) -> Result<Vec<ProxyListEntry>, NetworkError> {
+        if *self.state.read().await != ProviderState::Running {
+            return Err(NetworkError::NotRunning);
+        }
+
+        // Scope the sidecar lock: subscribe + send command, then release
+        let mut event_rx = {
+            let sidecar_guard = self.sidecar.lock().await;
+            let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
+            let event_rx = sidecar.subscribe();
+            sidecar.send_proxy_list().await?;
+            event_rx
+        };
+
+        // Wait for the list response
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match event_rx.recv().await {
+                    Ok(SidecarInternalEvent::ProxyList { proxies }) => {
+                        return Ok(proxies
+                            .into_iter()
+                            .map(|p| ProxyListEntry {
+                                id: p.id,
+                                name: p.name,
+                                listen_port: p.listen_port,
+                                target_host: p.target_host,
+                                target_port: p.target_port,
+                                target_scheme: p.target_scheme,
+                                url: p.url,
+                            })
+                            .collect());
+                    }
+                    Ok(SidecarInternalEvent::Error { code, message }) => {
+                        return Err(NetworkError::ProxyError(format!("[{code}] {message}")));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(NetworkError::SidecarError("event channel closed".into()));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        return Err(NetworkError::SidecarError(
+                            "event channel lagged: proxy confirmation may have been lost".into(),
+                        ));
+                    }
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await
+        .map_err(|_| NetworkError::ProxyError("proxy list timed out".into()))?
     }
 }
 

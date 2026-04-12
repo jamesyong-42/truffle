@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::{CrdtDoc, Node};
 
-use crate::types::{CrdtDocEventJs, FileOfferJs, FileTransferEventJs, PeerEventJs};
+use crate::types::{CrdtDocEventJs, FileOfferJs, FileTransferEventJs, PeerEventJs, ProxyEventJs};
 
 /// Spawn background tasks that forward truffle-core events to the Tauri frontend.
 ///
@@ -69,6 +69,30 @@ pub fn start_event_forwarding<R: Runtime>(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     tracing::debug!("File transfer event channel closed");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Forward ProxyEvents
+    let mut proxy_rx = node.proxy().subscribe();
+    let proxy_app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            match proxy_rx.recv().await {
+                Ok(event) => {
+                    let js_event: ProxyEventJs = event.into();
+                    if let Err(e) = proxy_app.emit("truffle://proxy-event", &js_event) {
+                        tracing::warn!("Failed to emit proxy event: {e}");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("Proxy event listener lagged, missed {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::debug!("Proxy event channel closed");
                     break;
                 }
             }

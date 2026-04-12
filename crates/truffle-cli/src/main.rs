@@ -182,6 +182,12 @@ enum Commands {
         json: bool,
     },
 
+    /// Manage reverse proxies
+    Proxy {
+        #[command(subcommand)]
+        command: commands::proxy::ProxyCommands,
+    },
+
     /// Diagnose connectivity issues
     Doctor,
 
@@ -389,6 +395,9 @@ async fn main() {
             let json = global_json || local_json;
             commands::recv::run(&config, from.as_deref(), timeout, json).await
         }
+
+        // -- Reverse Proxy --
+        Commands::Proxy { command } => commands::proxy::run(&config, command, global_json).await,
 
         // -- Diagnostics --
         Commands::Doctor => commands::doctor::run(&config, global_json).await,

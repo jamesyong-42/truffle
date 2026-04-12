@@ -78,6 +78,22 @@ pub(crate) enum SidecarInternalEvent {
     PingResult(PingResultEventData),
     /// Error from sidecar.
     Error { code: String, message: String },
+    /// A reverse proxy was successfully started.
+    ProxyAdded {
+        id: String,
+        listen_port: u16,
+        url: String,
+    },
+    /// A reverse proxy was stopped.
+    ProxyRemoved { id: String },
+    /// List of active proxies.
+    ProxyList { proxies: Vec<ProxyInfoEventData> },
+    /// A proxy encountered an error.
+    ProxyError {
+        id: String,
+        code: String,
+        message: String,
+    },
     /// Sidecar process exited unexpectedly.
     ProcessExited { exit_code: Option<i32> },
 }
@@ -400,6 +416,30 @@ impl GoSidecar {
                     code: d.code,
                     message: d.message,
                 }),
+            event_type::PROXY_ADDED => serde_json::from_value::<ProxyAddedEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::ProxyAdded {
+                    id: d.id,
+                    listen_port: d.listen_port,
+                    url: d.url,
+                }),
+            event_type::PROXY_REMOVED => {
+                serde_json::from_value::<ProxyRemovedEventData>(event.data)
+                    .ok()
+                    .map(|d| SidecarInternalEvent::ProxyRemoved { id: d.id })
+            }
+            event_type::PROXY_LIST_RESULT => {
+                serde_json::from_value::<ProxyListEventData>(event.data)
+                    .ok()
+                    .map(|d| SidecarInternalEvent::ProxyList { proxies: d.proxies })
+            }
+            event_type::PROXY_ERROR => serde_json::from_value::<ProxyErrorEventData>(event.data)
+                .ok()
+                .map(|d| SidecarInternalEvent::ProxyError {
+                    id: d.id,
+                    code: d.code,
+                    message: d.message,
+                }),
             other => {
                 tracing::debug!("unhandled sidecar event type: {other}");
                 None
@@ -521,6 +561,34 @@ impl GoSidecar {
         self.send_command(SidecarCommand {
             command: command_type::WATCH_PEERS,
             data: Some(serde_json::to_value(&data)?),
+        })
+        .await
+    }
+
+    /// Send the proxy:add command.
+    pub async fn send_proxy_add(&self, data: ProxyAddCommandData) -> Result<(), NetworkError> {
+        self.send_command(SidecarCommand {
+            command: command_type::PROXY_ADD,
+            data: Some(serde_json::to_value(&data)?),
+        })
+        .await
+    }
+
+    /// Send the proxy:remove command.
+    pub async fn send_proxy_remove(&self, id: &str) -> Result<(), NetworkError> {
+        let data = ProxyRemoveCommandData { id: id.to_string() };
+        self.send_command(SidecarCommand {
+            command: command_type::PROXY_REMOVE,
+            data: Some(serde_json::to_value(&data)?),
+        })
+        .await
+    }
+
+    /// Send the proxy:list command.
+    pub async fn send_proxy_list(&self) -> Result<(), NetworkError> {
+        self.send_command(SidecarCommand {
+            command: command_type::PROXY_LIST,
+            data: None,
         })
         .await
     }

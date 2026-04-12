@@ -61,6 +61,7 @@ pub mod file_transfer;
 pub mod identity;
 pub mod network;
 pub mod node;
+pub mod proxy;
 pub mod request_reply;
 pub mod session;
 pub mod synced_store;

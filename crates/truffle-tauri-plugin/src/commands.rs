@@ -424,3 +424,47 @@ pub async fn crdt_doc_counter_increment(
     doc.commit();
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Reverse Proxy
+// ---------------------------------------------------------------------------
+
+/// Add a reverse proxy that forwards traffic from a TLS port on the mesh
+/// to a local target.
+#[command]
+pub async fn proxy_add(
+    state: State<'_, TruffleState>,
+    config: ProxyConfigJs,
+) -> Result<ProxyInfoJs, String> {
+    let node = get_node(&state).await?;
+    let proxy = node.proxy();
+    let core_config = truffle_core::proxy::ProxyConfig {
+        id: config.id,
+        name: config.name,
+        listen_port: config.listen_port,
+        target: truffle_core::proxy::ProxyTarget {
+            host: config
+                .target_host
+                .unwrap_or_else(|| "localhost".to_string()),
+            port: config.target_port,
+            scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
+        },
+        announce: config.announce.unwrap_or(true),
+    };
+    let info = proxy.add(core_config).await.map_err(|e| e.to_string())?;
+    Ok(info.into())
+}
+
+/// Remove a reverse proxy by ID.
+#[command]
+pub async fn proxy_remove(state: State<'_, TruffleState>, id: String) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    node.proxy().remove(&id).await.map_err(|e| e.to_string())
+}
+
+/// List all active reverse proxies on this node.
+#[command]
+pub async fn proxy_list(state: State<'_, TruffleState>) -> Result<Vec<ProxyInfoJs>, String> {
+    let node = get_node(&state).await?;
+    Ok(node.proxy().list().into_iter().map(Into::into).collect())
+}
