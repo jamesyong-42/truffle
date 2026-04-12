@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.1...truffle-v0.4.2) (2026-04-12)
+
+
+### Features
+
+* **core:** add CrdtDoc — CRDT document sync via Loro (RFC 018) ([#34](https://github.com/jamesyong-42/truffle/issues/34)) ([4514793](https://github.com/jamesyong-42/truffle/commit/4514793a252e7ddf30f0d1e70ff52cb6a351e5d0))
+
 ## [0.4.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.0...truffle-v0.4.1) (2026-04-11)
 
 
