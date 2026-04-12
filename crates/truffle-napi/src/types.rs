@@ -244,6 +244,19 @@ pub struct NapiStoreEvent {
 }
 
 // ---------------------------------------------------------------------------
+// CRDT document types
+// ---------------------------------------------------------------------------
+
+/// A CRDT document change event delivered to JS.
+#[napi(object)]
+pub struct NapiCrdtDocEvent {
+    /// Event type: "local_change", "remote_change", "peer_synced", "peer_left".
+    pub event_type: String,
+    /// Peer identifier (present for remote_change, peer_synced, peer_left events).
+    pub peer_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // File transfer types
 // ---------------------------------------------------------------------------
 

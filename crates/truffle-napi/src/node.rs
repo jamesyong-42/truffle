@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::Node;
 
+use crate::crdt_doc::NapiCrdtDoc;
 use crate::file_transfer::NapiFileTransfer;
 use crate::synced_store::NapiSyncedStore;
 use crate::types::{
@@ -352,6 +353,20 @@ impl NapiNode {
     pub fn synced_store(&self, store_id: String) -> Result<NapiSyncedStore> {
         let node = self.require_node()?;
         Ok(NapiSyncedStore::new(node, &store_id))
+    }
+
+    /// Get a `NapiCrdtDoc` handle for CRDT document operations.
+    ///
+    /// Each call creates a new document instance with the given `doc_id`.
+    /// The document syncs automatically with peers on namespace `"crdt:{doc_id}"`.
+    ///
+    /// This is intentionally **synchronous** (matching `synced_store()`).
+    /// `CrdtDoc::new` is async and calls `tokio::spawn` internally; we enter
+    /// the napi-rs managed Tokio runtime so the spawn hits a live reactor.
+    #[napi]
+    pub fn crdt_doc(&self, doc_id: String) -> Result<NapiCrdtDoc> {
+        let node = self.require_node()?;
+        NapiCrdtDoc::new(node, &doc_id)
     }
 
     // -- Internal helpers ----------------------------------------------------

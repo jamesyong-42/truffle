@@ -31,12 +31,23 @@
 //! - `accept_offer(token, save_path)` — Accept a pending file offer
 //! - `reject_offer(token, reason)` — Reject a pending file offer
 //!
+//! # CRDT Document Commands
+//!
+//! - `crdt_doc_create(doc_id)` — Create a CRDT document
+//! - `crdt_doc_destroy(doc_id)` — Stop and remove a CRDT document
+//! - `crdt_doc_get_value(doc_id)` — Get the document's deep JSON value
+//! - `crdt_doc_map_insert(doc_id, container, key, value)` — Insert into a map
+//! - `crdt_doc_list_push(doc_id, container, value)` — Push to a list
+//! - `crdt_doc_text_insert(doc_id, container, pos, text)` — Insert text
+//! - `crdt_doc_counter_increment(doc_id, container, value)` — Increment a counter
+//!
 //! # Events
 //!
 //! - `truffle://peer-event` — Peer state changes
 //! - `truffle://file-transfer-event` — File transfer progress/completion
 //! - `truffle://file-offer` — Incoming file offers
 //! - `truffle://auth-required` — Authentication URL when login is needed
+//! - `truffle://crdt-change` — CRDT document change events
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,8 +56,9 @@ use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime};
 use tokio::sync::RwLock;
 
+use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
-use truffle_core::{Node, OfferResponder};
+use truffle_core::{CrdtDoc, Node, OfferResponder};
 
 pub mod commands;
 pub mod events;
@@ -62,6 +74,10 @@ pub struct TruffleState {
     /// Pending file offer responders, keyed by transfer token.
     /// Removed on accept or reject.
     pub pending_offers: Arc<RwLock<HashMap<String, OfferResponder>>>,
+    /// Active CRDT documents, keyed by document ID.
+    /// Each entry stores the doc and the handle to its event-forwarding task
+    /// so that the task can be aborted when the doc is destroyed.
+    pub crdt_docs: Arc<RwLock<HashMap<String, (Arc<CrdtDoc>, JoinHandle<()>)>>>,
 }
 
 /// Initialize the Truffle Tauri v2 plugin.
@@ -89,11 +105,19 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::auto_reject,
             commands::accept_offer,
             commands::reject_offer,
+            commands::crdt_doc_create,
+            commands::crdt_doc_destroy,
+            commands::crdt_doc_get_value,
+            commands::crdt_doc_map_insert,
+            commands::crdt_doc_list_push,
+            commands::crdt_doc_text_insert,
+            commands::crdt_doc_counter_increment,
         ])
         .setup(|app, _| {
             app.manage(TruffleState {
                 node: RwLock::new(None),
                 pending_offers: Arc::new(RwLock::new(HashMap::new())),
+                crdt_docs: Arc::new(RwLock::new(HashMap::new())),
             });
             Ok(())
         })

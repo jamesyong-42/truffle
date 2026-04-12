@@ -6,6 +6,7 @@
 //! - [`NapiNode`] — peer discovery, messaging, diagnostics
 //! - [`NapiFileTransfer`] — file send/receive/pull
 
+pub mod crdt_doc;
 pub mod file_transfer;
 pub mod node;
 pub mod synced_store;

@@ -9,9 +9,9 @@ use std::sync::Arc;
 use tauri::{command, AppHandle, Emitter, Runtime, State};
 
 use truffle_core::network::tailscale::TailscaleProvider;
-use truffle_core::{Node, NodeBuilder};
+use truffle_core::{CrdtDoc, Node, NodeBuilder};
 
-use crate::events::start_event_forwarding;
+use crate::events::{spawn_crdt_doc_events, start_event_forwarding};
 use crate::types::*;
 use crate::TruffleState;
 
@@ -277,5 +277,150 @@ pub async fn reject_offer(
         .ok_or_else(|| format!("No pending offer with token: {token}"))?;
 
     responder.reject(&reason);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CRDT Documents
+// ---------------------------------------------------------------------------
+
+/// Helper: get a clone of the Arc<CrdtDoc> from state, or error.
+async fn get_crdt_doc(state: &TruffleState, doc_id: &str) -> Result<Arc<CrdtDoc>, String> {
+    state
+        .crdt_docs
+        .read()
+        .await
+        .get(doc_id)
+        .map(|(doc, _handle)| doc.clone())
+        .ok_or_else(|| format!("No CRDT doc with id: {doc_id}"))
+}
+
+/// Create a new CRDT document and start background sync.
+///
+/// The document is stored in state and can be accessed by `doc_id`.
+/// Events are forwarded to the frontend via `truffle://crdt-change`.
+#[command]
+pub async fn crdt_doc_create<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, TruffleState>,
+    doc_id: String,
+) -> Result<(), String> {
+    // Check if doc already exists
+    if state.crdt_docs.read().await.contains_key(&doc_id) {
+        return Err(format!("CRDT doc already exists: {doc_id}"));
+    }
+
+    let node = get_node(&state).await?;
+    let doc = CrdtDoc::new(node, &doc_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Start event forwarding for this doc and keep the handle so we can
+    // abort the task when the doc is destroyed.
+    let handle = spawn_crdt_doc_events(app, doc.clone());
+
+    state.crdt_docs.write().await.insert(doc_id, (doc, handle));
+    Ok(())
+}
+
+/// Stop and remove a CRDT document.
+#[command]
+pub async fn crdt_doc_destroy(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+) -> Result<(), String> {
+    let (doc, handle) = state
+        .crdt_docs
+        .write()
+        .await
+        .remove(&doc_id)
+        .ok_or_else(|| format!("No CRDT doc with id: {doc_id}"))?;
+
+    // Abort the event-forwarding task first so no stale events are emitted.
+    handle.abort();
+    doc.stop().await;
+    Ok(())
+}
+
+/// Get the deep JSON value of a CRDT document.
+#[command]
+pub async fn crdt_doc_get_value(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+) -> Result<serde_json::Value, String> {
+    let doc = get_crdt_doc(&state, &doc_id).await?;
+    let loro_value = doc.get_deep_value();
+    serde_json::to_value(loro_value).map_err(|e| e.to_string())
+}
+
+/// Insert a key-value pair into a map container.
+#[command]
+pub async fn crdt_doc_map_insert(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+    container: String,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let doc = get_crdt_doc(&state, &doc_id).await?;
+    let loro_value: loro::LoroValue = value.into();
+    doc.with_doc(|d| {
+        let map = d.get_map(container.as_str());
+        map.insert(&key, loro_value).map_err(|e| e.to_string())
+    })?;
+    doc.commit();
+    Ok(())
+}
+
+/// Push a value to a list container.
+#[command]
+pub async fn crdt_doc_list_push(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+    container: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let doc = get_crdt_doc(&state, &doc_id).await?;
+    let loro_value: loro::LoroValue = value.into();
+    doc.with_doc(|d| {
+        let list = d.get_list(container.as_str());
+        list.push(loro_value).map_err(|e| e.to_string())
+    })?;
+    doc.commit();
+    Ok(())
+}
+
+/// Insert text at a position in a text container.
+#[command]
+pub async fn crdt_doc_text_insert(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+    container: String,
+    pos: u32,
+    text: String,
+) -> Result<(), String> {
+    let doc = get_crdt_doc(&state, &doc_id).await?;
+    doc.with_doc(|d| {
+        let t = d.get_text(container.as_str());
+        t.insert(pos as usize, &text).map_err(|e| e.to_string())
+    })?;
+    doc.commit();
+    Ok(())
+}
+
+/// Increment a counter container by a value.
+#[command]
+pub async fn crdt_doc_counter_increment(
+    state: State<'_, TruffleState>,
+    doc_id: String,
+    container: String,
+    value: f64,
+) -> Result<(), String> {
+    let doc = get_crdt_doc(&state, &doc_id).await?;
+    doc.with_doc(|d| {
+        let counter = d.get_counter(container.as_str());
+        counter.increment(value).map_err(|e| e.to_string())
+    })?;
+    doc.commit();
     Ok(())
 }

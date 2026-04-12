@@ -6,3 +6,4 @@ export {
   type Slice,
   type StoreEvent,
 } from './use-synced-store.js';
+export { useCrdtDoc, type UseCrdtDocResult } from './use-crdt-doc.js';

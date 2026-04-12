@@ -26,6 +26,9 @@ quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.13"
 sha2 = "0.10"
+# RFC 018: CRDT documents
+loro = { version = "1", features = ["counter"] }
+base64 = "0.22"
 # RFC 017: identity and namespacing
 ulid = "1"
 dirs = "5"

@@ -14,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 truffle-core = { path = "../truffle-core" }
+loro = { version = "1", features = ["counter"] }
 tauri = { version = "2", features = [] }
 tauri-plugin = { version = "2", features = ["build"] }
 serde = { version = "1", features = ["derive"] }
