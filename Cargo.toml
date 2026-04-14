@@ -34,7 +34,7 @@ all = { level = "warn", priority = -1 }
 [workspace.dependencies]
 # Async runtime & utilities
 tokio = { version = "1" }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
 
