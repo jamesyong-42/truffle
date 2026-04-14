@@ -48,9 +48,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v6
         with:
           go-version: '1.25'
           cache-dependency-path: packages/sidecar-slim/go.sum
@@ -80,7 +80,7 @@ jobs:
           chmod +x npm/${{ matrix.npm_pkg }}/bin/${{ matrix.bin_name }} || true
 
       - name: Upload npm package artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v5
         with:
           name: ${{ matrix.npm_pkg }}
           path: npm/${{ matrix.npm_pkg }}
@@ -95,11 +95,11 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v5
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
         with:
           node-version: 24
           package-manager-cache: false
@@ -109,7 +109,7 @@ jobs:
           echo "npm version: $(npm --version)"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@d3f86a106a0bac45b974e514e0d25fa0f7781ea2 # v5
         with:
           path: artifacts
 

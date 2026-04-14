@@ -1,0 +1,18 @@
+# Default owner for everything
+* @jamesyong-42
+
+# Rust crates
+/crates/ @jamesyong-42
+/Cargo.toml @jamesyong-42
+/Cargo.lock @jamesyong-42
+
+# Go sidecar
+/packages/sidecar-slim/ @jamesyong-42
+
+# CI/CD and project config
+/.github/ @jamesyong-42
+/deny.toml @jamesyong-42
+
+# Documentation
+/docs/ @jamesyong-42
+/SECURITY.md @jamesyong-42
