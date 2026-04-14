@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.4...truffle-v0.4.5) (2026-04-14)
+
+
+### Bug Fixes
+
+* **ci:** update stale actions/download-artifact SHA pin ([3e3eb4a](https://github.com/jamesyong-42/truffle/commit/3e3eb4a13393f3589c408c972f92434a92f86313))
+
 ## [0.4.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.3...truffle-v0.4.4) (2026-04-14)
 
 
