@@ -14,10 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
 
-      - uses: pnpm/action-setup@f3d73ada1fa6e5c0c19973ff70a3f5cabf225cc5 # v6
-        with:
-          version: '10.20.0'
-          standalone: true
+      - name: Install pnpm
+        run: npm install -g pnpm@10.20.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
         with:
