@@ -86,7 +86,7 @@ zip = "2"
 tempfile = "3"
 
 # System / platform
-dirs = "5"
+dirs = "6"
 hostname = "0.4"
 open = "5"
 libc = "0.2"
