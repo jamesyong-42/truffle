@@ -33,6 +33,30 @@ jobs:
       - name: Test
         run: pnpm run test
 
+  cargo-lint:
+    name: Rust lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+
+      - name: Doc warnings
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+
   cargo-test:
     name: Rust tests (${{ matrix.os }})
     strategy:
@@ -45,6 +69,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install Go toolchain
         uses: actions/setup-go@v6
@@ -68,5 +94,11 @@ jobs:
           if (!(Test-Path bin)) { New-Item -ItemType Directory -Path bin }
           go build -ldflags "-s -w" -o bin/sidecar-slim.exe .
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cargo test
-        run: cargo test --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+        run: cargo nextest run --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+
+      - name: Doc tests
+        run: cargo test --doc --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
