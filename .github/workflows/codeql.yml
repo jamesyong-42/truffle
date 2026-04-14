@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@28ef790fc820e77db30cb6f41509e8e813e0960c # v3
+        uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v4
         with:
           languages: ${{ matrix.language }}
 
@@ -50,9 +50,9 @@ jobs:
 
       - name: Autobuild
         if: matrix.language != 'go'
-        uses: github/codeql-action/autobuild@28ef790fc820e77db30cb6f41509e8e813e0960c # v3
+        uses: github/codeql-action/autobuild@c10b8064de6f491fea524254123dbe5e09572f13 # v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@28ef790fc820e77db30cb6f41509e8e813e0960c # v3
+        uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4
         with:
           category: "/language:${{ matrix.language }}"

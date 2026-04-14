@@ -1,4 +1,4 @@
-//! /cp <path> @device[:/dest] — file transfer.
+//! `/cp <path> @device[:/dest]` — file transfer.
 //!
 //! Syntax: /cp report.pdf @server
 //!         /cp report.pdf @server:/tmp/
@@ -147,7 +147,7 @@ pub async fn execute(
     CommandResult::Handled
 }
 
-/// Parse "/cp <path> @device[:/dest]".
+/// Parse `/cp <path> @device[:/dest]`.
 fn parse_cp_args(args: &str) -> Option<(String, String, String)> {
     let args = args.trim();
     if args.is_empty() {

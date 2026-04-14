@@ -1,4 +1,4 @@
-//! /send <message> @device — send a chat message to a peer.
+//! `/send <message> @device` — send a chat message to a peer.
 //!
 //! Syntax: /send hello world @server
 //! The message is everything before the last @device token.
@@ -65,7 +65,7 @@ pub async fn execute(args: &str, app: &mut AppState) -> CommandResult {
     }
 }
 
-/// Parse "/send <message> @device" — message is everything before the last @token.
+/// Parse `/send <message> @device` — message is everything before the last @token.
 ///
 /// The last whitespace-separated token starting with `@` is the device.
 /// Everything before it is the message.

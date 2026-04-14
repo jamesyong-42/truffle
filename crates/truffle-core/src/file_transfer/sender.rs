@@ -4,7 +4,7 @@
 //! 2. Send OFFER via WS
 //! 3. Wait for ACCEPT (with tcp_port)
 //! 4. Open raw TCP stream to the port advertised in ACCEPT
-//! 5. Stream [size][sha256][file_bytes] in 64KB chunks
+//! 5. Stream `[size][sha256][file_bytes]` in 64KB chunks
 //! 6. Read ACK
 
 use std::time::Instant;

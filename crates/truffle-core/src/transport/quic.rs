@@ -33,7 +33,7 @@
 //!
 //! When connected to a [`NetworkProvider`] that supports UDP (e.g.,
 //! [`TailscaleProvider`](crate::network::tailscale::TailscaleProvider)),
-//! the transport uses [`TsnetUdpSocket`](super::quic_socket::TsnetUdpSocket)
+//! the transport uses [`TsnetUdpSocket`]
 //! to route QUIC datagrams through the tsnet relay instead of creating
 //! a direct host-network socket. This enables QUIC over userspace Tailscale
 //! (tsnet) where the host UDP socket cannot reach peers.

@@ -1,5 +1,5 @@
 //! QUIC socket adapter for tsnet — bridges quinn's [`AsyncUdpSocket`] to
-//! [`NetworkUdpSocket`](crate::network::NetworkUdpSocket).
+//! [`NetworkUdpSocket`].
 //!
 //! # Problem
 //!
