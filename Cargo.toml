@@ -98,7 +98,7 @@ unicode-width = "0.2"
 deunicode = "1"
 
 # Misc
-toml = "0.9"
+toml = "1.1"
 
 # NAPI
 napi = { version = "3", features = ["async", "napi4", "tokio_rt", "serde-json"] }
