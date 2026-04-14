@@ -61,7 +61,8 @@ jobs:
       # manager is missing. We also disable `package-manager-cache` because
       # this job uses `npm install`, not pnpm — leaving the auto-cache on
       # causes the post-step to fail when the pnpm store path doesn't exist.
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v5
+      - name: Install pnpm
+        run: npm install -g pnpm@10.20.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
         with:
@@ -113,7 +114,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
 
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v5
+      - name: Install pnpm
+        run: npm install -g pnpm@10.20.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
         with:
@@ -146,7 +148,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
 
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v5
+      - name: Install pnpm
+        run: npm install -g pnpm@10.20.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
         with:
