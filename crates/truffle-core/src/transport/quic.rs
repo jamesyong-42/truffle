@@ -101,14 +101,14 @@ fn generate_self_signed_cert() -> Result<
     ),
     TransportError,
 > {
-    let rcgen::CertifiedKey { cert, key_pair } =
+    let rcgen::CertifiedKey { cert, signing_key } =
         rcgen::generate_simple_self_signed(vec!["truffle".to_string(), "localhost".to_string()])
             .map_err(|e| {
                 TransportError::ConnectFailed(format!("generate self-signed cert: {e}"))
             })?;
 
     let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
-    let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
+    let key_der = rustls::pki_types::PrivateKeyDer::try_from(signing_key.serialize_der())
         .map_err(|e| TransportError::ConnectFailed(format!("serialize private key: {e}")))?;
 
     Ok((cert_der, key_der))
