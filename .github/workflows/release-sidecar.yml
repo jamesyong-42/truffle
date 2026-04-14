@@ -80,7 +80,7 @@ jobs:
           chmod +x npm/${{ matrix.npm_pkg }}/bin/${{ matrix.bin_name }} || true
 
       - name: Upload npm package artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5
         with:
           name: ${{ matrix.npm_pkg }}
           path: npm/${{ matrix.npm_pkg }}
