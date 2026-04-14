@@ -128,7 +128,7 @@ jobs:
           npm install
 
       - name: Download artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974e514e0d25fa0f7781ea2 # v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: bindings-${{ matrix.settings.target }}
           path: crates/truffle-napi
@@ -168,7 +168,7 @@ jobs:
           npm install
 
       - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974e514e0d25fa0f7781ea2 # v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: crates/truffle-napi/artifacts
 
