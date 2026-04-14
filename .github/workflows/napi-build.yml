@@ -64,7 +64,7 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm@10.20.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v5
         with:
           node-version: 22
           package-manager-cache: false
@@ -117,7 +117,7 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm@10.20.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v5
         with:
           node-version: 22
           package-manager-cache: false
@@ -151,7 +151,7 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm@10.20.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v5
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v5
         with:
           node-version: 24
           # This job uses `npm install` under crates/truffle-napi, not pnpm,
