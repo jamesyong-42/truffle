@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.4](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.3...truffle-v0.4.4) (2026-04-14)
+
+
+### Features
+
+* CI/CD hardening — cargo-deny in CI, security audit workflow, CodeQL, PR template, CODEOWNERS, SHA-pinned actions ([#38](https://github.com/jamesyong-42/truffle/issues/38)) ([65591c8](https://github.com/jamesyong-42/truffle/commit/65591c8357e1e384e713e62bd9b7ec7f2dae44af))
+
+
+### Bug Fixes
+
+* **ci:** bump Go toolchain to 1.26 for tailscale 1.96.5 compatibility ([0320bcd](https://github.com/jamesyong-42/truffle/commit/0320bcdafff92d2ed7e55b24afe888b223cfcf20))
+* **ci:** bump Go toolchain to 1.26 in codeql.yml ([948221f](https://github.com/jamesyong-42/truffle/commit/948221fa49eebb53b85b83c06c3efe54713209bf))
+* **ci:** pnpm/action-setup v6 + vite 8 compatibility ([#67](https://github.com/jamesyong-42/truffle/issues/67)) ([debbfb2](https://github.com/jamesyong-42/truffle/commit/debbfb2dc03dcd02086162c99458cbafbaf96432))
+* **ci:** update broken action SHA pins for release-please and deploy-pages ([6dd3147](https://github.com/jamesyong-42/truffle/commit/6dd314790779716a0ea8044ddfa049081a7fe034))
+
 ## [0.4.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.2...truffle-v0.4.3) (2026-04-12)
 
 
