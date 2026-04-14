@@ -124,7 +124,7 @@ pub enum AutocompleteKind {
 /// Phase of the file transfer dialog.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransferDialogPhase {
-    /// Main [a][s][r][d] prompt.
+    /// Main `[a][s][r][d]` prompt.
     Prompt,
     /// Editing the save path.
     SaveAs,

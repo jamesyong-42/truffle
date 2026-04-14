@@ -50,7 +50,7 @@ pub struct ProxyInfo {
     pub name: String,
     pub listen_port: u16,
     pub target: ProxyTarget,
-    /// Fully qualified URL (e.g. "https://hostname.ts.net:3001")
+    /// Fully qualified URL (e.g. "<https://hostname.ts.net:3001>")
     pub url: String,
     pub status: ProxyStatus,
 }

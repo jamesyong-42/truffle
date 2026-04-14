@@ -3,7 +3,7 @@
 //! This module defines the [`NetworkProvider`] trait, the public API for Layer 3.
 //! The trait is generic — no Tailscale-specific types leak through.
 //!
-//! The [`tailscale`] submodule contains the [`TailscaleProvider`] implementation
+//! The [`tailscale`] submodule contains the [`TailscaleProvider`](tailscale::TailscaleProvider) implementation
 //! that wraps the Go sidecar (tsnet) and bridge.
 
 pub mod tailscale;
@@ -450,7 +450,7 @@ pub struct ProxyAddResult {
     pub id: String,
     /// Actual listen port (may differ from requested if 0 was passed).
     pub listen_port: u16,
-    /// Fully qualified URL (e.g., "https://hostname.ts.net:3001").
+    /// Fully qualified URL (e.g., "<https://hostname.ts.net:3001>").
     pub url: String,
 }
 

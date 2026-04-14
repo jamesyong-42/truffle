@@ -1,43 +1,47 @@
 [package]
 name = "truffle-core"
 version = "0.4.3" # x-release-please-version
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "Truffle mesh networking core (clean architecture)"
-license = "MIT"
-repository = "https://github.com/jamesyong-42/truffle"
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "truffle_core"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs", "process"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-hex = "0.4"
-getrandom = "0.2"
-subtle = "2"
-uuid = { version = "1", features = ["v4"] }
-thiserror = "2"
-tokio-tungstenite = "0.28"
-futures-util = { version = "0.3", features = ["sink"] }
-quinn = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-rcgen = "0.13"
-sha2 = "0.10"
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time", "fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+sha2.workspace = true
 # RFC 018: CRDT documents
-loro = { version = "1", features = ["counter"] }
-base64 = "0.22"
+loro.workspace = true
+base64.workspace = true
 # RFC 017: identity and namespacing
-ulid = "1"
-dirs = "5"
-unicode-normalization = "0.1"
-deunicode = "1"
-blake3 = "1"
-hostname = "0.4"
+ulid.workspace = true
+dirs.workspace = true
+unicode-normalization.workspace = true
+deunicode.workspace = true
+blake3.workspace = true
+hostname.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tracing-subscriber.workspace = true
+tempfile.workspace = true

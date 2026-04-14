@@ -1,6 +1,6 @@
 //! Tailscale network provider implementation.
 //!
-//! This module contains `TailscaleProvider`, which implements [`NetworkProvider`]
+//! This module contains `TailscaleProvider`, which implements [`NetworkProvider`](super::NetworkProvider)
 //! using a Go sidecar (tsnet) and a local TCP bridge for data plane connections.
 //!
 //! ## Internal architecture (Layers 1-2, invisible above Layer 3)

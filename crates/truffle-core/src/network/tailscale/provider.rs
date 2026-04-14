@@ -60,7 +60,7 @@ enum ProviderState {
     Stopping,
 }
 
-/// Tailscale network provider implementing [`NetworkProvider`].
+/// Tailscale network provider implementing [`NetworkProvider`](crate::network::NetworkProvider).
 ///
 /// Wraps the Go sidecar (tsnet) and local TCP bridge to provide:
 /// - Peer discovery via WatchIPNBus events
@@ -117,7 +117,7 @@ pub struct TailscaleProvider {
 impl TailscaleProvider {
     /// Create a new TailscaleProvider with the given configuration.
     ///
-    /// Does not start the provider — call [`start()`](NetworkProvider::start) to begin.
+    /// Does not start the provider — call [`start()`](crate::network::NetworkProvider::start) to begin.
     pub fn new(config: TailscaleConfig) -> Self {
         let (peer_event_tx, _) = broadcast::channel(256);
 

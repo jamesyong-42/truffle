@@ -1,12 +1,16 @@
 [package]
 name = "truffle"
 version = "0.4.3" # x-release-please-version
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "P2P mesh networking for your devices, built on Tailscale"
-license = "MIT"
-repository = "https://github.com/jamesyong-42/truffle"
+license.workspace = true
+repository.workspace = true
 keywords = ["mesh", "networking", "p2p", "tailscale"]
 categories = ["network-programming"]
+
+[lints]
+workspace = true
 
 [dependencies]
 truffle-core = { version = "0.4.3", path = "../truffle-core" }       # x-release-please-version

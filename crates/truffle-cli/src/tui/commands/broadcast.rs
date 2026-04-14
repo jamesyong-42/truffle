@@ -1,4 +1,4 @@
-//! /broadcast <message> — send a message to all online peers.
+//! `/broadcast <message>` — send a message to all online peers.
 
 use crate::apps::messaging;
 use crate::tui::app::{AppState, DisplayItem, SystemLevel};

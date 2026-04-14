@@ -1,4 +1,4 @@
-//! Envelope codecs — pluggable serialization for [`Envelope`](super::Envelope).
+//! Envelope codecs — pluggable serialization for [`Envelope`].
 //!
 //! The default codec is [`JsonCodec`], which produces human-readable JSON.
 //! Future codecs (MessagePack, Protobuf) can be added by implementing the

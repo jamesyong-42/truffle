@@ -15,9 +15,9 @@
 //! # Layer rules
 //!
 //! - Layer 4 does NOT know about peers, sessions, or envelopes
-//! - Layer 4 works with [`PeerAddr`](crate::network::PeerAddr) (IP + hostname),
+//! - Layer 4 works with [`PeerAddr`] (IP + hostname),
 //!   not peer IDs
-//! - All transports delegate raw networking to Layer 3's [`NetworkProvider`]
+//! - All transports delegate raw networking to Layer 3's [`NetworkProvider`](crate::network::NetworkProvider)
 //! - The [`FramedStream`] trait is what Layer 5 (Session) will consume
 
 pub mod quic;
@@ -120,7 +120,7 @@ pub trait RawTransport: Send + Sync {
 ///
 /// When backed by a [`NetworkProvider`](crate::network::NetworkProvider) that
 /// supports UDP (e.g., `TailscaleProvider`), the transport delegates to
-/// `NetworkProvider::bind_udp` and wraps the returned [`NetworkUdpSocket`]
+/// `NetworkProvider::bind_udp` and wraps the returned [`NetworkUdpSocket`](crate::network::NetworkUdpSocket)
 /// in a [`DatagramSocket`].
 #[allow(async_fn_in_trait)]
 pub trait DatagramTransport: Send + Sync {

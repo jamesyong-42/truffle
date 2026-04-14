@@ -1,14 +1,18 @@
 [package]
 name = "truffle-sidecar"
 version = "0.4.3" # x-release-please-version
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "Auto-downloads the truffle mesh networking sidecar binary at build time"
-license = "MIT"
-repository = "https://github.com/jamesyong-42/truffle"
+license.workspace = true
+repository.workspace = true
 build = "build.rs"
 
+[lints]
+workspace = true
+
 [build-dependencies]
-ureq = "3"
-flate2 = "1"
-tar = "0.4"
-zip = "2"
+ureq.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true

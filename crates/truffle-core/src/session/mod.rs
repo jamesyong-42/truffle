@@ -2,7 +2,7 @@
 //!
 //! The [`PeerRegistry`] is the central component. It consumes peer discovery
 //! events from Layer 3 ([`NetworkProvider`]) and manages transport connections
-//! from Layer 4 ([`StreamTransport`], [`RawTransport`]).
+//! from Layer 4 ([`StreamTransport`], [`RawTransport`](crate::transport::RawTransport)).
 //!
 //! # Layer rules
 //!

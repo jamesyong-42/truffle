@@ -1,0 +1,41 @@
+name: Security Audit
+
+on:
+  # Run on PRs that touch dependency files
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+  # Scheduled weekly scan (catches new advisories against existing deps)
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday at 06:00 UTC
+  # Allow manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (licenses, advisories, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  cargo-audit:
+    name: cargo-audit (vulnerability DB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo-audit
+        run: cargo audit
