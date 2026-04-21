@@ -165,8 +165,8 @@ importers:
         specifier: ^0.4.3
         version: 0.4.3
       '@vibecook/truffle-sidecar-win32-x64':
-        specifier: ^0.3.0
-        version: 0.3.23
+        specifier: ^0.4.5
+        version: 0.4.5
 
   packages/react:
     dependencies:
@@ -2166,8 +2166,14 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@vibecook/truffle-sidecar-win32-x64@0.3.23':
-    resolution: {integrity: sha512-I6KSn2JD7kJctDvLpdYOB2K+XRdMzLlLtA1hOeL/LaEDYqoCftJZRs8zoyySGjWvYHmI2dPOCEnsDKNS8R04BQ==}
+  '@vibecook/truffle-sidecar-win32-x64@0.3.25':
+    resolution: {integrity: sha512-7dQhYxNfgAFntPVcRmGLLjftl4QleS/ciA2TyeFQDqmySjM/r8VhwbhIDMUP1d3w2IJTGAn4GXqDVaxMwX89kQ==}
+    engines: {node: '>=18'}
+    cpu: [x64]
+    os: [win32]
+
+  '@vibecook/truffle-sidecar-win32-x64@0.4.5':
+    resolution: {integrity: sha512-WuJ/zLvIBSx53dSDh9hekRG+TZAe9lNHY5n9jNVgGt5GqqULcCimSFyKUbe8TihAztPetJbIVxPhII5mRmW2Uw==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
@@ -2316,6 +2322,7 @@ packages:
   '@xmldom/xmldom@0.8.12':
     resolution: {integrity: sha512-9k/gHF6n/pAi/9tqr3m3aqkuiNosYTurLLUtc7xQ9sxB/wm7WPygCv8GYa6mS0fLJEHhqMC1ATYhz++U/lRHqg==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   abbrev@1.1.1:
     resolution: {integrity: sha512-nne9/IiQ/hzIhY6pdDnbBtz7DjPTKrY00P/zvPSm5pOFkl6xuGrGnXn/VtTNNfNtAfZ9/1RtehkszU9qcTii0Q==}
@@ -6455,7 +6462,10 @@ snapshots:
   '@vibecook/truffle-sidecar-linux-x64@0.4.3':
     optional: true
 
-  '@vibecook/truffle-sidecar-win32-x64@0.3.23':
+  '@vibecook/truffle-sidecar-win32-x64@0.3.25':
+    optional: true
+
+  '@vibecook/truffle-sidecar-win32-x64@0.4.5':
     optional: true
 
   '@vibecook/truffle@0.4.0':
@@ -6466,7 +6476,7 @@ snapshots:
       '@vibecook/truffle-sidecar-darwin-x64': 0.3.25
       '@vibecook/truffle-sidecar-linux-arm64': 0.3.23
       '@vibecook/truffle-sidecar-linux-x64': 0.3.25
-      '@vibecook/truffle-sidecar-win32-x64': 0.3.23
+      '@vibecook/truffle-sidecar-win32-x64': 0.3.25
 
   '@vitejs/plugin-react@6.0.1(vite@8.0.8(@types/node@25.6.0)(esbuild@0.27.7)(jiti@2.6.1)(tsx@4.21.0))':
     dependencies:
