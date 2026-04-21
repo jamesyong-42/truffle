@@ -55,7 +55,7 @@
   "optionalDependencies": {
     "@vibecook/truffle-sidecar-darwin-arm64": "^0.3.0",
     "@vibecook/truffle-sidecar-darwin-x64": "^0.4.3",
-    "@vibecook/truffle-sidecar-linux-x64": "^0.4.3",
+    "@vibecook/truffle-sidecar-linux-x64": "^0.4.5",
     "@vibecook/truffle-sidecar-linux-arm64": "^0.3.0",
     "@vibecook/truffle-sidecar-win32-x64": "^0.3.0"
   },
