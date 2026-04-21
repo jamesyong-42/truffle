@@ -100,8 +100,9 @@ pub async fn run(args: Args, authkey: &str, out_dir: &str) -> anyhow_lite::Resul
     for i in 0..total_runs {
         let is_warmup = i < args.warmup;
         let label = if is_warmup { "warmup" } else { "measure" };
-        let remote_name = format!("transfer-{i}.bin");
 
+        // Pass "." so auto_accept resolves to `{output_dir}/{file_name}` rather
+        // than a relative path interpreted against the receiver's CWD.
         let t0 = Instant::now();
         let r = pair
             .alpha
@@ -109,7 +110,7 @@ pub async fn run(args: Args, authkey: &str, out_dir: &str) -> anyhow_lite::Resul
             .send_file(
                 &pair.beta_device_id,
                 src_path.to_str().expect("utf8 path"),
-                &remote_name,
+                ".",
             )
             .await
             .map_err(|e| anyhow_lite::Error(format!("send_file failed: {e}")))?;
