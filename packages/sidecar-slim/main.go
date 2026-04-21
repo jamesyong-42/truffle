@@ -834,10 +834,15 @@ func (s *shim) handleListen(data json.RawMessage) {
 		// parsing the address string in that case.
 		actualPort := d.Port
 		if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
-			actualPort = uint16(tcpAddr.Port)
+			if tcpAddr.Port > 0 && tcpAddr.Port <= 65535 {
+				actualPort = uint16(tcpAddr.Port)
+			}
 		} else {
 			if _, portStr, err := net.SplitHostPort(ln.Addr().String()); err == nil {
-				if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+				// Bounded parse: ports are always in [1, 65535]; anything
+				// outside that is a sidecar bug we'd rather surface as
+				// "listen confirmation timed out" on the Rust side.
+				if p, err := strconv.ParseUint(portStr, 10, 16); err == nil && p > 0 {
 					actualPort = uint16(p)
 				}
 			}
