@@ -48,7 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Crypto & hashing
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 blake3 = "1"
 subtle = "2"
