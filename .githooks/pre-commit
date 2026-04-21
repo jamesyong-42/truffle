@@ -233,4 +233,15 @@ if [ "$ts_build_relevant" -eq 1 ]; then
   fi
 fi
 
+# ───────────────────────────────────────────────────────────────
+# Check 7: Secret scan — catch accidental Tailscale auth keys
+# (RFC 019 §5.3). Delegated to scripts/check-for-secrets.sh so the
+# pattern list can evolve without touching this hook.
+# ───────────────────────────────────────────────────────────────
+if [ -x scripts/check-for-secrets.sh ]; then
+  if ! scripts/check-for-secrets.sh; then
+    fail=1
+  fi
+fi
+
 exit "$fail"

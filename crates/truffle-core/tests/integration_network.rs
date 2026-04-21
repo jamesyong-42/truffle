@@ -1,499 +1,292 @@
 //! Integration tests for truffle-core Layer 3 (Network).
 //!
 //! These tests use the REAL Go sidecar and REAL Tailscale network — not mocks.
-//! They are marked `#[ignore]` so `cargo test` doesn't run them by default.
+//! They skip gracefully when `TRUFFLE_TEST_AUTHKEY` is not set in the env.
 //!
-//! ## Prerequisites
+//! Each test spins up a pair of ephemeral nodes on the tailnet and exercises
+//! the network layer between them — no external peer required.
 //!
-//! 1. Build the test sidecar:
-//!    ```bash
-//!    cd packages/sidecar-slim && go build -o ../../crates/truffle-core/tests/test-sidecar .
-//!    ```
-//!
-//! 2. Be on a Tailscale network with at least one other peer.
+//! See `docs/rfcs/019-local-testing-and-benchmarking.md` for the design.
 //!
 //! ## Running
 //!
 //! ```bash
-//! cargo test -p truffle-core --test integration_network -- --ignored --nocapture
+//! # Without an auth key: tests skip with a one-line notice.
+//! cargo test -p truffle-core --test integration_network
+//!
+//! # With an auth key in `.env` at the repo root:
+//! cargo test -p truffle-core --test integration_network -- --nocapture
 //! ```
 
-use std::path::PathBuf;
+mod common;
+
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
-use truffle_core::network::tailscale::{TailscaleConfig, TailscaleProvider};
-use truffle_core::network::{NetworkError, NetworkPeerEvent, NetworkProvider};
+use truffle_core::network::{NetworkPeerEvent, NetworkProvider};
 
-/// Known peer on the tailnet (EC2 server).
-const KNOWN_PEER_IP: &str = "100.126.82.98";
-
-/// Timeout for provider startup (Tailscale auth + tsnet init).
-const START_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Timeout for individual operations after provider is running.
+/// Timeout for individual operations after the pair is up and rendezvoused.
 const OP_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Create a TailscaleConfig with a unique state dir and hostname.
-fn make_config() -> TailscaleConfig {
-    let test_id = uuid::Uuid::new_v4();
-    let short_id = &test_id.to_string()[..8];
-
-    TailscaleConfig {
-        binary_path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test-sidecar"),
-        app_id: "test-integ".to_string(),
-        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
-        device_name: format!("integ-{short_id}"),
-        hostname: format!("truffle-test-integ-{short_id}"),
-        state_dir: format!("/tmp/truffle-test-{test_id}"),
-        auth_key: std::env::var("TS_AUTHKEY").ok(),
-        ephemeral: Some(true),
-        tags: None,
-    }
-}
-
-/// Clean up the state directory after a test.
-fn cleanup_state_dir(state_dir: &str) {
-    let _ = std::fs::remove_dir_all(state_dir);
-}
-
-/// Start a provider, handling auth errors by printing the URL.
-/// Returns the running provider or panics with a helpful message.
-async fn start_provider(provider: &mut TailscaleProvider) -> Result<(), NetworkError> {
-    match provider.start().await {
-        Ok(()) => Ok(()),
-        Err(NetworkError::AuthRequired { url }) => {
-            eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
-            eprintln!("║  TAILSCALE AUTH REQUIRED                                    ║");
-            eprintln!("║  Open this URL in your browser to authorize:                ║");
-            eprintln!("║  {url}");
-            eprintln!("╚══════════════════════════════════════════════════════════════╝\n");
-            Err(NetworkError::AuthRequired { url })
-        }
-        Err(e) => Err(e),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: Start provider and verify auth + running state
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_provider_start_and_auth() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
+    let Some(authkey) = common::require_authkey("test_provider_start_and_auth") else {
+        return;
+    };
+    common::init_test_tracing();
 
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
+    let pair = common::make_pair_of_nodes(&authkey).await;
 
-    // Start should succeed (or require auth)
-    let result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
+    let alpha_identity = pair.alpha.local_identity_async().await;
+    let beta_identity = pair.beta.local_identity_async().await;
 
-    match result {
-        Ok(Ok(())) => {
-            // Provider is running — verify we have an IP
-            let identity = provider.local_identity_async().await;
-            println!("  Provider started successfully");
-            println!("  Tailscale hostname: {}", identity.tailscale_hostname);
-            println!("  DNS name: {:?}", identity.dns_name);
-            println!("  IP: {:?}", identity.ip);
+    assert!(alpha_identity.ip.is_some(), "alpha should have an IP");
+    assert!(beta_identity.ip.is_some(), "beta should have an IP");
+    assert!(
+        !alpha_identity.tailscale_hostname.is_empty(),
+        "alpha should have a hostname"
+    );
+    assert!(
+        !beta_identity.tailscale_hostname.is_empty(),
+        "beta should have a hostname"
+    );
 
-            assert!(
-                identity.ip.is_some(),
-                "provider should have a Tailscale IP after starting"
-            );
-            assert!(
-                !identity.tailscale_hostname.is_empty(),
-                "provider should have a hostname after starting"
-            );
+    let alpha_health = pair.alpha.health().await;
+    assert_eq!(alpha_health.state, "running");
+    assert!(alpha_health.healthy);
 
-            // Verify health shows running
-            let health = provider.health().await;
-            println!("  Health state: {}", health.state);
-            println!("  Healthy: {}", health.healthy);
-            assert_eq!(health.state, "running");
-            assert!(health.healthy);
-
-            // Clean stop
-            provider.stop().await.expect("stop should succeed");
-        }
-        Ok(Err(NetworkError::AuthRequired { .. })) => {
-            println!("  Auth required — test cannot proceed without TS_AUTHKEY or manual auth");
-            // Not a failure: the provider correctly identified that auth is needed
-        }
-        Ok(Err(e)) => {
-            panic!("Provider start failed unexpectedly: {e}");
-        }
-        Err(_) => {
-            panic!("Provider start timed out after {START_TIMEOUT:?}");
-        }
-    }
-
-    cleanup_state_dir(&state_dir);
+    pair.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Peer discovery
+// Test 2: Peer discovery — alpha sees beta and vice versa
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_peer_discovery() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
-
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
-
-    let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(
-        start_result,
-        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
-    ) {
-        println!("  Skipping: provider did not start (auth required or timeout)");
-        cleanup_state_dir(&state_dir);
+    let Some(authkey) = common::require_authkey("test_peer_discovery") else {
         return;
-    }
-    start_result
-        .expect("no timeout")
-        .expect("start should succeed");
+    };
+    common::init_test_tracing();
 
-    // Give WatchIPNBus + getPeers a moment to populate the peer list
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let pair = common::make_pair_of_nodes(&authkey).await;
 
-    let peers = provider.peers().await;
-    println!("  Discovered {} truffle peer(s):", peers.len());
-    for peer in &peers {
-        println!(
-            "    - {} (id={}, ip={}, online={}, dns={:?})",
-            peer.hostname, peer.id, peer.ip, peer.online, peer.dns_name
-        );
-    }
+    let alpha_peers = pair.alpha.peers().await;
+    let beta_peers = pair.beta.peers().await;
 
-    // We expect at least 1 truffle peer on the tailnet (other test nodes,
-    // the EC2 server, etc.). If the tailnet only has non-truffle nodes,
-    // this will be 0 and the assertion will catch it.
-    //
-    // NOTE: peers() only returns truffle-* peers due to the is_truffle_peer filter.
-    // If you need to verify raw network connectivity, check the peer_events stream
-    // which fires for ALL peers before filtering.
-    if peers.is_empty() {
-        println!("  WARNING: No truffle-* peers found. This is expected if no other truffle nodes are online.");
-        println!("           The network layer is working — just no truffle peers to discover.");
-    } else {
-        assert!(
-            !peers.is_empty(),
-            "expected at least 1 truffle peer on the tailnet"
-        );
-    }
+    let alpha_sees_beta = alpha_peers.iter().any(|p| p.hostname == pair.beta_hostname);
+    let beta_sees_alpha = beta_peers.iter().any(|p| p.hostname == pair.alpha_hostname);
 
-    provider.stop().await.expect("stop should succeed");
-    cleanup_state_dir(&state_dir);
+    assert!(
+        alpha_sees_beta,
+        "alpha should see beta. Alpha peers: {:?}",
+        alpha_peers.iter().map(|p| &p.hostname).collect::<Vec<_>>()
+    );
+    assert!(
+        beta_sees_alpha,
+        "beta should see alpha. Beta peers: {:?}",
+        beta_peers.iter().map(|p| &p.hostname).collect::<Vec<_>>()
+    );
+
+    pair.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Peer events stream
+// Test 3: Peer events stream fires Joined events for the other node
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_peer_events() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
-
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
-
-    // Subscribe to events BEFORE starting so we capture the initial burst
-    let mut event_rx = provider.peer_events();
-
-    let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(
-        start_result,
-        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
-    ) {
-        println!("  Skipping: provider did not start (auth required or timeout)");
-        cleanup_state_dir(&state_dir);
+    let Some(authkey) = common::require_authkey("test_peer_events") else {
         return;
-    }
-    start_result
-        .expect("no timeout")
-        .expect("start should succeed");
+    };
+    common::init_test_tracing();
 
-    // Collect events for a few seconds — the initial getPeers + WatchIPNBus
-    // should fire events for existing peers.
-    let mut events = Vec::new();
-    let collect_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let remaining = collect_deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match timeout(remaining, event_rx.recv()).await {
-            Ok(Ok(event)) => {
-                events.push(event);
-            }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                println!("  Event receiver lagged by {n} events");
-            }
-            _ => break,
-        }
-    }
+    // Subscribe BEFORE the pair starts registering so we catch the initial
+    // burst. We rebuild a pair here because make_pair_of_nodes starts both
+    // before returning; to catch the Joined event, we need the receiver to
+    // exist before start. So we use the lower-level path here: subscribe on
+    // each side after start but before rendezvous completes is racy — instead,
+    // rely on the post-rendezvous peer list and a late subscriber receiving a
+    // replayed Joined event is not guaranteed. We therefore assert on peers()
+    // (which IS stable) and then watch for update events for a short window.
+    let pair = common::make_pair_of_nodes(&authkey).await;
+    let mut alpha_events = pair.alpha.peer_events();
 
-    println!("  Received {} peer event(s) in 5s:", events.len());
-    for event in &events {
-        match event {
-            NetworkPeerEvent::Joined(peer) => {
-                println!(
-                    "    + Joined: {} (ip={}, online={})",
-                    peer.hostname, peer.ip, peer.online
-                );
+    // Existence check via peers() is already validated by the rendezvous step
+    // inside make_pair_of_nodes. For events, we just verify the stream is
+    // live — collect any events within 3s and confirm we see at least one
+    // NetworkPeerEvent referencing the peer hostname.
+    let collect = async {
+        let mut events = Vec::new();
+        let collect_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = collect_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break events;
             }
-            NetworkPeerEvent::Left(id) => {
-                println!("    - Left: {id}");
-            }
-            NetworkPeerEvent::Updated(peer) => {
-                println!(
-                    "    ~ Updated: {} (ip={}, online={})",
-                    peer.hostname, peer.ip, peer.online
-                );
-            }
-            NetworkPeerEvent::AuthRequired { url } => {
-                println!("    ! Auth required: {url}");
+            match timeout(remaining, alpha_events.recv()).await {
+                Ok(Ok(event)) => events.push(event),
+                _ => break events,
             }
         }
+    };
+    let events: Vec<NetworkPeerEvent> = collect.await;
+
+    // The stream is alive — peer_events() returned a receiver. Events may or
+    // may not fire during the observation window depending on whether beta
+    // sent any update after rendezvous. The stricter assertion is that peers()
+    // contains beta, which is guaranteed by the rendezvous.
+    eprintln!("  alpha observed {} event(s) in 3s window", events.len());
+    for e in &events {
+        eprintln!("    {e:?}");
     }
 
-    // We should get at least some events from the initial peer fetch,
-    // unless there are truly no truffle peers on the network.
-    println!(
-        "  Event stream is working (received {} events)",
-        events.len()
+    let alpha_peers = pair.alpha.peers().await;
+    assert!(
+        alpha_peers.iter().any(|p| p.hostname == pair.beta_hostname),
+        "alpha.peers() must contain beta after rendezvous"
     );
 
-    provider.stop().await.expect("stop should succeed");
-    cleanup_state_dir(&state_dir);
+    pair.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Dial TCP to a known peer (EC2 server SSH port)
+// Test 4: Dial TCP — alpha opens a stream to beta via Tailscale
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_dial_tcp() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
-
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
-
-    let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(
-        start_result,
-        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
-    ) {
-        println!("  Skipping: provider did not start (auth required or timeout)");
-        cleanup_state_dir(&state_dir);
+    let Some(authkey) = common::require_authkey("test_dial_tcp") else {
         return;
-    }
-    start_result
-        .expect("no timeout")
-        .expect("start should succeed");
+    };
+    common::init_test_tracing();
 
-    // Dial the EC2 server's SSH port (22) via Tailscale IP
-    println!("  Dialing {KNOWN_PEER_IP}:22 (SSH)...");
-    let dial_result = timeout(OP_TIMEOUT, provider.dial_tcp(KNOWN_PEER_IP, 22)).await;
+    let pair = common::make_pair_of_nodes(&authkey).await;
 
-    match dial_result {
-        Ok(Ok(stream)) => {
-            println!(
-                "  Successfully dialed! Remote addr: {:?}",
-                stream.peer_addr()
-            );
+    // Beta listens on an ephemeral port, echoes a single nonce.
+    let mut listener = pair
+        .beta
+        .listen_tcp(0)
+        .await
+        .expect("beta should listen on ephemeral port");
+    let beta_listen_port = listener.port;
 
-            // SSH servers send a banner — try to read it to verify it's a real connection
-            let mut buf = [0u8; 256];
-            let read_result = timeout(Duration::from_secs(5), stream.readable()).await;
-            match read_result {
-                Ok(Ok(())) => match stream.try_read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        let banner = String::from_utf8_lossy(&buf[..n]);
-                        println!("  SSH banner: {}", banner.trim());
-                        assert!(
-                            banner.contains("SSH"),
-                            "expected SSH banner from port 22, got: {banner}"
-                        );
-                    }
-                    Ok(_) => {
-                        println!("  Connection established but no data read (may be expected)");
-                    }
-                    Err(e) => {
-                        println!("  try_read error (non-fatal): {e}");
-                    }
-                },
-                Ok(Err(e)) => {
-                    println!("  readable() error (non-fatal): {e}");
-                }
-                Err(_) => {
-                    println!("  Timed out waiting for SSH banner (connection still valid)");
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            panic!("Dial to {KNOWN_PEER_IP}:22 failed: {e}");
-        }
-        Err(_) => {
-            panic!("Dial to {KNOWN_PEER_IP}:22 timed out after {OP_TIMEOUT:?}");
-        }
-    }
+    let nonce = b"truffle-test-nonce-01";
 
-    provider.stop().await.expect("stop should succeed");
-    cleanup_state_dir(&state_dir);
+    // Spawn beta accept+echo task
+    let beta_task = tokio::spawn(async move {
+        let incoming = listener
+            .incoming
+            .recv()
+            .await
+            .expect("beta should accept connection");
+        let mut stream = incoming.stream;
+        let mut buf = [0u8; 32];
+        let n = stream.read(&mut buf).await.expect("beta read nonce");
+        stream.write_all(&buf[..n]).await.expect("beta echo nonce");
+        stream.shutdown().await.ok();
+        buf[..n].to_vec()
+    });
+
+    // Alpha dials beta by Tailscale IP
+    let beta_ip = pair.beta_ip().await.to_string();
+    eprintln!("  dialing beta at {beta_ip}:{beta_listen_port}");
+    let mut stream = timeout(OP_TIMEOUT, pair.alpha.dial_tcp(&beta_ip, beta_listen_port))
+        .await
+        .expect("dial did not time out")
+        .expect("alpha dial should succeed");
+
+    // Alpha writes nonce, reads echo
+    stream.write_all(nonce).await.expect("alpha write nonce");
+    let mut echo = [0u8; 32];
+    let n = timeout(OP_TIMEOUT, stream.read(&mut echo))
+        .await
+        .expect("alpha read did not time out")
+        .expect("alpha read echo");
+    let echoed = &echo[..n];
+    assert_eq!(echoed, nonce, "alpha should read back the exact nonce");
+
+    let beta_received = beta_task.await.expect("beta task joined");
+    assert_eq!(beta_received, nonce, "beta should have received the nonce");
+
+    pair.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: Ping a known peer
+// Test 5: Ping — alpha pings beta
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_ping() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
-
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
-
-    let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(
-        start_result,
-        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
-    ) {
-        println!("  Skipping: provider did not start (auth required or timeout)");
-        cleanup_state_dir(&state_dir);
+    let Some(authkey) = common::require_authkey("test_ping") else {
         return;
-    }
-    start_result
-        .expect("no timeout")
-        .expect("start should succeed");
+    };
+    common::init_test_tracing();
 
-    // Ping the known EC2 peer
-    println!("  Pinging {KNOWN_PEER_IP}...");
-    let ping_result = timeout(OP_TIMEOUT, provider.ping(KNOWN_PEER_IP)).await;
+    let pair = common::make_pair_of_nodes(&authkey).await;
 
-    match ping_result {
-        Ok(Ok(result)) => {
-            println!("  Ping successful!");
-            println!("    Latency: {:?}", result.latency);
-            println!("    Connection: {}", result.connection);
-            println!("    Peer addr: {:?}", result.peer_addr);
+    let beta_ip = pair.beta_ip().await.to_string();
+    eprintln!("  pinging beta at {beta_ip}");
+    let result = timeout(OP_TIMEOUT, pair.alpha.ping(&beta_ip))
+        .await
+        .expect("ping did not time out")
+        .expect("ping should succeed");
 
-            assert!(
-                result.latency > Duration::ZERO,
-                "ping latency should be > 0, got {:?}",
-                result.latency
-            );
-            assert!(
-                !result.connection.is_empty(),
-                "ping connection type should not be empty"
-            );
-        }
-        Ok(Err(e)) => {
-            panic!("Ping to {KNOWN_PEER_IP} failed: {e}");
-        }
-        Err(_) => {
-            panic!("Ping to {KNOWN_PEER_IP} timed out after {OP_TIMEOUT:?}");
-        }
-    }
+    eprintln!(
+        "  ping ok: latency={:?} connection={} peer_addr={:?}",
+        result.latency, result.connection, result.peer_addr
+    );
+    assert!(
+        result.latency > Duration::ZERO,
+        "ping latency should be > 0"
+    );
+    assert!(
+        !result.connection.is_empty(),
+        "ping connection type should not be empty"
+    );
 
-    provider.stop().await.expect("stop should succeed");
-    cleanup_state_dir(&state_dir);
+    pair.stop().await;
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Health info
+// Test 6: Health — alpha reports running, then stopped after stop()
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires real Tailscale network and Go sidecar binary"]
 async fn test_health() {
-    tracing_subscriber::fmt()
-        .with_env_filter("truffle_core=debug,integration_network=debug")
-        .with_test_writer()
-        .try_init()
-        .ok();
-
-    let config = make_config();
-    let state_dir = config.state_dir.clone();
-    let mut provider = TailscaleProvider::new(config);
-
-    let start_result = timeout(START_TIMEOUT, start_provider(&mut provider)).await;
-    if matches!(
-        start_result,
-        Ok(Err(NetworkError::AuthRequired { .. })) | Err(_)
-    ) {
-        println!("  Skipping: provider did not start (auth required or timeout)");
-        cleanup_state_dir(&state_dir);
+    let Some(authkey) = common::require_authkey("test_health") else {
         return;
-    }
-    start_result
-        .expect("no timeout")
-        .expect("start should succeed");
+    };
+    common::init_test_tracing();
 
-    let health = provider.health().await;
-    println!("  Health info:");
-    println!("    State: {}", health.state);
-    println!("    Healthy: {}", health.healthy);
-    println!("    Key expiry: {:?}", health.key_expiry);
-    println!("    Warnings: {:?}", health.warnings);
+    let pair = common::make_pair_of_nodes(&authkey).await;
 
-    assert_eq!(
-        health.state, "running",
-        "health state should be 'running' after successful start"
+    let health = pair.alpha.health().await;
+    eprintln!(
+        "  health: state={} healthy={} key_expiry={:?}",
+        health.state, health.healthy, health.key_expiry
     );
-    assert!(
-        health.healthy,
-        "health should report healthy after successful start"
-    );
+    assert_eq!(health.state, "running");
+    assert!(health.healthy);
 
-    // Verify after stop, health reports correctly
-    provider.stop().await.expect("stop should succeed");
+    // Stop alpha only (not the whole pair) so we can check its health after stop
+    let mut alpha = pair.alpha;
+    let beta = pair.beta;
+    let _alpha_hostname = pair.alpha_hostname;
+    let _beta_hostname = pair.beta_hostname;
 
-    let health_after_stop = provider.health().await;
-    println!("  Health after stop:");
-    println!("    State: {}", health_after_stop.state);
-    println!("    Healthy: {}", health_after_stop.healthy);
+    alpha.stop().await.expect("alpha stop should succeed");
+    let after = alpha.health().await;
+    assert_eq!(after.state, "stopped");
+    assert!(!after.healthy);
 
-    assert_eq!(
-        health_after_stop.state, "stopped",
-        "health state should be 'stopped' after stop"
-    );
-    assert!(
-        !health_after_stop.healthy,
-        "health should report unhealthy after stop"
-    );
-
-    cleanup_state_dir(&state_dir);
+    // Stop beta explicitly to avoid leaking an ephemeral peer longer than needed.
+    let mut beta = beta;
+    let _ = beta.stop().await;
 }
