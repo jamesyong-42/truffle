@@ -273,9 +273,79 @@ ephemeral cleanup, or tighten `TRUFFLE_TEST_LOG` and re-run.
 
 ---
 
+## CI Integration
+
+The harness runs in GitHub Actions too. See
+[RFC 020](rfcs/020-ci-testing.md) for the design.
+
+### Workflows
+
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| `ci.yml` | PR + push to main | unit tests, lint, fmt, bench compile-check |
+| `integration-tests.yml` | PR + push to main | 16 real-network tests (skips gracefully on fork PRs) |
+| `benchmarks.yml` | nightly cron (06:00 UTC) + manual | macro bench suite, uploads JSON artefacts |
+
+### One-time setup: configure the `TRUFFLE_TEST_AUTHKEY` secret
+
+1. **Generate a Tailscale auth key for CI.** Go to
+   <https://login.tailscale.com/admin/settings/keys> → **Generate auth key**.
+   Enable:
+   - **Reusable** (CI uses it for every run)
+   - **Ephemeral** (nodes auto-expire within ~1 hour of job end)
+   - **Pre-approved** (skip manual approval per device)
+   - Leave **Tags** unset unless your ACL has a matching `tagOwners` entry.
+
+   Expiration is 90 days max — put a calendar reminder at T+80 to rotate.
+
+2. **Install it as a GitHub secret.**
+   In the repo: **Settings → Secrets and variables → Actions → New repository secret**.
+   - Name: `TRUFFLE_TEST_AUTHKEY`
+   - Value: the `tskey-auth-...` string
+
+3. **Verify.** Trigger a run — either push any commit, or from the
+   Actions UI, **Integration tests** → **Run workflow**.
+
+### Fork PRs
+
+GitHub deliberately doesn't pass secrets to PRs opened from forks.
+Integration tests skip cleanly on fork PRs — `[skip]` messages in the
+logs, workflow still passes green. External contributors can open PRs
+without needing any secret or special setup.
+
+### Rotating the auth key
+
+Every 80 days (before the 90-day expiry), do:
+
+1. Generate a new auth key (same settings as above).
+2. Update the `TRUFFLE_TEST_AUTHKEY` secret in GitHub with the new value.
+3. Revoke the old key in the Tailscale admin panel.
+
+Future: [RFC 022](rfcs/020-ci-testing.md#9-follow-ups-deferred) will
+migrate this to an OAuth client so keys mint on-demand and never
+accumulate 90 days of blast radius.
+
+### Nightly benchmarks
+
+The `benchmarks.yml` workflow runs every night at 06:00 UTC with default
+parameters (10MB file transfer × 5, 1000 SyncedStore ops, 500 request/reply
+round trips). Results go to the workflow's **Artefacts** section as a
+JSON bundle, retained 30 days.
+
+To run on-demand with custom parameters:
+- Actions → **Benchmarks (nightly + on-demand)** → **Run workflow**
+- Tweak `file_transfer_size` / `synced_store_ops` / `request_reply_count`
+
+For absolute performance numbers or regression alerts on PRs,
+[RFC 023](rfcs/020-ci-testing.md#9-follow-ups-deferred) proposes a
+dedicated self-hosted runner + `benchmark-action/github-action-benchmark`
+integration.
+
+---
+
 ## Design References
 
 - [RFC 019 — Local Testing and Benchmarking Harness](rfcs/019-local-testing-and-benchmarking.md)
+- [RFC 020 — CI Testing Harness](rfcs/020-ci-testing.md)
 - [RFC 012 — Layered architecture](rfcs/012-layered-architecture-redesign.md)
 - [RFC 016 — SyncedStore](rfcs/016-synced-store-and-request-reply.md)
-- Future: **RFC 020 — CI Testing Harness** (OAuth, multi-runner matrix).

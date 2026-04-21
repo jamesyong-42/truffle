@@ -114,3 +114,12 @@ jobs:
 
       - name: Doc tests
         run: cargo test --doc --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+
+      # Compile-check the tier-1 micro benchmarks from RFC 019. We don't run
+      # them here (wall-clock benches on hosted runners are noisy), just
+      # catch API drift. Negligible cost thanks to the rust-cache above.
+      # Linux-only: benches don't differ by OS and building on three
+      # runners triples the time for no new signal.
+      - name: Bench compile-check
+        if: runner.os == 'Linux'
+        run: cargo bench -p truffle-core --no-run
