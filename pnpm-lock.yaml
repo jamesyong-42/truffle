@@ -162,8 +162,8 @@ importers:
         specifier: ^0.3.0
         version: 0.3.23
       '@vibecook/truffle-sidecar-linux-x64':
-        specifier: ^0.4.3
-        version: 0.4.3
+        specifier: ^0.4.5
+        version: 0.4.5
       '@vibecook/truffle-sidecar-win32-x64':
         specifier: ^0.4.5
         version: 0.4.5
@@ -2160,8 +2160,8 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@vibecook/truffle-sidecar-linux-x64@0.4.3':
-    resolution: {integrity: sha512-G3UVIXKMt96HBCzmZWdEO64lXC/gzM/lNRbkP1AkdBkraJZskL61sszz+Fd2HdHtJ/MNBt7+Y9XC/l9Nr5e5Nw==}
+  '@vibecook/truffle-sidecar-linux-x64@0.4.5':
+    resolution: {integrity: sha512-aIGdpSK5pvSlk1ordz7/1rzMRJ3RfqP2/TfhV8/xunZzurMSiAnQZ23Sh09bhvQ7SNrvY6Y/G7zafxrcVb1jWQ==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [linux]
@@ -6459,7 +6459,7 @@ snapshots:
   '@vibecook/truffle-sidecar-linux-x64@0.3.25':
     optional: true
 
-  '@vibecook/truffle-sidecar-linux-x64@0.4.3':
+  '@vibecook/truffle-sidecar-linux-x64@0.4.5':
     optional: true
 
   '@vibecook/truffle-sidecar-win32-x64@0.3.25':
