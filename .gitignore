@@ -8,6 +8,14 @@ dist/
 # Rust build output
 target/
 
+# Local env overrides (test/bench auth keys, etc.)
+.env
+.env.local
+
+# Benchmark output
+target/bench-results/
+bench-results/
+
 # Sidecar binaries
 packages/sidecar-slim/bin/
 packages/sidecar-slim/sidecar-slim

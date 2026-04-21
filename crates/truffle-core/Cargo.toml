@@ -45,3 +45,17 @@ hostname.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 tracing-subscriber.workspace = true
 tempfile.workspace = true
+dotenvy.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "envelope"
+harness = false
+
+[[bench]]
+name = "crdt_merge"
+harness = false
+
+[[bench]]
+name = "chunk_hash"
+harness = false

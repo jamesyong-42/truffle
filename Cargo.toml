@@ -7,6 +7,7 @@ members = [
     "crates/truffle",
     "crates/truffle-napi",
     "crates/truffle-tauri-plugin",
+    "crates/truffle-bench",
 ]
 
 # ── Shared package metadata ──────────────────────────────────────────
@@ -118,6 +119,9 @@ truffle-sidecar = { version = "0.4.3", path = "crates/truffle-sidecar" }
 
 # Dev / test
 # (tokio dev features are added per-crate via `features = [...]`)
+dotenvy = "0.15"
+criterion = { version = "0.5", features = ["html_reports"] }
+hdrhistogram = "7"
 
 # ── Optimise dependency compilation in dev builds ────────────────────
 [profile.dev.package."*"]

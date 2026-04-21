@@ -24,6 +24,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -828,10 +829,23 @@ func (s *shim) handleListen(data json.RawMessage) {
 		}
 
 		// Resolve the actual port (important when d.Port is 0 and the OS
-		// assigns an ephemeral port).
+		// assigns an ephemeral port). tsnet's listener may wrap the raw
+		// socket, so the *net.TCPAddr assertion can fail — fall back to
+		// parsing the address string in that case.
 		actualPort := d.Port
 		if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
-			actualPort = uint16(tcpAddr.Port)
+			if tcpAddr.Port > 0 && tcpAddr.Port <= 65535 {
+				actualPort = uint16(tcpAddr.Port)
+			}
+		} else {
+			if _, portStr, err := net.SplitHostPort(ln.Addr().String()); err == nil {
+				// Bounded parse: ports are always in [1, 65535]; anything
+				// outside that is a sidecar bug we'd rather surface as
+				// "listen confirmation timed out" on the Rust side.
+				if p, err := strconv.ParseUint(portStr, 10, 16); err == nil && p > 0 {
+					actualPort = uint16(p)
+				}
+			}
 		}
 
 		s.dynamicListenerMu.Lock()
@@ -855,18 +869,22 @@ func (s *shim) handleListen(data json.RawMessage) {
 				if s.ctx.Err() != nil {
 					return
 				}
-				// Check if this was a deliberate close (unlisten)
+				// Check if this was a deliberate close (unlisten). Use
+				// actualPort — d.Port may be 0 for ephemeral listeners,
+				// and dynamicListeners is keyed by the real port.
 				s.dynamicListenerMu.Lock()
-				_, stillActive := s.dynamicListeners[d.Port]
+				_, stillActive := s.dynamicListeners[actualPort]
 				s.dynamicListenerMu.Unlock()
 				if !stillActive {
 					return
 				}
-				log.Printf("accept :%d error: %v", d.Port, err)
+				log.Printf("accept :%d error: %v", actualPort, err)
 				continue
 			}
 			peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
-			go s.bridgeToRust(conn, d.Port, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
+			// Route using actualPort — the Rust bridge registered its
+			// listener channel under the real port, not the requested 0.
+			go s.bridgeToRust(conn, actualPort, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
 		}
 	}()
 }

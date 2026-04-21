@@ -1,0 +1,62 @@
+name: Integration tests (real Tailscale)
+
+# Runs the 16 real-network integration tests from RFC 019 against a live
+# Tailscale tailnet. See docs/rfcs/020-ci-testing.md for the design.
+#
+# Skips gracefully if TRUFFLE_TEST_AUTHKEY is not set (e.g. PRs from forks),
+# so this workflow stays green for contributors without access to the secret.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize on-branch runs so simultaneous pushes don't fight for tailnet
+  # device slots. Different branches/PRs can still run in parallel.
+  group: integration-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-network:
+    name: cargo test -p truffle-core --tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # GitHub automatically redacts this value from logs. Without the secret
+      # (fork PRs), the tests print `[skip]` and pass.
+      TRUFFLE_TEST_AUTHKEY: ${{ secrets.TRUFFLE_TEST_AUTHKEY }}
+      TRUFFLE_TEST_LOG: "truffle_core=info"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          # Share cache with ci.yml's cargo-test job for faster runs.
+          shared-key: cargo-test
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: '1.26'
+          cache-dependency-path: packages/sidecar-slim/go.sum
+
+      - name: Preflight — report skip-vs-run mode
+        run: |
+          if [ -n "${TRUFFLE_TEST_AUTHKEY:-}" ]; then
+            echo "::notice::TRUFFLE_TEST_AUTHKEY is set — real-network tests WILL RUN."
+          else
+            echo "::warning::TRUFFLE_TEST_AUTHKEY is not set (fork PR?) — all real-network tests will skip gracefully."
+          fi
+
+      - name: Run real-network integration tests
+        run: cargo test -p truffle-core --tests --verbose -- --nocapture
