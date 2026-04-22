@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.5...truffle-v0.4.6) (2026-04-22)
+
+
+### Bug Fixes
+
+* **docs:** exclude TESTING.md and HANDOVER-*.md from vitepress build ([9da539d](https://github.com/jamesyong-42/truffle/commit/9da539d8318186f33a56af58799338fa23b03025))
+
 ## [0.4.5](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.4...truffle-v0.4.5) (2026-04-14)
 
 
