@@ -4,7 +4,16 @@ export default defineConfig({
   title: 'Truffle',
   description: 'Mesh networking for your devices, built on Tailscale',
   base: '/truffle/',
-  srcExclude: ['rfcs/**', 'cross-platform-*.md', 'tailscale-*.md', 'cli-design.md'],
+  srcExclude: [
+    'rfcs/**',
+    'cross-platform-*.md',
+    'tailscale-*.md',
+    'cli-design.md',
+    // TESTING.md is a contributor guide (see RFC 019/020) — lives on
+    // GitHub alongside the RFC tree, not on the vitepress user site.
+    'TESTING.md',
+    'HANDOVER-*.md',
+  ],
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
