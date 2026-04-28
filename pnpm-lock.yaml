@@ -156,8 +156,8 @@ importers:
         specifier: ^0.3.0
         version: 0.3.23
       '@vibecook/truffle-sidecar-darwin-x64':
-        specifier: ^0.4.3
-        version: 0.4.3
+        specifier: ^0.4.6
+        version: 0.4.6
       '@vibecook/truffle-sidecar-linux-arm64':
         specifier: ^0.4.5
         version: 0.4.5
@@ -2141,8 +2141,8 @@ packages:
     cpu: [x64]
     os: [darwin]
 
-  '@vibecook/truffle-sidecar-darwin-x64@0.4.3':
-    resolution: {integrity: sha512-PXOHfYwQaxQbd9TPIvw7f0GM/YDLtUBJnhm0YomxqrGz12N1gpe68dlVViUJn90jJg/66S40CnV3hrx2SU1diQ==}
+  '@vibecook/truffle-sidecar-darwin-x64@0.4.6':
+    resolution: {integrity: sha512-HqXDOM/FFn/dzCKO6Ui7h/dvz9sNOwvzMMO1O4+ylkNb7JvHnsJZCWs5kVSFVV39Zlig6ALWgOW4x12ihNfl2w==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [darwin]
@@ -6415,7 +6415,7 @@ snapshots:
   '@vibecook/truffle-sidecar-darwin-x64@0.3.25':
     optional: true
 
-  '@vibecook/truffle-sidecar-darwin-x64@0.4.3':
+  '@vibecook/truffle-sidecar-darwin-x64@0.4.6':
     optional: true
 
   '@vibecook/truffle-sidecar-linux-arm64@0.3.25':
