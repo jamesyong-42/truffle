@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.7](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.6...truffle-v0.4.7) (2026-07-03)
+
+
+### Bug Fixes
+
+* **deps:** bump quinn-proto to 0.11.15 (RUSTSEC-2026-0185) ([#112](https://github.com/jamesyong-42/truffle/issues/112)) ([bde9256](https://github.com/jamesyong-42/truffle/commit/bde92565952be8372a221625447d76c4ff139a59))
+
 ## [0.4.6](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.5...truffle-v0.4.6) (2026-04-22)
 
 
