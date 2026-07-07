@@ -103,6 +103,20 @@ function loadExpectedChecksum(version, asset) {
   }
 }
 
+/** Release tags are `truffle-v{version}` (release-please monorepo tag scheme), NOT `v{version}`. */
+function buildDownloadUrl(version, asset) {
+  return `https://github.com/${GITHUB_REPO}/releases/download/truffle-v${version}/${asset}`;
+}
+
+/** Throw if `actual` does not match `expected` (hex, case-insensitive). */
+function assertChecksum(actual, expected, label) {
+  if (actual.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(
+      `SECURITY: sidecar checksum mismatch for ${label}. Expected ${expected}, got ${actual}.`,
+    );
+  }
+}
+
 async function main() {
   const key = `${process.platform}-${process.arch}`;
   const pkg = PLATFORM_PACKAGES[key];
@@ -142,7 +156,7 @@ async function main() {
   if (!asset) return;
 
   const version = require('../package.json').version;
-  const url = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${asset}`;
+  const url = buildDownloadUrl(version, asset);
   const expected = loadExpectedChecksum(version, asset);
 
   console.log(`[truffle] Sidecar not found via npm. Downloading from GitHub Releases...`);
@@ -176,21 +190,21 @@ async function main() {
   // Integrity check.
   if (expected) {
     const actual = await sha256File(dest);
-    if (actual.toLowerCase() !== expected.toLowerCase()) {
+    try {
+      assertChecksum(actual, expected, `truffle-v${version}/${asset}`);
+    } catch (err) {
       try {
         unlinkSync(dest);
       } catch {
         /* ignore */
       }
-      console.error(
-        `[truffle] SECURITY: sidecar checksum mismatch for v${version}/${asset}. ` +
-          `Deleted the download and refusing to install it. Expected ${expected}, got ${actual}.`,
-      );
+      console.error(`[truffle] ${err.message} Deleted the download and refusing to install it.`);
+      process.exitCode = 1;
       return;
     }
   } else {
     console.warn(
-      `[truffle] WARNING: no pinned checksum for v${version}/${asset}; integrity NOT verified. ` +
+      `[truffle] WARNING: no pinned checksum for truffle-v${version}/${asset}; integrity NOT verified. ` +
         `Prefer installing with optionalDependencies enabled.`,
     );
   }
@@ -202,4 +216,11 @@ async function main() {
   console.log(`[truffle] Sidecar downloaded${expected ? ' and verified' : ''}.`);
 }
 
-main();
+module.exports = { buildDownloadUrl, assertChecksum, loadExpectedChecksum };
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[truffle] postinstall failed: ${err.message}`);
+    process.exitCode = 1;
+  });
+}

@@ -47,6 +47,7 @@
     "build": "tsc",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.cjs\"",
     "postinstall": "node scripts/postinstall.cjs"
   },
   "dependencies": {
