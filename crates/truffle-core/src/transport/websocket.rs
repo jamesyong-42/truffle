@@ -15,8 +15,15 @@
 //! **Server (listen)**:
 //! 1. `NetworkProvider::listen_tcp(port)` -> incoming `TcpStream`s
 //! 2. For each: WebSocket server handshake (`tokio_tungstenite::accept_async_with_config`)
-//! 3. Receive peer's [`HelloEnvelope`], validate, send own [`HelloEnvelope`]
+//! 3. Receive peer's [`HelloEnvelope`], validate, verify the claimed
+//!    `tailscale_id` against the bridge-provided WhoIs identity (closing with
+//!    code 4003 on mismatch), then send own [`HelloEnvelope`]
 //! 4. Split stream into read/write halves, yield [`WsFramedStream`] via [`StreamListener`]
+//!
+//! Each incoming handshake (steps 2-3) is bounded two ways: at most
+//! `WsConfig::max_pending_handshakes` may be in flight at once (excess
+//! connections are dropped before the upgrade) and each must complete within
+//! `WsConfig::handshake_timeout` or the connection is dropped.
 //!
 //! The `app_id` check happens during the hello exchange: a mismatch closes
 //! the socket with close code 4001 so the remote sees a specific reason. A
@@ -47,7 +54,8 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::network::{NetworkProvider, PeerAddr};
 use crate::session::hello::{
-    HelloEnvelope, HelloKind, PeerIdentity, CLOSE_APP_MISMATCH, CLOSE_HELLO_PROTOCOL, HELLO_TIMEOUT,
+    HelloEnvelope, HelloKind, PeerIdentity, CLOSE_APP_MISMATCH, CLOSE_HELLO_PROTOCOL,
+    CLOSE_IDENTITY_MISMATCH, HELLO_TIMEOUT,
 };
 
 use super::{
@@ -243,6 +251,72 @@ fn validate_hello(
     Ok(remote.identity)
 }
 
+/// Subset of the sidecar's WhoIs-derived peer identity JSON
+/// (`peerIdentityData` in sidecar-slim) carried in the bridge header.
+#[derive(Debug, Default, serde::Deserialize)]
+struct AuthenticatedIdentity {
+    #[serde(default, rename = "nodeId")]
+    node_id: String,
+}
+
+/// Verify the hello's self-declared `tailscale_id` against the
+/// Tailscale-authenticated identity (WhoIs) the sidecar attached to the
+/// incoming connection (RFC 017 §8, close code 4003).
+///
+/// `authenticated` is the raw `remote_identity` string from the bridge header.
+/// The policy deliberately fails open when there is no trustworthy
+/// authenticated identity to compare against, so mock/loopback fixtures and
+/// WhoIs failures keep working as before, and only rejects a hello when the
+/// bridge gave us a concrete node ID that contradicts the claim:
+///
+/// - Empty `authenticated` → accept unverified (MockNetworkProvider, or the
+///   sidecar returned `""` because WhoIs failed).
+/// - Unparseable `authenticated` → accept unverified (legacy plain-DNS-name
+///   form of the bridge header field).
+/// - Parsed but empty `nodeId` → accept unverified (WhoIs returned no Node).
+/// - `nodeId == claimed.tailscale_id` → accept.
+/// - Otherwise → [`TransportError::IdentityMismatch`].
+fn verify_authenticated_identity(
+    claimed: &PeerIdentity,
+    authenticated: &str,
+) -> Result<(), TransportError> {
+    if authenticated.trim().is_empty() {
+        tracing::warn!(
+            claimed_tailscale_id = %claimed.tailscale_id,
+            "ws: no authenticated identity for incoming connection (mock/loopback or WhoIs failure); accepting hello claim unverified"
+        );
+        return Ok(());
+    }
+
+    let parsed = match serde_json::from_str::<AuthenticatedIdentity>(authenticated) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            tracing::warn!(
+                claimed_tailscale_id = %claimed.tailscale_id,
+                "ws: unparseable authenticated identity; accepting hello claim unverified"
+            );
+            return Ok(());
+        }
+    };
+
+    if parsed.node_id.is_empty() {
+        tracing::warn!(
+            claimed_tailscale_id = %claimed.tailscale_id,
+            "ws: authenticated identity carried no nodeId; accepting hello claim unverified"
+        );
+        return Ok(());
+    }
+
+    if parsed.node_id == claimed.tailscale_id {
+        Ok(())
+    } else {
+        Err(TransportError::IdentityMismatch {
+            claimed: claimed.tailscale_id.clone(),
+            authenticated: parsed.node_id,
+        })
+    }
+}
+
 /// Serialise and send a [`HelloEnvelope`] as a text frame.
 async fn send_hello(
     ws: &mut WebSocketStream<TcpStream>,
@@ -305,9 +379,16 @@ async fn client_hello_exchange(
 
 /// Server-side hello exchange: read theirs first, validate, then send ours.
 /// On error, close the socket with the matching RFC 017 close code.
+///
+/// `authenticated_identity` is the bridge-provided WhoIs identity of the
+/// incoming connection ([`IncomingConnection::remote_identity`]). The claimed
+/// `tailscale_id` is verified against it (close code 4003) BEFORE we reveal our
+/// own hello, so an impersonator never learns our identity and no stream is
+/// yielded for a mismatched peer.
 async fn server_hello_exchange(
     ws: &mut WebSocketStream<TcpStream>,
     local_hello: &HelloEnvelope,
+    authenticated_identity: &str,
 ) -> Result<PeerIdentity, TransportError> {
     // Step 1: read remote hello (timed).
     let remote = match receive_hello(ws).await {
@@ -342,6 +423,15 @@ async fn server_hello_exchange(
             return Err(e);
         }
     };
+
+    // Step 2.5: verify the claimed tailscale_id against the Tailscale-
+    // authenticated identity BEFORE we reveal our own hello. Doing this
+    // before send_hello means an impersonator never receives our identity
+    // block and the stream is never yielded to the session layer.
+    if let Err(e) = verify_authenticated_identity(&identity, authenticated_identity) {
+        close_ws_with_code(ws, CLOSE_IDENTITY_MISMATCH, "identity mismatch").await;
+        return Err(e);
+    }
 
     // Step 3: reply with our hello.
     if let Err(e) = send_hello(ws, local_hello).await {
@@ -434,40 +524,72 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
         let ping_interval = self.config.ping_interval;
         let pong_timeout = self.config.pong_timeout;
         let ws_config = self.ws_protocol_config();
+        let handshake_timeout = self.config.handshake_timeout;
+        let handshake_permits = Arc::new(tokio::sync::Semaphore::new(
+            self.config.max_pending_handshakes,
+        ));
 
         tokio::spawn(async move {
             loop {
                 match tcp_listener.incoming.recv().await {
                     Some(incoming) => {
+                        // Bound in-flight handshakes: claim a permit before we
+                        // commit to upgrading this connection. Beyond the cap we
+                        // drop the connection pre-upgrade (`continue` drops
+                        // `incoming`, closing its TCP stream) — established
+                        // connections are never counted here.
+                        let permit = match handshake_permits.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                tracing::warn!(
+                                    remote = %incoming.remote_addr,
+                                    "ws: max pending handshakes reached; dropping incoming connection"
+                                );
+                                continue;
+                            }
+                        };
+
                         let tx = tx.clone();
                         let local_hello = local_hello.clone();
                         let remote_addr = incoming.remote_addr.clone();
+                        // Clone the bridge-provided WhoIs identity before
+                        // `incoming.stream` is moved into the WS upgrade below.
+                        let authenticated_identity = incoming.remote_identity.clone();
                         let ws_config = ws_config;
 
                         tokio::spawn(async move {
-                            // WS server upgrade (with max_message_size config)
-                            let mut ws = match tokio_tungstenite::accept_async_with_config(
-                                incoming.stream,
-                                Some(ws_config),
+                            // Run the WS upgrade + hello exchange under a single
+                            // timeout so a peer that stalls mid-upgrade (before
+                            // the 5s hello window even opens) can't pin the
+                            // handshake slot indefinitely.
+                            let handshake = async {
+                                let mut ws = tokio_tungstenite::accept_async_with_config(
+                                    incoming.stream,
+                                    Some(ws_config),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    TransportError::HandshakeFailed(format!("ws upgrade: {e}"))
+                                })?;
+                                let identity = server_hello_exchange(
+                                    &mut ws,
+                                    &local_hello,
+                                    &authenticated_identity,
+                                )
+                                .await?;
+                                Ok::<(WebSocketStream<TcpStream>, PeerIdentity), TransportError>((
+                                    ws, identity,
+                                ))
+                            };
+
+                            let (ws, remote_identity) = match tokio::time::timeout(
+                                handshake_timeout,
+                                handshake,
                             )
                             .await
                             {
-                                Ok(ws) => ws,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        remote = %remote_addr,
-                                        "ws: upgrade failed: {e}"
-                                    );
-                                    return;
-                                }
-                            };
-
-                            // Server-side hello exchange (with timeout)
-                            let remote_identity = match server_hello_exchange(&mut ws, &local_hello)
-                                .await
-                            {
-                                Ok(identity) => identity,
-                                Err(e) => {
+                                Ok(Ok(pair)) => pair,
+                                Ok(Err(e)) => {
                                     match &e {
                                         TransportError::AppMismatch { local, remote } => {
                                             tracing::info!(
@@ -490,6 +612,24 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                                                 "ws: malformed hello on incoming connection"
                                             );
                                         }
+                                        TransportError::IdentityMismatch {
+                                            claimed,
+                                            authenticated,
+                                        } => {
+                                            tracing::warn!(
+                                                remote_addr = %remote_addr,
+                                                claimed = %claimed,
+                                                authenticated = %authenticated,
+                                                "ws: closing incoming connection — hello identity does not match authenticated Tailscale identity"
+                                            );
+                                        }
+                                        TransportError::HandshakeFailed(msg) => {
+                                            tracing::warn!(
+                                                remote = %remote_addr,
+                                                error = %msg,
+                                                "ws: upgrade failed"
+                                            );
+                                        }
                                         _ => {
                                             tracing::warn!(
                                                 remote_addr = %remote_addr,
@@ -499,7 +639,20 @@ impl<N: NetworkProvider + 'static> StreamTransport for WebSocketTransport<N> {
                                     }
                                     return;
                                 }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        remote_addr = %remote_addr,
+                                        timeout = ?handshake_timeout,
+                                        "ws: handshake timed out before hello; dropping connection"
+                                    );
+                                    return;
+                                }
                             };
+
+                            // Release the handshake slot before handing the
+                            // established stream to the listener — the yielded
+                            // connection is no longer counted against the cap.
+                            drop(permit);
 
                             tracing::info!(
                                 remote_device_id = %remote_identity.device_id,
@@ -586,6 +739,7 @@ impl std::fmt::Debug for WsFramedStream {
 // We need the explicit Sync impl because `SplitStream` is not Sync,
 // but `WsFramedStream` is only accessed via `&mut self` (exclusive ref)
 // so Sync is safe.
+#[allow(unsafe_code)]
 unsafe impl Sync for WsFramedStream {}
 
 /// Get the current epoch time in milliseconds.
@@ -923,5 +1077,88 @@ mod unit_tests {
             matches!(result, Err(TransportError::HelloMalformed(_))),
             "matched app_id must not let an oversized field through"
         );
+    }
+
+    // ── RFC 017 §8: verify hello tailscale_id against WhoIs identity ───
+
+    #[test]
+    fn verify_identity_rejects_mismatched_node_id() {
+        // The hello claims tailscale_id "n1234567890.ts-node" but the
+        // authenticated WhoIs identity says a different node — reject.
+        let identity = valid_identity();
+        let authenticated = r#"{"dnsName":"mallory.ts.net","nodeId":"real-node-id"}"#;
+        match verify_authenticated_identity(&identity, authenticated) {
+            Err(TransportError::IdentityMismatch {
+                claimed,
+                authenticated,
+            }) => {
+                assert_eq!(claimed, "n1234567890.ts-node");
+                assert_eq!(authenticated, "real-node-id");
+            }
+            other => panic!("expected IdentityMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_identity_accepts_matching_node_id() {
+        let identity = valid_identity();
+        let authenticated = r#"{"dnsName":"alice.ts.net","nodeId":"n1234567890.ts-node"}"#;
+        assert!(
+            verify_authenticated_identity(&identity, authenticated).is_ok(),
+            "matching nodeId must be accepted"
+        );
+    }
+
+    #[test]
+    fn verify_identity_accepts_empty_authenticated_string() {
+        // MockNetworkProvider fixtures and WhoIs failures deliver "" —
+        // preserve the pre-fix warn-and-allow behavior.
+        let identity = valid_identity();
+        assert!(
+            verify_authenticated_identity(&identity, "").is_ok(),
+            "empty authenticated identity must fall open"
+        );
+    }
+
+    #[test]
+    fn verify_identity_accepts_non_json_legacy_dns_value() {
+        // The bridge header historically carried a plain DNS name; an
+        // unparseable value falls open rather than rejecting.
+        let identity = valid_identity();
+        assert!(
+            verify_authenticated_identity(&identity, "peer.tailnet.ts.net").is_ok(),
+            "legacy plain-DNS-name authenticated value must fall open"
+        );
+    }
+
+    #[test]
+    fn verify_identity_accepts_json_without_node_id() {
+        // WhoIs returned no Node — the JSON parses but nodeId is absent.
+        let identity = valid_identity();
+        let authenticated = r#"{"dnsName":"peer.ts.net"}"#;
+        assert!(
+            verify_authenticated_identity(&identity, authenticated).is_ok(),
+            "missing nodeId must fall open"
+        );
+    }
+
+    #[test]
+    fn verify_identity_rejects_empty_claim_against_real_node_id() {
+        // An empty claimed tailscale_id against a concrete authenticated
+        // nodeId is a mismatch and is rejected (previously such a
+        // connection registered under the useless key "").
+        let mut identity = valid_identity();
+        identity.tailscale_id = String::new();
+        let authenticated = r#"{"nodeId":"real-node-id"}"#;
+        match verify_authenticated_identity(&identity, authenticated) {
+            Err(TransportError::IdentityMismatch {
+                claimed,
+                authenticated,
+            }) => {
+                assert_eq!(claimed, "");
+                assert_eq!(authenticated, "real-node-id");
+            }
+            other => panic!("expected IdentityMismatch, got {other:?}"),
+        }
     }
 }

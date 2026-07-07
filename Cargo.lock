@@ -6471,7 +6471,7 @@ dependencies = [
 
 [[package]]
 name = "truffle"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "truffle-core",
  "truffle-sidecar",
@@ -6498,7 +6498,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-cli"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "chrono",
  "clap",
@@ -6533,7 +6533,7 @@ dependencies = [
 
 [[package]]
 name = "truffle-core"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -6580,12 +6580,12 @@ dependencies = [
 
 [[package]]
 name = "truffle-sidecar"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
- "flate2",
- "tar",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "ureq",
- "zip",
 ]
 
 [[package]]

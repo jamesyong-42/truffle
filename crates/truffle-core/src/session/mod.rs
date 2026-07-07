@@ -623,7 +623,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         let conns = self.ws_connections.read().await;
 
         for (peer_id, handle) in conns.iter() {
-            if let Err(_) = handle.send_tx.send(data.to_vec()).await {
+            if handle.send_tx.send(data.to_vec()).await.is_err() {
                 tracing::warn!(
                     peer_id = %peer_id,
                     "session: broadcast send failed (connection task closed)"
@@ -684,6 +684,24 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         let _ = self
             .event_tx
             .send(PeerEvent::WsDisconnected(peer_id.to_string()));
+    }
+
+    /// Close all active WebSocket connections and mark every peer as
+    /// disconnected. Called by `Node::stop()` during teardown. Safe to call
+    /// multiple times — with no active connections it is a no-op.
+    pub async fn shutdown(&self) {
+        let handles: Vec<(String, WsConnectionHandle)> = {
+            let mut conns = self.ws_connections.write().await;
+            conns.drain().collect()
+        };
+        for (peer_id, handle) in handles {
+            let _ = handle.close_tx.send(()).await;
+            let _ = self.event_tx.send(PeerEvent::WsDisconnected(peer_id));
+        }
+        let mut map = self.peers.write().await;
+        for state in map.values_mut() {
+            state.ws_connected = false;
+        }
     }
 }
 

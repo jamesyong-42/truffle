@@ -78,6 +78,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     render_right(frame, right_content, app);
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn render_left(frame: &mut Frame, area: Rect, app: &AppState) {
     let info = app.node.local_info();
     let node_name = info.device_name.clone();

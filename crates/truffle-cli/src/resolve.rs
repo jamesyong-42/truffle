@@ -157,7 +157,7 @@ impl NameResolver {
         let mut best: Option<(String, usize)> = None;
 
         let mut candidates: Vec<String> = Vec::new();
-        for (alias, _) in &self.aliases {
+        for alias in self.aliases.keys() {
             candidates.push(alias.clone());
         }
         for peer in &self.peers {

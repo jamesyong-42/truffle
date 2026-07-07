@@ -22,16 +22,10 @@ use super::{DatagramSocket, DatagramTransport, TransportError};
 // ---------------------------------------------------------------------------
 
 /// Configuration for UDP transport.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UdpConfig {
     /// Port to bind on. Default: 0 (OS-assigned ephemeral port).
     pub port: u16,
-}
-
-impl Default for UdpConfig {
-    fn default() -> Self {
-        Self { port: 0 }
-    }
 }
 
 // ---------------------------------------------------------------------------

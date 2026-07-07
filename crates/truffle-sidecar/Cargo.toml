@@ -13,6 +13,12 @@ workspace = true
 
 [build-dependencies]
 ureq.workspace = true
-flate2.workspace = true
-tar.workspace = true
-zip.workspace = true
+# Integrity verification of the downloaded sidecar (see build.rs + src/integrity.rs).
+sha2.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# Needed by the `#[cfg(test)] mod integrity;` unit tests (shared with build.rs).
+sha2.workspace = true
+serde_json.workspace = true

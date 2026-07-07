@@ -1,4 +1,4 @@
-module github.com/jamesyong-42/claude-code-on-the-go/sidecar-slim
+module github.com/jamesyong-42/truffle/packages/sidecar-slim
 
 go 1.26.4
 

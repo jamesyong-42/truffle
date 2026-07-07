@@ -4,8 +4,6 @@ use crate::config::TruffleConfig;
 use crate::daemon::client::DaemonClient;
 use crate::output;
 
-/// Exit code for timeout.
-
 pub async fn run(
     config: &TruffleConfig,
     from: Option<&str>,

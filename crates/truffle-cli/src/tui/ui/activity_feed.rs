@@ -152,7 +152,7 @@ fn render_item(item: &DisplayItem) -> Line<'static> {
             Line::from(vec![
                 Span::styled(format!("  {ts}  "), Style::default().fg(Color::DarkGray)),
                 Span::styled(from.clone(), Style::default().bold()),
-                Span::raw(format!(" \u{2192} You: ")),
+                Span::raw(" \u{2192} You: ".to_string()),
                 Span::raw(text.clone()),
             ])
         }

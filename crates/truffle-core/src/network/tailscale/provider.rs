@@ -546,7 +546,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         }
     }
 
-    async fn stop(&mut self) -> Result<(), NetworkError> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         *self.state.write().await = ProviderState::Stopping;
 
         // Shut down sidecar
@@ -606,7 +606,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         let dial_rx = bridge.register_dial(request_id.clone()).await;
 
         // Scope the sidecar lock: subscribe + send, then release
-        let mut event_rx = {
+        let event_rx = {
             let sidecar_guard = self.sidecar.lock().await;
             let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
@@ -623,59 +623,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         // 1. Bridge delivers the TcpStream (success path)
         // 2. Sidecar reports dial failure via event (error path)
         // 3. Timeout
-        //
-        // The bridge delivers the TcpStream once the Go sidecar bridges the
-        // connection back. If the sidecar reports a failure, we get that via
-        // the event channel and abort early.
-        let result = tokio::time::timeout(DIAL_TIMEOUT, async {
-            // Spawn a task to watch for dial failure events.
-            // We keep the JoinHandle so we can abort it once the select resolves,
-            // preventing an orphaned task that would loop forever.
-            let fail_request_id = request_id.clone();
-            let (fail_tx, fail_rx) = oneshot::channel::<String>();
-            let fail_watcher: JoinHandle<()> = tokio::spawn(async move {
-                loop {
-                    match event_rx.recv().await {
-                        Ok(SidecarInternalEvent::DialFailed {
-                            request_id: rid,
-                            error,
-                        }) if rid == fail_request_id => {
-                            let _ = fail_tx.send(error);
-                            return;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            let _ = fail_tx.send("event channel closed".to_string());
-                            return;
-                        }
-                        _ => continue,
-                    }
-                }
-            });
-
-            let result = tokio::select! {
-                stream_result = dial_rx => {
-                    stream_result.map_err(|_| NetworkError::DialFailed("dial cancelled".into()))
-                }
-                fail_result = fail_rx => {
-                    let error = fail_result.unwrap_or_else(|_| "dial watcher dropped".to_string());
-                    Err(NetworkError::DialFailed(error))
-                }
-            };
-
-            // Cancel the fail-watcher task so it doesn't leak
-            fail_watcher.abort();
-
-            result
-        })
-        .await
-        .map_err(|_| NetworkError::DialTimeout(DIAL_TIMEOUT))?;
-
-        // Clean up pending dial on any error
-        if result.is_err() {
-            bridge.remove_dial(&request_id).await;
-        }
-
-        result
+        Self::await_dial_result(&bridge, &request_id, dial_rx, event_rx, DIAL_TIMEOUT).await
     }
 
     async fn listen_tcp(&self, port: u16) -> Result<NetworkTcpListener, NetworkError> {
@@ -1073,5 +1021,74 @@ impl TailscaleProvider {
     /// the old async version.
     pub async fn local_addr_async(&self) -> PeerAddr {
         self.local_addr.read().unwrap().clone()
+    }
+
+    /// Wait for a registered dial to resolve: the bridge delivers the
+    /// `TcpStream`, the sidecar reports a dial failure, or the timeout
+    /// elapses.
+    ///
+    /// Cleanup is guaranteed on every exit path — including timeout — so a
+    /// failed dial never leaks its `pending_dials` entry or the fail-watcher
+    /// task (which would otherwise hold a broadcast receiver forever).
+    ///
+    /// `pub(super)` so the module tests can exercise the timeout path.
+    pub(super) async fn await_dial_result(
+        bridge: &Bridge,
+        request_id: &str,
+        dial_rx: oneshot::Receiver<TcpStream>,
+        mut event_rx: broadcast::Receiver<SidecarInternalEvent>,
+        timeout: Duration,
+    ) -> Result<TcpStream, NetworkError> {
+        // Spawn a task to watch for dial failure events. It lives OUTSIDE
+        // the timeout future so its JoinHandle survives a timeout and we can
+        // always abort it — a dropped handle would detach the task, leaking
+        // a broadcast receiver that loops forever.
+        let fail_request_id = request_id.to_string();
+        let (fail_tx, fail_rx) = oneshot::channel::<String>();
+        let fail_watcher: JoinHandle<()> = tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(SidecarInternalEvent::DialFailed {
+                        request_id: rid,
+                        error,
+                    }) if rid == fail_request_id => {
+                        let _ = fail_tx.send(error);
+                        return;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let _ = fail_tx.send("event channel closed".to_string());
+                        return;
+                    }
+                    _ => continue,
+                }
+            }
+        });
+
+        let result = match tokio::time::timeout(timeout, async {
+            tokio::select! {
+                stream_result = dial_rx => {
+                    stream_result.map_err(|_| NetworkError::DialFailed("dial cancelled".into()))
+                }
+                fail_result = fail_rx => {
+                    let error = fail_result.unwrap_or_else(|_| "dial watcher dropped".to_string());
+                    Err(NetworkError::DialFailed(error))
+                }
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(NetworkError::DialTimeout(timeout)),
+        };
+
+        // Cancel the fail-watcher task so it doesn't leak — including on timeout.
+        fail_watcher.abort();
+
+        // Clean up the pending dial on any error — including timeout.
+        if result.is_err() {
+            bridge.remove_dial(request_id).await;
+        }
+
+        result
     }
 }

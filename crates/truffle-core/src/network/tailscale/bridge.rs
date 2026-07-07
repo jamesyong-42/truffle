@@ -93,6 +93,12 @@ impl Bridge {
         self.pending_dials.lock().await.remove(request_id);
     }
 
+    /// Number of pending outgoing dials (test-only observability).
+    #[cfg(test)]
+    pub(crate) async fn pending_dial_count(&self) -> usize {
+        self.pending_dials.lock().await.len()
+    }
+
     /// Register a channel for incoming connections on a specific port.
     pub async fn register_listener(&self, port: u16, tx: mpsc::Sender<IncomingConnection>) {
         self.incoming_channels.lock().await.insert(port, tx);

@@ -28,6 +28,10 @@ struct MockNetworkProvider {
     identity: NodeIdentity,
     local_addr: PeerAddr,
     peer_event_tx: broadcast::Sender<NetworkPeerEvent>,
+    /// WhoIs identity JSON to attach to every `IncomingConnection` this mock
+    /// yields. Empty by default so existing tests take the warn-and-allow
+    /// path in `verify_authenticated_identity`.
+    incoming_remote_identity: String,
 }
 
 impl MockNetworkProvider {
@@ -51,7 +55,16 @@ impl MockNetworkProvider {
                 dns_name: None,
             },
             peer_event_tx,
+            incoming_remote_identity: String::new(),
         }
+    }
+
+    /// Attach a fixed WhoIs identity JSON to every incoming connection, so
+    /// the server-side hello exchange can verify a claimed `tailscale_id`
+    /// against it. Used only by the identity-verification tests.
+    fn with_incoming_identity(mut self, json: &str) -> Self {
+        self.incoming_remote_identity = json.to_string();
+        self
     }
 }
 
@@ -60,7 +73,7 @@ impl NetworkProvider for MockNetworkProvider {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), NetworkError> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         Ok(())
     }
 
@@ -95,6 +108,8 @@ impl NetworkProvider for MockNetworkProvider {
         let actual_port = listener.local_addr().unwrap().port();
         let (tx, rx) = mpsc::channel::<IncomingConnection>(64);
 
+        let remote_identity = self.incoming_remote_identity.clone();
+
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
@@ -102,7 +117,7 @@ impl NetworkProvider for MockNetworkProvider {
                         let conn = IncomingConnection {
                             stream,
                             remote_addr: addr.to_string(),
-                            remote_identity: String::new(),
+                            remote_identity: remote_identity.clone(),
                             port: actual_port,
                         };
                         if tx.send(conn).await.is_err() {
@@ -222,6 +237,8 @@ fn ws_config_defaults() {
     assert_eq!(config.ping_interval, Duration::from_secs(10));
     assert_eq!(config.pong_timeout, Duration::from_secs(30));
     assert_eq!(config.max_message_size, 16 * 1024 * 1024);
+    assert_eq!(config.max_pending_handshakes, 256);
+    assert_eq!(config.handshake_timeout, Duration::from_secs(10));
 }
 
 // ===========================================================================
@@ -328,6 +345,106 @@ async fn ws_connect_and_exchange_messages() {
 }
 
 #[tokio::test]
+async fn ws_rejects_hello_with_mismatched_authenticated_identity() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    // The server's bridge reports a WhoIs-authenticated nodeId of
+    // "real-node-id" for the incoming connection, but the client's hello
+    // will claim tailscale_id "client" — an impersonation attempt.
+    let server_provider = Arc::new(
+        MockNetworkProvider::new("server")
+            .with_incoming_identity(r#"{"dnsName":"mallory.ts.net","nodeId":"real-node-id"}"#),
+    );
+    let client_provider = Arc::new(MockNetworkProvider::new("client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    // The server must close with code 4003 before replying, so the client's
+    // hello exchange errors and the listener never yields a stream.
+    let (client_result, server_accept) = tokio::join!(
+        client_ws.connect(&peer_addr),
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+    );
+
+    assert!(
+        client_result.is_err(),
+        "impersonating client must not complete the hello exchange"
+    );
+    assert!(
+        server_accept.is_err() || server_accept.unwrap().is_none(),
+        "server must not yield a stream for a mismatched identity"
+    );
+}
+
+#[tokio::test]
+async fn ws_accepts_hello_with_matching_authenticated_identity() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    // The bridge-authenticated nodeId matches the tailscale_id the client
+    // advertises in its hello ("client"), so verification passes and the
+    // honest peer connects and routes by its real peer id.
+    let server_provider = Arc::new(
+        MockNetworkProvider::new("server")
+            .with_incoming_identity(r#"{"dnsName":"client.ts.net","nodeId":"client"}"#),
+    );
+    let client_provider = Arc::new(MockNetworkProvider::new("client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
+
+    let mut client_stream = client_result.expect("honest client connect should succeed");
+    let mut server_stream = server_stream.expect("server should accept the matching connection");
+
+    assert_eq!(server_stream.remote_peer_id(), "client");
+
+    client_stream.close().await.unwrap();
+    server_stream.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn ws_handshake_version_mismatch() {
     // This tests the handshake parsing logic directly since we can't easily
     // inject a version mismatch through the full transport flow without
@@ -413,6 +530,98 @@ async fn ws_binary_frame_roundtrip() {
 
     client_stream.close().await.unwrap();
     server_stream.close().await.unwrap();
+}
+
+// ===========================================================================
+// WS handshake DoS bounds (max_pending_handshakes + handshake_timeout)
+// ===========================================================================
+
+#[tokio::test]
+async fn ws_drops_stalled_pre_hello_connection_after_handshake_timeout() {
+    use crate::transport::websocket::WebSocketTransport;
+    use tokio::io::AsyncReadExt;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("server"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Short handshake timeout so the test resolves quickly.
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        handshake_timeout: Duration::from_millis(300),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config);
+    // Keep the listener alive so the accept loop keeps running.
+    let _listener = server_ws.listen().await.unwrap();
+
+    // Open a raw TCP connection and send nothing — this stalls before the
+    // WebSocket upgrade even begins, modeling a pre-hello DoS attacker.
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // With the 300ms handshake timeout the server must drop the socket, so a
+    // read resolves to EOF (Ok(0)) or a reset (Err) well within 3s. Before the
+    // fix, accept_async_with_config has no timeout and the read hangs the full
+    // 3s, failing the test.
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(Duration::from_secs(3), stalled.read(&mut buf)).await {
+        Ok(Ok(0)) => { /* EOF — connection dropped as expected */ }
+        Ok(Err(_)) => { /* reset — also an acceptable drop */ }
+        Ok(Ok(n)) => panic!("stalled pre-hello connection unexpectedly received {n} bytes"),
+        Err(_) => panic!("stalled pre-hello connection was not dropped"),
+    }
+}
+
+#[tokio::test]
+async fn ws_caps_concurrent_pending_handshakes() {
+    use crate::transport::websocket::WebSocketTransport;
+    use tokio::io::AsyncReadExt;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("server"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Cap at 2 in-flight handshakes with a long timeout, so the two stalled
+    // connections hold their permits for the whole test.
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        max_pending_handshakes: 2,
+        handshake_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config);
+    let _listener = server_ws.listen().await.unwrap();
+
+    // Two silent connections claim both handshake permits.
+    let _first = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _second = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Give the accept loop time to pick both up and acquire their permits.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The third connection finds no permit left, so the accept loop must drop
+    // it immediately (pre-upgrade). Before the fix there is no cap, so it stays
+    // open and the read times out, failing the test.
+    let mut third = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(Duration::from_secs(2), third.read(&mut buf)).await {
+        Ok(Ok(0)) => { /* EOF — third connection dropped as expected */ }
+        Ok(Err(_)) => { /* reset — also an acceptable drop */ }
+        Ok(Ok(n)) => panic!("third pending connection unexpectedly received {n} bytes"),
+        Err(_) => panic!("third pending connection was not dropped despite the handshake cap"),
+    }
 }
 
 // ===========================================================================

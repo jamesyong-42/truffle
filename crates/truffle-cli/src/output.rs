@@ -25,6 +25,7 @@ pub fn init_color(mode: &str) {
     COLOR_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[allow(unsafe_code)]
 fn is_tty() -> bool {
     #[cfg(unix)]
     {

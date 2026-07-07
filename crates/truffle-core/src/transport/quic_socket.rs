@@ -289,7 +289,9 @@ impl Debug for TsnetUdpPoller {
 // - Arc<TsnetUdpSocket> is Send+Sync
 // - The boxed future is Send+Sync (bound in the type)
 // The trait requires Send+Sync+Debug+'static which we satisfy.
+#[allow(unsafe_code)]
 unsafe impl Send for TsnetUdpPoller {}
+#[allow(unsafe_code)]
 unsafe impl Sync for TsnetUdpPoller {}
 
 // ---------------------------------------------------------------------------

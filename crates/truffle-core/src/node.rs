@@ -257,6 +257,10 @@ pub struct Node<N: NetworkProvider + 'static> {
     state_dir: PathBuf,
     /// Reverse proxy subsystem state.
     pub(crate) proxy_state: crate::proxy::ProxyState,
+    /// Set once [`stop`](Self::stop) has completed teardown. Makes further
+    /// `stop()` calls no-ops and causes the send paths to fail fast with
+    /// [`NodeError::Stopped`].
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl<N: NetworkProvider + 'static> Node<N> {
@@ -284,6 +288,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             file_transfer_state: FileTransferState::new(),
             state_dir: PathBuf::new(),
             proxy_state: crate::proxy::ProxyState::new(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Spawn the envelope router task.
@@ -477,14 +482,31 @@ impl<N: NetworkProvider + 'static> Node<N> {
 
     /// Stop the node and all underlying layers.
     ///
-    /// After calling `stop()`, the node should not be used for further
-    /// operations. Peer connections are closed and the network provider
-    /// is shut down.
+    /// Closes every active WebSocket connection (Layer 5) and shuts down the
+    /// network provider (Layer 3 — sidecar + bridge). After `stop()` returns,
+    /// [`send`](Self::send) and [`send_typed`](Self::send_typed) fail with
+    /// [`NodeError::Stopped`], and [`broadcast`](Self::broadcast) /
+    /// [`broadcast_typed`](Self::broadcast_typed) become no-ops.
+    ///
+    /// Idempotent: calling `stop()` more than once is safe — subsequent calls
+    /// return immediately without repeating teardown.
+    ///
+    /// The envelope-router and peer-event background tasks are not aborted
+    /// here; they exit on their own once the `Node` is dropped and their
+    /// broadcast channels close. They sit idle after `stop()`.
     pub async fn stop(&self) {
+        if self.stopped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            tracing::debug!("node: stop() called on already-stopped node");
+            return;
+        }
         tracing::info!("node: stopping");
-        // The session and network layers will be cleaned up when the last
-        // Arc reference is dropped. For now, we signal intent to stop.
-        // Future enhancement: add explicit shutdown signals to each layer.
+        // Layer 5: close all active WebSocket connections.
+        self.session.shutdown().await;
+        // Layer 3: shut down the network provider (sidecar + bridge).
+        if let Err(e) = self.network.stop().await {
+            tracing::warn!(error = %e, "node: network provider stop failed");
+        }
+        tracing::info!("node: stopped");
     }
 
     // ── Identity ─────────────────────────────────────────────────────────
@@ -605,12 +627,26 @@ impl<N: NetworkProvider + 'static> Node<N> {
 
     // ── Messaging (Layer 6 envelope over Layer 4 WS) ─────────────────────
 
+    /// Return [`NodeError::Stopped`] if [`stop`](Self::stop) has already run.
+    ///
+    /// Used by the send paths to fail fast instead of attempting a doomed
+    /// session send after teardown.
+    fn ensure_not_stopped(&self) -> Result<(), NodeError> {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(NodeError::Stopped);
+        }
+        Ok(())
+    }
+
     /// Send a namespaced message to a specific peer.
     ///
     /// The data is wrapped in a Layer 6 [`Envelope`] with the given namespace
     /// and a `"message"` type, then serialized and sent via the session layer.
     /// If no WebSocket connection exists, one is lazily established.
+    ///
+    /// Returns [`NodeError::Stopped`] if [`stop`](Self::stop) has been called.
     pub async fn send(&self, peer_id: &str, namespace: &str, data: &[u8]) -> Result<(), NodeError> {
+        self.ensure_not_stopped()?;
         // If the data is valid UTF-8 JSON, parse it into a proper JSON value
         // so the receiver gets a structured object rather than an array of
         // byte values.  This is critical for the file transfer protocol and
@@ -642,6 +678,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         msg_type: &str,
         payload: &serde_json::Value,
     ) -> Result<(), NodeError> {
+        self.ensure_not_stopped()?;
         let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
         let encoded = self.codec.encode(&envelope)?;
         self.session.send(peer_id, &encoded).await?;
@@ -656,6 +693,10 @@ impl<N: NetworkProvider + 'static> Node<N> {
         msg_type: &str,
         payload: &serde_json::Value,
     ) {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::debug!("node: broadcast after stop ignored");
+            return;
+        }
         let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
         match self.codec.encode(&envelope) {
             Ok(encoded) => {
@@ -672,6 +713,10 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Only peers with active WebSocket connections receive the broadcast.
     /// No lazy connections are established.
     pub async fn broadcast(&self, namespace: &str, data: &[u8]) {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::debug!("node: broadcast after stop ignored");
+            return;
+        }
         let payload = std::str::from_utf8(data)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -1143,6 +1188,7 @@ mod tests {
     };
     use crate::transport::WsConfig;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
 
@@ -1154,6 +1200,9 @@ mod tests {
         peer_event_tx: broadcast::Sender<NetworkPeerEvent>,
         /// Pre-loaded peer list for `peers()`.
         mock_peers: Arc<RwLock<Vec<NetworkPeer>>>,
+        /// Count of `stop()` invocations — lets tests assert the Node
+        /// actually shut the provider down during teardown.
+        stop_calls: Arc<AtomicUsize>,
     }
 
     impl MockNetworkProvider {
@@ -1178,11 +1227,17 @@ mod tests {
                 },
                 peer_event_tx,
                 mock_peers: Arc::new(RwLock::new(Vec::new())),
+                stop_calls: Arc::new(AtomicUsize::new(0)),
             }
         }
 
         fn event_sender(&self) -> broadcast::Sender<NetworkPeerEvent> {
             self.peer_event_tx.clone()
+        }
+
+        /// Number of times `stop()` has been called on this provider.
+        fn stop_call_count(&self) -> usize {
+            self.stop_calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1191,7 +1246,8 @@ mod tests {
             Ok(())
         }
 
-        async fn stop(&mut self) -> Result<(), NetworkError> {
+        async fn stop(&self) -> Result<(), NetworkError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1620,6 +1676,110 @@ mod tests {
         }
         // If send fails due to loopback WS peer-id mismatch, that's expected
         // in unit tests. The important thing is no panics.
+    }
+
+    // ── Lifecycle: stop() teardown ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_node_stop_shuts_down_provider_and_is_idempotent() {
+        let ws_port = random_port().await;
+        let (node, event_tx, network) = make_test_node("node-1", ws_port).await;
+
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-1")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(network.stop_call_count(), 0);
+        node.stop().await;
+        assert_eq!(
+            network.stop_call_count(),
+            1,
+            "stop() must shut down the provider"
+        );
+
+        // Idempotent: second stop must not stop the provider again.
+        node.stop().await;
+        assert_eq!(network.stop_call_count(), 1);
+
+        // Post-stop sends fail with NodeError::Stopped.
+        let err = node.send("peer-1", "test", b"hi").await.unwrap_err();
+        assert!(matches!(err, NodeError::Stopped));
+    }
+
+    #[tokio::test]
+    async fn test_node_stop_closes_ws_connections() {
+        // Two nodes on random ports, each discovering the other as a loopback
+        // peer. Modeled on `test_node_send_and_receive_roundtrip`.
+        let port_a = random_port().await;
+        let port_b = random_port().await;
+
+        let (node_a, event_tx_a, _net_a) = make_test_node("node-a", port_a).await;
+        let (node_b, event_tx_b, _net_b) = make_test_node("node-b", port_b).await;
+
+        let peer_b = NetworkPeer {
+            id: "node-b".to_string(),
+            hostname: "truffle-test-node-b".to_string(),
+            ip: "127.0.0.1".parse().unwrap(),
+            online: true,
+            cur_addr: Some("127.0.0.1:41641".to_string()),
+            relay: None,
+            os: None,
+            last_seen: None,
+            key_expiry: None,
+            dns_name: None,
+        };
+        let peer_a = NetworkPeer {
+            id: "node-a".to_string(),
+            hostname: "truffle-test-node-a".to_string(),
+            ip: "127.0.0.1".parse().unwrap(),
+            online: true,
+            cur_addr: Some("127.0.0.1:41641".to_string()),
+            relay: None,
+            os: None,
+            last_seen: None,
+            key_expiry: None,
+            dns_name: None,
+        };
+
+        let _ = event_tx_a.send(NetworkPeerEvent::Joined(peer_b));
+        let _ = event_tx_b.send(NetworkPeerEvent::Joined(peer_a));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // node_b's listener exists on port_b; in a real multi-IP tailnet
+        // node_a would dial it. Under the loopback mock every node shares
+        // 127.0.0.1, so node_a's dial lands on its own listener instead —
+        // which is fine for exercising stop()'s connection teardown.
+        let _rx = node_b.subscribe("test");
+
+        // Send from node_a to establish the WS. In loopback the dial lands on
+        // node_a's own listener, so the hello stamps node_a's identity onto
+        // the node-b entry — that flips the public `Peer.id` projection to
+        // node-a, so we key off the stable `tailscale_id` (the Layer 3
+        // routing key) which stays "node-b".
+        node_a
+            .send("node-b", "test", b"hello from a")
+            .await
+            .expect("loopback send should establish a WS connection");
+
+        let peers = node_a.peers().await;
+        let b = peers
+            .iter()
+            .find(|p| p.tailscale_id == "node-b")
+            .expect("peer b discovered");
+        assert!(
+            b.ws_connected,
+            "send() should have established a WS connection to node-b"
+        );
+
+        node_a.stop().await;
+        let peers = node_a.peers().await;
+        let b = peers
+            .iter()
+            .find(|p| p.tailscale_id == "node-b")
+            .expect("peer b still discovered");
+        assert!(
+            !b.ws_connected,
+            "stop() must close and un-mark WS connections"
+        );
     }
 
     // ── RFC 017 Phase 2: resolve_peer_id ─────────────────────────────

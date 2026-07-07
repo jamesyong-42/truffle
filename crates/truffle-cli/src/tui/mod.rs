@@ -58,6 +58,10 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
             "Failed to create output dir: {e}"
         );
     }
+    // Restrict PULL_REQUEST serving to the download directory (deny-by-default).
+    if let Err(e) = node.file_transfer().add_pull_root(&output_dir) {
+        tracing::warn!(dir = output_dir.as_str(), "Pull serving disabled: {e}");
+    }
     let offer_rx = node.file_transfer().offer_channel(node.clone()).await;
 
     // Subscribe to peer events, chat messages, and file transfer events
@@ -460,12 +464,10 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
             app.input.insert(byte_pos, c);
             app.cursor_pos += 1;
         }
-        KeyCode::Backspace => {
-            if app.cursor_pos > 0 {
-                app.cursor_pos -= 1;
-                let byte_pos = char_to_byte_pos(&app.input, app.cursor_pos);
-                app.input.remove(byte_pos);
-            }
+        KeyCode::Backspace if app.cursor_pos > 0 => {
+            app.cursor_pos -= 1;
+            let byte_pos = char_to_byte_pos(&app.input, app.cursor_pos);
+            app.input.remove(byte_pos);
         }
         KeyCode::Delete => {
             let char_count = app.input.chars().count();
@@ -501,16 +503,14 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
                 app.accept_autocomplete();
             }
         }
-        KeyCode::Up => {
-            if !app.history.is_empty() {
-                let idx = match app.history_index {
-                    None => app.history.len() - 1,
-                    Some(i) => i.saturating_sub(1),
-                };
-                app.history_index = Some(idx);
-                app.input = app.history[idx].clone();
-                app.cursor_pos = app.input.chars().count();
-            }
+        KeyCode::Up if !app.history.is_empty() => {
+            let idx = match app.history_index {
+                None => app.history.len() - 1,
+                Some(i) => i.saturating_sub(1),
+            };
+            app.history_index = Some(idx);
+            app.input = app.history[idx].clone();
+            app.cursor_pos = app.input.chars().count();
         }
         KeyCode::Down => {
             if let Some(idx) = app.history_index {
@@ -1149,6 +1149,7 @@ async fn populate_peers(
 ///
 /// Log goes to `~/.config/truffle/tui.log`. The file handle is leaked
 /// intentionally so the fd/handle stays valid for the process lifetime.
+#[allow(unsafe_code)]
 fn redirect_stderr_to_log() {
     let log_path = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))

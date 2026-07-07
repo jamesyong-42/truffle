@@ -22,7 +22,7 @@ pub async fn execute(args: &str, app: &mut AppState) -> CommandResult {
     };
 
     // Resolve device name to peer ID
-    let peer = match resolve_peer(&app, &device_name) {
+    let peer = match resolve_peer(app, &device_name) {
         Some(p) => p,
         None => {
             let available: Vec<String> = app

@@ -125,38 +125,39 @@ pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleCo
                             break;
                         }
                     }
-                    KeyCode::Char(c) if state.phase == Phase::NamePrompt => {
+                    KeyCode::Char(c)
+                        if state.phase == Phase::NamePrompt
                         // RFC 017 §5.2: device_name accepts any printable
                         // Unicode. Reject only control characters (\n, \t,
                         // ESC). The 64-grapheme cap is a UX ceiling for the
                         // onboarding prompt; the 256-grapheme hard cap is
                         // enforced downstream by `DeviceName::parse`.
-                        if is_device_name_char_ok(c) {
-                            // Build the candidate string and reject if it
-                            // would exceed the grapheme budget. Cursor is a
-                            // byte offset into `name_input`.
-                            let mut candidate = state.name_input.clone();
-                            candidate.insert(state.cursor_pos, c);
-                            if is_device_name_len_ok(&candidate) {
-                                state.name_input = candidate;
-                                state.cursor_pos += c.len_utf8();
-                                state.error = None;
-                            }
-                        }
-                    }
-                    KeyCode::Backspace if state.phase == Phase::NamePrompt => {
-                        if state.cursor_pos > 0 {
-                            // Walk back to the previous char boundary so we
-                            // delete a whole codepoint, not a byte.
-                            let new_cursor = state.name_input[..state.cursor_pos]
-                                .char_indices()
-                                .next_back()
-                                .map(|(i, _)| i)
-                                .unwrap_or(0);
-                            state.name_input.drain(new_cursor..state.cursor_pos);
-                            state.cursor_pos = new_cursor;
+                        && is_device_name_char_ok(c) =>
+                    {
+                        // Build the candidate string and reject if it
+                        // would exceed the grapheme budget. Cursor is a
+                        // byte offset into `name_input`.
+                        let mut candidate = state.name_input.clone();
+                        candidate.insert(state.cursor_pos, c);
+                        if is_device_name_len_ok(&candidate) {
+                            state.name_input = candidate;
+                            state.cursor_pos += c.len_utf8();
                             state.error = None;
                         }
+                    }
+                    KeyCode::Backspace
+                        if state.phase == Phase::NamePrompt && state.cursor_pos > 0 =>
+                    {
+                        // Walk back to the previous char boundary so we
+                        // delete a whole codepoint, not a byte.
+                        let new_cursor = state.name_input[..state.cursor_pos]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        state.name_input.drain(new_cursor..state.cursor_pos);
+                        state.cursor_pos = new_cursor;
+                        state.error = None;
                     }
                     KeyCode::Left if state.phase == Phase::NamePrompt => {
                         // Step back one codepoint.
@@ -166,16 +167,17 @@ pub async fn run(base_config: &TruffleConfig) -> Result<(DaemonServer, TruffleCo
                             .map(|(i, _)| i)
                             .unwrap_or(0);
                     }
-                    KeyCode::Right if state.phase == Phase::NamePrompt => {
-                        if state.cursor_pos < state.name_input.len() {
-                            // Step forward one codepoint.
-                            let next = state.name_input[state.cursor_pos..]
-                                .chars()
-                                .next()
-                                .map(|c| state.cursor_pos + c.len_utf8())
-                                .unwrap_or(state.cursor_pos);
-                            state.cursor_pos = next;
-                        }
+                    KeyCode::Right
+                        if state.phase == Phase::NamePrompt
+                            && state.cursor_pos < state.name_input.len() =>
+                    {
+                        // Step forward one codepoint.
+                        let next = state.name_input[state.cursor_pos..]
+                            .chars()
+                            .next()
+                            .map(|c| state.cursor_pos + c.len_utf8())
+                            .unwrap_or(state.cursor_pos);
+                        state.cursor_pos = next;
                     }
                     KeyCode::Home if state.phase == Phase::NamePrompt => {
                         state.cursor_pos = 0;
@@ -288,6 +290,7 @@ fn restore_terminal() {
 
 const SPINNERS: &[&str] = &["◐", "◓", "◑", "◒"];
 
+#[allow(clippy::vec_init_then_push)]
 fn render(frame: &mut Frame, state: &OnboardingState) {
     let area = frame.area();
 

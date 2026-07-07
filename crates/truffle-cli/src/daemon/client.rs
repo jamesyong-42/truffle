@@ -49,6 +49,12 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+impl Default for DaemonClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DaemonClient {
     /// Create a new client that connects to the default socket path.
     pub fn new() -> Self {
@@ -296,10 +302,9 @@ impl DaemonClient {
                 ));
             }
 
-            if self.is_daemon_running() {
-                if ipc::IpcStream::connect(&self.socket_path).await.is_ok() {
-                    return Ok(());
-                }
+            if self.is_daemon_running() && ipc::IpcStream::connect(&self.socket_path).await.is_ok()
+            {
+                return Ok(());
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

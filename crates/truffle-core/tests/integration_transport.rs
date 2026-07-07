@@ -74,7 +74,7 @@ impl NetworkProvider for MockNetworkProvider {
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<(), NetworkError> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         Ok(())
     }
 

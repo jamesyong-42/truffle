@@ -5,7 +5,9 @@
 //!
 //! - **Sending**: Push a local file to a remote peer.
 //! - **Receiving**: Accept/reject incoming file offers via an offer channel.
-//! - **Pulling**: Request a file from a remote peer.
+//! - **Pulling**: Request a file from a remote peer. On the serving side, pulls
+//!   are served only from roots registered via [`FileTransfer::add_pull_root`];
+//!   with no roots configured all incoming PULL_REQUESTs are rejected.
 //! - **Events**: Subscribe to transfer lifecycle events (progress, completed, failed).
 //!
 //! # Architecture
@@ -65,6 +67,8 @@ pub(crate) struct FileTransferState {
     pub(crate) offer_tx: Mutex<Option<mpsc::UnboundedSender<(FileOffer, OfferResponder)>>>,
     /// Maximum allowed transfer size in bytes.
     pub(crate) max_transfer_size: AtomicU64,
+    /// Canonicalized roots that PULL_REQUESTs may be served from. Empty = deny all pulls.
+    pub(crate) pull_roots: std::sync::RwLock<Vec<std::path::PathBuf>>,
     /// Handle to the background receiver task (lazy-started).
     pub(crate) receiver_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -77,6 +81,7 @@ impl FileTransferState {
             event_tx,
             offer_tx: Mutex::new(None),
             max_transfer_size: AtomicU64::new(DEFAULT_MAX_TRANSFER_SIZE),
+            pull_roots: std::sync::RwLock::new(Vec::new()),
             receiver_handle: Mutex::new(None),
         }
     }
@@ -124,6 +129,33 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     /// Get the current maximum transfer size in bytes.
     pub fn max_transfer_size(&self) -> u64 {
         self.state().max_transfer_size.load(Ordering::Relaxed)
+    }
+
+    /// Register a directory that incoming PULL_REQUESTs may be served from.
+    ///
+    /// Pull serving is **deny-by-default**: with no roots registered every
+    /// incoming PULL_REQUEST is rejected. The `root` is canonicalized at
+    /// registration time (so it must already exist, and symlinked roots
+    /// compare correctly against canonicalized request paths); a requested
+    /// file is only served if its canonical path lives inside one of these
+    /// roots.
+    pub fn add_pull_root(&self, root: &str) -> std::io::Result<()> {
+        let canon = std::fs::canonicalize(root)?;
+        self.state().pull_roots.write().unwrap().push(canon);
+        Ok(())
+    }
+
+    /// Return the currently registered (canonicalized) pull roots.
+    ///
+    /// An empty list means pull serving is disabled (deny-by-default).
+    pub fn pull_roots(&self) -> Vec<std::path::PathBuf> {
+        self.state().pull_roots.read().unwrap().clone()
+    }
+
+    /// Remove all registered pull roots, disabling pull serving entirely
+    /// (returns to the deny-by-default state).
+    pub fn clear_pull_roots(&self) {
+        self.state().pull_roots.write().unwrap().clear();
     }
 
     /// Get a channel for receiving incoming file offers.
@@ -349,8 +381,7 @@ async fn pull_file<N: NetworkProvider + 'static>(
         crate::request_reply::RequestError::ChannelClosed => {
             TransferError::Protocol("Channel closed".into())
         }
-    })?
-    .map_err(|e| e)?;
+    })??;
 
     // M1: reject an over-size OFFER before accepting the pull.
     let max_size = node

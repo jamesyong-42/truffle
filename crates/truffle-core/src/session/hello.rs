@@ -38,6 +38,10 @@ pub const CLOSE_APP_MISMATCH: u16 = 4001;
 /// timeout.
 pub const CLOSE_HELLO_PROTOCOL: u16 = 4002;
 
+/// The hello envelope claimed a `tailscale_id` that does not match the
+/// Tailscale-authenticated identity (WhoIs) of the underlying connection.
+pub const CLOSE_IDENTITY_MISMATCH: u16 = 4003;
+
 /// Timeout applied to the first hello envelope read.
 pub const HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 

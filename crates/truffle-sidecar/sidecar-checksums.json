@@ -1,0 +1,10 @@
+{
+  "_comment": "SHA-256 of each GitHub Release sidecar asset, keyed by release version then by asset filename. Read by build.rs: when an entry for the building version/asset is present, the build FAILS HARD on checksum mismatch; when absent it emits an 'integrity NOT verified' cargo warning. Populate at release time, e.g. `shasum -a 256 tsnet-sidecar-*` over the built assets. Asset keys must match the asset names in build.rs.",
+  "0.4.8": {
+    "tsnet-sidecar-darwin-arm64": "acfaed6a2de2cb250adb5d3ce5122f5530005a331ad8eb539af6376fe79fc69a",
+    "tsnet-sidecar-darwin-amd64": "68bcbf7bb6e61de57e357f0940ef4db8dd86ab2bd69d34e48264ff5d945a6e6c",
+    "tsnet-sidecar-linux-amd64": "a4450bbbf72777b9773207b96a9585040cbf27ea98f0c02a6e186a288b5d85c2",
+    "tsnet-sidecar-linux-arm64": "90482a6f6b671873d58c57c466c6bd0390573b6b150a98ec4648d1634a1000b2",
+    "tsnet-sidecar-windows-amd64.exe": "62db3a5d3fea8b917851000107cd3ede08dbc0245429693c6baf2f2e0b87c3e7"
+  }
+}

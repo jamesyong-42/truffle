@@ -230,12 +230,10 @@ impl DatagramSocket {
                 let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| {
                     TransportError::ConnectFailed(format!("invalid address '{addr}': {e}"))
                 })?;
-                socket.send_to(data, sock_addr).await.map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })
+                socket
+                    .send_to(data, sock_addr)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))
             }
         }
     }
@@ -248,12 +246,10 @@ impl DatagramSocket {
                 Ok((n, addr.to_string()))
             }
             Self::Network { socket } => {
-                let (n, addr) = socket.recv_from(buf).await.map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })?;
+                let (n, addr) = socket
+                    .recv_from(buf)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
                 Ok((n, addr.to_string()))
             }
         }
@@ -263,12 +259,9 @@ impl DatagramSocket {
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, TransportError> {
         match self {
             Self::Direct { socket } => socket.local_addr().map_err(TransportError::Io),
-            Self::Network { socket } => socket.local_addr().map_err(|e| {
-                TransportError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            }),
+            Self::Network { socket } => socket
+                .local_addr()
+                .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string()))),
         }
     }
 }
@@ -315,6 +308,15 @@ pub struct WsConfig {
     pub pong_timeout: Duration,
     /// Maximum WebSocket message size in bytes.
     pub max_message_size: usize,
+    /// Maximum number of concurrent in-flight incoming handshakes (WS
+    /// upgrade + hello exchange). Connections beyond the cap are dropped
+    /// before the upgrade; established connections are not counted.
+    pub max_pending_handshakes: usize,
+    /// Maximum time an incoming connection may take to complete the WS
+    /// upgrade + hello exchange before it is dropped. Must exceed
+    /// HELLO_TIMEOUT (5s) so hello timeouts keep their specific
+    /// classification.
+    pub handshake_timeout: Duration,
 }
 
 impl Default for WsConfig {
@@ -324,6 +326,8 @@ impl Default for WsConfig {
             ping_interval: Duration::from_secs(10),
             pong_timeout: Duration::from_secs(30),
             max_message_size: 16 * 1024 * 1024, // 16 MiB
+            max_pending_handshakes: 256,
+            handshake_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -397,6 +401,17 @@ pub enum TransportError {
         local: String,
         /// The `app_id` advertised by the remote peer.
         remote: String,
+    },
+
+    /// The hello envelope's claimed `tailscale_id` did not match the
+    /// Tailscale-authenticated identity of the connection (RFC 017 §8,
+    /// close code 4003).
+    #[error("identity mismatch: hello claimed tailscale_id={claimed}, authenticated nodeId={authenticated}")]
+    IdentityMismatch {
+        /// The `tailscale_id` the hello envelope claimed.
+        claimed: String,
+        /// The Tailscale-authenticated node ID (WhoIs) of the connection.
+        authenticated: String,
     },
 
     /// The connection was closed unexpectedly.

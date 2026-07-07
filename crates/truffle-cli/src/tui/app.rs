@@ -235,7 +235,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(node: Arc<Node<TailscaleProvider>>, config: TruffleConfig) -> Self {
-        let state = Self {
+        Self {
             node,
             items: Vec::new(),
             scroll_offset: 0,
@@ -254,9 +254,7 @@ impl AppState {
             transfer_dialog: None,
             pending_offers: VecDeque::new(),
             config,
-        };
-
-        state
+        }
     }
 
     /// Push a display item to the feed, respecting the cap.

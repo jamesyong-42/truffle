@@ -280,6 +280,44 @@ pub async fn reject_offer(
     Ok(())
 }
 
+/// Register a directory whose files may be served to peers on PULL_REQUEST.
+///
+/// Pull-serving is deny-by-default: only files under a registered pull root
+/// are served to peers. The path is canonicalized before registration.
+#[command]
+pub async fn add_pull_root(state: State<'_, TruffleState>, root: String) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    ft.add_pull_root(&root).map_err(|e| e.to_string())
+}
+
+/// List the currently registered pull roots.
+///
+/// Pull-serving is deny-by-default: only files under a registered pull root
+/// are served to peers.
+#[command]
+pub async fn pull_roots(state: State<'_, TruffleState>) -> Result<Vec<String>, String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    Ok(ft
+        .pull_roots()
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect())
+}
+
+/// Clear all registered pull roots.
+///
+/// Pull-serving is deny-by-default: with no roots registered, no files are
+/// served to peers.
+#[command]
+pub async fn clear_pull_roots(state: State<'_, TruffleState>) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    let ft = node.file_transfer();
+    ft.clear_pull_roots();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CRDT Documents
 // ---------------------------------------------------------------------------

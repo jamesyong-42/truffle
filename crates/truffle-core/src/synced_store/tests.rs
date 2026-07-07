@@ -73,7 +73,7 @@ impl NetworkProvider for MockNetworkProvider {
     async fn start(&mut self) -> Result<(), NetworkError> {
         Ok(())
     }
-    async fn stop(&mut self) -> Result<(), NetworkError> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         Ok(())
     }
     async fn peers(&self) -> Vec<NetworkPeer> {
