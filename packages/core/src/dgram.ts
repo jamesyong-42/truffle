@@ -108,13 +108,26 @@ export class TruffleDgramSocket extends EventEmitter {
    * Deviates from node:dgram, which returns the socket synchronously and
    * signals readiness only via the event; here bind is genuinely async
    * (it round-trips to the sidecar), so the promise is the primary channel.
-   * Bind failures **reject the promise** rather than emitting `'error'` —
-   * `await` it or attach a `.catch`.
+   * Failure semantics follow the calling style: promise style (`await
+   * sock.bind(p)`) **rejects**; callback style (`sock.bind(p, cb)`,
+   * typically fire-and-forget) emits **`'error'`** like node:dgram and
+   * never leaves an unhandled rejection.
    */
-  async bind(port = 0, callback?: () => void): Promise<this> {
+  bind(port = 0, callback?: () => void): Promise<this> {
+    const attempt = this.#bind(port);
+    if (!callback) return attempt;
+
+    this.once('listening', callback);
+    return attempt.catch((err) => {
+      this.removeListener('listening', callback);
+      this.emit('error', err as Error);
+      return this;
+    });
+  }
+
+  async #bind(port: number): Promise<this> {
     if (this.#closed) throw new Error('dgram: socket is closed');
     if (this.#native || this.#binding) throw new Error('dgram: bind() already called');
-    if (callback) this.once('listening', callback);
 
     this.#binding = true;
     let native: NapiUdpSocket;

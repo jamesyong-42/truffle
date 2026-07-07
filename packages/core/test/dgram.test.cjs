@@ -254,3 +254,28 @@ test('TruffleDgramSocket surfaces a recv error then closes', async () => {
   assert.match(err.message, /relay gone/);
   await closeEvent;
 });
+
+test('TruffleDgramSocket bind(port, cb) failure emits error, not an unhandled rejection', async () => {
+  const { createDgramNamespace } = await loadDgram();
+  const node = {
+    async bindUdp() {
+      throw new Error('relay bind failed');
+    },
+    async getPeers() {
+      return [];
+    },
+  };
+
+  const sock = createDgramNamespace(node).createSocket();
+  const errorEvent = once(sock, 'error');
+  let listeningFired = false;
+  // Fire-and-forget callback style (the node:dgram idiom) — failure must
+  // surface as 'error', and the returned promise must not reject unhandled.
+  sock.bind(4444, () => {
+    listeningFired = true;
+  });
+
+  const [err] = await errorEvent;
+  assert.match(err.message, /relay bind failed/);
+  assert.equal(listeningFired, false);
+});

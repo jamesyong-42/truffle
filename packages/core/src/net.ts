@@ -195,6 +195,7 @@ export class TruffleServer extends EventEmitter {
   #node: NapiNode;
   #listener: NapiTcpListener | null = null;
   #closed = false;
+  #closeEmitted = false;
 
   /** Bound port; set once `'listening'` fires (resolved when 0 was requested). */
   port?: number;
@@ -238,6 +239,12 @@ export class TruffleServer extends EventEmitter {
     } catch (err) {
       if (!this.#closed) this.emit('error', err);
     }
+    this.#emitClose();
+  }
+
+  #emitClose(): void {
+    if (this.#closeEmitted) return;
+    this.#closeEmitted = true;
     this.emit('close');
   }
 
@@ -246,18 +253,27 @@ export class TruffleServer extends EventEmitter {
     return this.port === undefined ? null : { port: this.port };
   }
 
-  /** Stop accepting connections and release the port. */
+  /**
+   * Stop accepting connections and release the port. `callback` fires on
+   * `'close'` — including when the server already closed (e.g. the accept
+   * loop ended on its own after a mesh teardown), like `net.Server#close`.
+   */
   close(callback?: () => void): this {
-    if (callback) this.once('close', callback);
+    if (callback) {
+      if (this.#closeEmitted) queueMicrotask(callback);
+      else this.once('close', callback);
+    }
     if (this.#closed) return this;
     this.#closed = true;
     const listener = this.#listener;
     this.#listener = null;
     if (listener) {
-      // accept() resolves null → the loop exits and emits 'close'.
+      // accept() resolves null → the loop exits and emits 'close' (unless
+      // the loop already ended on its own — then 'close' already fired and
+      // this just releases the native listener).
       void listener.close();
     } else {
-      this.emit('close');
+      this.#emitClose();
     }
     return this;
   }

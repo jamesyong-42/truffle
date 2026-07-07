@@ -205,3 +205,28 @@ test('createNetNamespace connect() validates host and supports (port, host)', as
   socket.destroy();
   await once(socket, 'close');
 });
+
+test('TruffleServer close(cb) fires even after the accept loop ended on its own', async () => {
+  const { TruffleServer } = await loadNet();
+  const mockListener = {
+    async accept() {
+      return null; // listener torn down externally (e.g. mesh stop)
+    },
+    port: () => 4243,
+    async close() {},
+  };
+  const mockNode = {
+    async listenTcp() {
+      return mockListener;
+    },
+  };
+
+  const server = new TruffleServer(mockNode);
+  const selfClosed = new Promise((resolve) => server.once('close', resolve));
+  server.listen(0);
+  await once(server, 'listening');
+  await selfClosed; // accept loop exited by itself; 'close' already emitted
+
+  // net.Server semantics: a later close(cb) must still invoke cb.
+  await new Promise((resolve) => server.close(resolve));
+});
