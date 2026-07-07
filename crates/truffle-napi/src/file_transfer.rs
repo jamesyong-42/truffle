@@ -236,6 +236,40 @@ impl NapiFileTransfer {
         let ft = self.node.file_transfer();
         ft.set_max_transfer_size(bytes as u64);
     }
+
+    /// Register a directory whose files may be served to peers on PULL_REQUEST.
+    ///
+    /// Pull-serving is deny-by-default: only files under a registered pull root
+    /// are served to peers. The path is canonicalized before registration.
+    #[napi]
+    pub fn add_pull_root(&self, root: String) -> Result<()> {
+        let ft = self.node.file_transfer();
+        ft.add_pull_root(&root)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// List the currently registered pull roots.
+    ///
+    /// Pull-serving is deny-by-default: only files under a registered pull root
+    /// are served to peers.
+    #[napi]
+    pub fn pull_roots(&self) -> Vec<String> {
+        let ft = self.node.file_transfer();
+        ft.pull_roots()
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Clear all registered pull roots.
+    ///
+    /// Pull-serving is deny-by-default: with no roots registered, no files are
+    /// served to peers.
+    #[napi]
+    pub fn clear_pull_roots(&self) {
+        let ft = self.node.file_transfer();
+        ft.clear_pull_roots();
+    }
 }
 
 // ---------------------------------------------------------------------------

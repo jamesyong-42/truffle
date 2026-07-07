@@ -94,6 +94,27 @@ export declare class NapiFileTransfer {
   onEvent(callback: (event: FileTransferEvent) => void): void
   /** Set the maximum allowed transfer size in bytes. */
   setMaxTransferSize(bytes: number): void
+  /**
+   * Register a directory whose files may be served to peers on PULL_REQUEST.
+   *
+   * Pull-serving is deny-by-default: only files under a registered pull root
+   * are served to peers. The path is canonicalized before registration.
+   */
+  addPullRoot(root: string): void
+  /**
+   * List the currently registered pull roots.
+   *
+   * Pull-serving is deny-by-default: only files under a registered pull root
+   * are served to peers.
+   */
+  pullRoots(): Array<string>
+  /**
+   * Clear all registered pull roots.
+   *
+   * Pull-serving is deny-by-default: with no roots registered, no files are
+   * served to peers.
+   */
+  clearPullRoots(): void
 }
 
 /**

@@ -30,6 +30,9 @@
 //! - `auto_accept(output_dir)` — Auto-accept incoming file offers
 //! - `accept_offer(token, save_path)` — Accept a pending file offer
 //! - `reject_offer(token, reason)` — Reject a pending file offer
+//! - `add_pull_root(root)` — Register a directory whose files may be pull-served
+//! - `pull_roots()` — List registered pull roots
+//! - `clear_pull_roots()` — Clear all registered pull roots
 //!
 //! # CRDT Document Commands
 //!
@@ -105,6 +108,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::auto_reject,
             commands::accept_offer,
             commands::reject_offer,
+            commands::add_pull_root,
+            commands::pull_roots,
+            commands::clear_pull_roots,
             commands::crdt_doc_create,
             commands::crdt_doc_destroy,
             commands::crdt_doc_get_value,
