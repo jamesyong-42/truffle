@@ -1,6 +1,6 @@
 # RFC 021: Raw Transport Surface for the JS API
 
-**Status**: Draft
+**Status**: Implemented (Phases 1–4, 2026-07-07; Phase 5 items remain future work)
 **Author**: James Yong + Claude
 **Date**: 2026-07-07
 **Depends on**: RFC 012 (layered architecture), RFC 015 (bindings rewrite), RFC 017 (identity & namespacing)

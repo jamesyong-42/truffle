@@ -205,9 +205,7 @@ pub enum NodeError {
     NotImplemented(String),
 
     /// The port is reserved by truffle's own listeners.
-    #[error(
-        "port {0} is reserved by truffle (443 = sidecar TLS, 9417 = default session WebSocket)"
-    )]
+    #[error("port {0} is reserved by truffle (443 = sidecar TLS, or the session WebSocket port)")]
     ReservedPort(u16),
 
     /// The node has been stopped.
@@ -262,6 +260,9 @@ pub struct Node<N: NetworkProvider + 'static> {
     /// State directory for persistence (e.g., CRDT backends). Empty path
     /// when constructed via `from_parts` (tests); set by the builder.
     state_dir: PathBuf,
+    /// The session WebSocket listen port (reserved against raw listeners).
+    /// Defaults to 9417 in `from_parts`; set by the builder.
+    ws_port: u16,
     /// Reverse proxy subsystem state.
     pub(crate) proxy_state: crate::proxy::ProxyState,
     /// Set once [`stop`](Self::stop) has completed teardown. Makes further
@@ -294,6 +295,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             namespace_filters: namespace_filters.clone(),
             file_transfer_state: FileTransferState::new(),
             state_dir: PathBuf::new(),
+            ws_port: 9417,
             proxy_state: crate::proxy::ProxyState::new(),
             stopped: std::sync::atomic::AtomicBool::new(false),
         };
@@ -475,6 +477,13 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Set the state directory (called by the builder after construction).
     pub(crate) fn with_state_dir(mut self, dir: PathBuf) -> Self {
         self.state_dir = dir;
+        self
+    }
+
+    /// Record the session WebSocket port (called by the builder) so the
+    /// reserved-port guard tracks a customized `ws_port`.
+    pub(crate) fn with_ws_port(mut self, port: u16) -> Self {
+        self.ws_port = port;
         self
     }
 
@@ -806,7 +815,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         use crate::transport::tcp::TcpTransport;
         use crate::transport::RawTransport;
 
-        ensure_port_unreserved(port)?;
+        ensure_port_unreserved(port, self.ws_port)?;
         let tcp = TcpTransport::new(self.network.clone());
         tcp.listen(port).await.map_err(NodeError::Transport)
     }
@@ -850,7 +859,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// tsnet relay (the relay cannot report the actual ephemeral port
     /// back).
     pub async fn listen_quic(&self, port: u16) -> Result<QuicListener, NodeError> {
-        ensure_port_unreserved(port)?;
+        ensure_port_unreserved(port, self.ws_port)?;
         if port == 0 {
             return Err(NodeError::NotImplemented(
                 "ephemeral (port 0) QUIC listeners are not supported over the tsnet relay yet — choose an explicit port"
@@ -882,11 +891,12 @@ impl<N: NetworkProvider + 'static> Node<N> {
 }
 
 /// Reject ports reserved by truffle's own listeners: 443 (sidecar TLS) and
-/// 9417 (default session WebSocket port).
-fn ensure_port_unreserved(port: u16) -> Result<(), NodeError> {
-    match port {
-        443 | 9417 => Err(NodeError::ReservedPort(port)),
-        _ => Ok(()),
+/// the node's configured session WebSocket port (default 9417).
+fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
+    if port == 443 || port == ws_port {
+        Err(NodeError::ReservedPort(port))
+    } else {
+        Ok(())
     }
 }
 
@@ -1178,7 +1188,9 @@ impl NodeBuilder {
 
         // 4. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
+        let node = Node::from_parts(network, session, codec)
+            .with_state_dir(state_dir)
+            .with_ws_port(ws_port);
 
         tracing::info!("node: started successfully");
         Ok(node)
@@ -1246,7 +1258,9 @@ impl NodeBuilder {
 
         // 8. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
+        let node = Node::from_parts(network, session, codec)
+            .with_state_dir(state_dir)
+            .with_ws_port(ws_port);
 
         tracing::info!("node: started successfully (with auth handler)");
         Ok(node)

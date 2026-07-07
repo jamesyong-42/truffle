@@ -55,10 +55,12 @@ test('TruffleSocket delivers data then end, with metadata on connect', async () 
   const { native } = mockNativeSocket([Buffer.from('hello '), Buffer.from('mesh')]);
 
   const socket = new TruffleSocket(native);
-  await once(socket, 'connect');
+  // Inbound (non-promise) sockets expose peer metadata synchronously so a
+  // 'connection' handler can gate/log at accept time (RFC 021 §8/§9).
   assert.equal(socket.remoteAddress, 'other-machine:9000');
   assert.equal(socket.remotePeerId, 'PEER-ID-01');
   assert.equal(socket.remotePeerName, 'Other Machine');
+  await once(socket, 'connect');
 
   const received = [];
   socket.on('data', (chunk) => received.push(chunk));

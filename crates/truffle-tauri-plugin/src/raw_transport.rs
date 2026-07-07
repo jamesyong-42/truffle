@@ -59,10 +59,14 @@ fn new_id(prefix: &str) -> String {
 
 /// A parked raw TCP socket. Read and write halves hold independent locks so a
 /// `tcp_read` blocked awaiting bytes never blocks a `tcp_write` on the same
-/// socket — matching `NapiTcpSocket`.
+/// socket — matching `NapiTcpSocket`. `close_notify` unblocks a pending
+/// `tcp_read` on close (it holds the read lock across its await, so
+/// `tcp_close` would otherwise block until the peer sent data).
 pub struct TcpSocketEntry {
     read: Arc<Mutex<Option<OwnedReadHalf>>>,
     write: Arc<Mutex<Option<OwnedWriteHalf>>>,
+    closed: Arc<AtomicBool>,
+    close_notify: Arc<Notify>,
 }
 
 /// A parked raw TCP listener plus its resolved port (ephemeral `0` → real).
@@ -87,10 +91,13 @@ pub struct QuicConnectionEntry {
 
 /// A parked QUIC stream (independent send/recv locks, like the NAPI stream).
 /// `connection_id` lets `quic_close` sweep this stream's registry entry when
-/// its parent connection is closed.
+/// its parent connection is closed. `close_notify` unblocks a pending
+/// `quic_stream_read` on close (it holds the recv lock across its await).
 pub struct QuicStreamEntry {
     send: Arc<Mutex<Option<quinn::SendStream>>>,
     recv: Arc<Mutex<Option<quinn::RecvStream>>>,
+    closed: Arc<AtomicBool>,
+    close_notify: Arc<Notify>,
     connection_id: String,
 }
 
@@ -202,6 +209,8 @@ pub async fn tcp_open(
         TcpSocketEntry {
             read: Arc::new(Mutex::new(Some(read))),
             write: Arc::new(Mutex::new(Some(write))),
+            closed: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(Notify::new()),
         },
     );
     Ok(TcpOpenResult {
@@ -223,13 +232,26 @@ pub async fn tcp_read(
 ) -> Result<Option<Vec<u8>>, String> {
     // Clone the read half's Arc out under the map lock, then release the map
     // lock before awaiting the read (so other sockets are not serialized).
-    let read = {
+    let (read, closed, close_notify) = {
         let map = state.tcp_sockets.lock().await;
-        map.get(&socket_id)
-            .ok_or_else(|| format!("No TCP socket with id: {socket_id}"))?
-            .read
-            .clone()
+        let entry = map
+            .get(&socket_id)
+            .ok_or_else(|| format!("No TCP socket with id: {socket_id}"))?;
+        (
+            entry.read.clone(),
+            entry.closed.clone(),
+            entry.close_notify.clone(),
+        )
     };
+
+    // Register for the close signal BEFORE checking the flag, so a concurrent
+    // tcp_close can never slip between check and select.
+    let notified = close_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if closed.load(Ordering::Acquire) {
+        return Ok(None);
+    }
 
     let cap = max_bytes
         .unwrap_or(DEFAULT_READ_BYTES)
@@ -240,15 +262,18 @@ pub async fn tcp_read(
         None => return Ok(None), // closed locally
     };
     let mut buf = vec![0u8; cap];
-    let n = half
-        .read(&mut buf)
-        .await
-        .map_err(|e| format!("tcp read: {e}"))?;
-    if n == 0 {
-        return Ok(None); // clean EOF
+    tokio::select! {
+        biased;
+        _ = &mut notified => Ok(None),
+        result = half.read(&mut buf) => {
+            let n = result.map_err(|e| format!("tcp read: {e}"))?;
+            if n == 0 {
+                return Ok(None); // clean EOF
+            }
+            buf.truncate(n);
+            Ok(Some(buf))
+        }
     }
-    buf.truncate(n);
-    Ok(Some(buf))
 }
 
 /// Write all of `data` to a TCP socket (respects backpressure).
@@ -297,6 +322,10 @@ pub async fn tcp_end(state: State<'_, TruffleState>, socket_id: String) -> Resul
 pub async fn tcp_close(state: State<'_, TruffleState>, socket_id: String) -> Result<(), String> {
     let entry = state.tcp_sockets.lock().await.remove(&socket_id);
     if let Some(entry) = entry {
+        // Signal first: a pending tcp_read exits with None and releases the
+        // read-half lock, so the take below cannot block on it.
+        entry.closed.store(true, Ordering::Release);
+        entry.close_notify.notify_waiters();
         if let Some(mut half) = entry.write.lock().await.take() {
             let _ = half.shutdown().await;
         }
@@ -379,6 +408,8 @@ pub async fn tcp_accept(
         TcpSocketEntry {
             read: Arc::new(Mutex::new(Some(read))),
             write: Arc::new(Mutex::new(Some(write))),
+            closed: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(Notify::new()),
         },
     );
     Ok(Some(TcpAcceptResult {
@@ -496,6 +527,12 @@ pub async fn udp_recv(
             entry.close_notify.clone(),
         )
     };
+    // Register for the close signal BEFORE checking the flag, so a concurrent
+    // udp_close can never slip between check and select (notify_waiters wakes
+    // only already-enabled waiters).
+    let notified = close_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
     if closed.load(Ordering::Acquire) {
         return Ok(None);
     }
@@ -503,7 +540,7 @@ pub async fn udp_recv(
     let mut buf = vec![0u8; RECV_BUF_BYTES];
     tokio::select! {
         biased;
-        _ = close_notify.notified() => Ok(None),
+        _ = &mut notified => Ok(None),
         result = socket.recv_from(&mut buf) => {
             let (n, addr) = result.map_err(|e| format!("udp recv: {e}"))?;
             buf.truncate(n);
@@ -631,6 +668,8 @@ async fn register_quic_stream(
         QuicStreamEntry {
             send: Arc::new(Mutex::new(Some(send))),
             recv: Arc::new(Mutex::new(Some(recv))),
+            closed: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(Notify::new()),
             connection_id,
         },
     );
@@ -645,13 +684,27 @@ pub async fn quic_stream_read(
     stream_id: String,
     max_bytes: Option<u32>,
 ) -> Result<Option<Vec<u8>>, String> {
-    let recv = {
+    let (recv, closed, close_notify) = {
         let map = state.quic_streams.lock().await;
-        map.get(&stream_id)
-            .ok_or_else(|| format!("No QUIC stream with id: {stream_id}"))?
-            .recv
-            .clone()
+        let entry = map
+            .get(&stream_id)
+            .ok_or_else(|| format!("No QUIC stream with id: {stream_id}"))?;
+        (
+            entry.recv.clone(),
+            entry.closed.clone(),
+            entry.close_notify.clone(),
+        )
     };
+
+    // Register for the close signal BEFORE checking the flag, so a concurrent
+    // quic_stream_close can never slip between check and select.
+    let notified = close_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if closed.load(Ordering::Acquire) {
+        return Ok(None);
+    }
+
     let cap = max_bytes
         .unwrap_or(DEFAULT_READ_BYTES)
         .clamp(1, MAX_READ_BYTES) as usize;
@@ -661,13 +714,17 @@ pub async fn quic_stream_read(
         None => return Ok(None),
     };
     let mut buf = vec![0u8; cap];
-    match half.read(&mut buf).await {
-        Ok(Some(n)) => {
-            buf.truncate(n);
-            Ok(Some(buf))
+    tokio::select! {
+        biased;
+        _ = &mut notified => Ok(None),
+        result = half.read(&mut buf) => match result {
+            Ok(Some(n)) => {
+                buf.truncate(n);
+                Ok(Some(buf))
+            }
+            Ok(None) => Ok(None), // clean EOF
+            Err(e) => Err(format!("quic read: {e}")),
         }
-        Ok(None) => Ok(None), // clean EOF
-        Err(e) => Err(format!("quic read: {e}")),
     }
 }
 
@@ -722,6 +779,10 @@ pub async fn quic_stream_close(
     stream_id: String,
 ) -> Result<(), String> {
     if let Some(entry) = state.quic_streams.lock().await.remove(&stream_id) {
+        // Signal first: a pending quic_stream_read exits with None and
+        // releases the recv-half lock, so the take below cannot block on it.
+        entry.closed.store(true, Ordering::Release);
+        entry.close_notify.notify_waiters();
         if let Some(mut half) = entry.send.lock().await.take() {
             let _ = half.finish();
         }

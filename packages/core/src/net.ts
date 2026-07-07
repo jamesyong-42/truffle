@@ -46,17 +46,38 @@ export class TruffleSocket extends Duplex {
 
   constructor(native: NapiTcpSocket | Promise<NapiTcpSocket>) {
     super({ allowHalfOpen: true });
-    this.#ready = Promise.resolve(native).then((sock) => {
+    const adopt = (sock: NapiTcpSocket): NapiTcpSocket => {
       this.#native = sock;
       this.remoteAddress = sock.remoteAddress();
       this.remotePeerId = sock.remotePeerId() ?? undefined;
       this.remotePeerName = sock.remotePeerName() ?? undefined;
-      this.emit('connect');
-      this.emit('ready');
       return sock;
-    });
-    // A failed dial destroys the socket with the error, like net.Socket.
-    this.#ready.catch((err) => this.destroy(err as Error));
+    };
+    if (typeof (native as PromiseLike<NapiTcpSocket>).then === 'function') {
+      // Outbound: the dial is in flight; metadata lands on 'connect'.
+      this.#ready = Promise.resolve(native).then((sock) => {
+        adopt(sock);
+        this.emit('connect');
+        this.emit('ready');
+        return sock;
+      });
+      // A failed dial destroys the socket with the error, like net.Socket.
+      this.#ready.catch((err) => this.destroy(err as Error));
+    } else {
+      // Inbound (accept-path) sockets are already connected: set the peer
+      // metadata synchronously so a 'connection' handler can read
+      // remotePeerId/remotePeerName immediately for accept-time gating.
+      // The events still fire asynchronously — constructor-time emits
+      // would have no listeners yet.
+      const sock = adopt(native as NapiTcpSocket);
+      this.#ready = Promise.resolve(sock);
+      queueMicrotask(() => {
+        if (!this.destroyed) {
+          this.emit('connect');
+          this.emit('ready');
+        }
+      });
+    }
   }
 
   override _read(size: number): void {
