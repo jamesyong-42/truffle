@@ -3,7 +3,9 @@
 //!
 //! Instead of auto-accepting, offers are forwarded through an offer channel
 //! so the application can decide whether to accept or reject each transfer.
-//! Pull requests are auto-served (same as the CLI version).
+//! Pull requests are served only when the canonicalized requested path lives
+//! inside a configured pull root (see [`super::FileTransfer::add_pull_root`]);
+//! with no roots configured all incoming PULL_REQUESTs are denied.
 
 use std::sync::Arc;
 
@@ -65,11 +67,56 @@ fn resolve_dest_path(save_path: &str, file_name: &str) -> Result<String, Transfe
     }
 }
 
+/// Authorize a peer-supplied PULL_REQUEST path against the allowlist.
+///
+/// Deny-by-default: an empty allowlist rejects everything. The path is
+/// canonicalized (resolving symlinks and `..`) and must be a regular file
+/// inside one of the canonicalized `roots`, no larger than `max_size`.
+///
+/// [`std::path::Path::starts_with`] is component-wise, so a root of `/shared`
+/// does not match a sibling `/shared-evil`. Missing, non-file, and
+/// outside-root cases all return the same "not shared" message to avoid
+/// leaking an existence oracle to the requester.
+fn authorize_pull_path(
+    roots: &[std::path::PathBuf],
+    requested: &str,
+    max_size: u64,
+) -> Result<std::path::PathBuf, TransferError> {
+    if roots.is_empty() {
+        return Err(TransferError::Rejected(
+            "pull serving is not enabled on this peer".into(),
+        ));
+    }
+    let canon = std::fs::canonicalize(requested)
+        .map_err(|_| TransferError::Rejected("requested path is not shared".into()))?;
+    if !roots.iter().any(|r| canon.starts_with(r)) {
+        return Err(TransferError::Rejected(
+            "requested path is not shared".into(),
+        ));
+    }
+    let meta = std::fs::metadata(&canon)
+        .map_err(|_| TransferError::Rejected("requested path is not shared".into()))?;
+    if !meta.is_file() {
+        return Err(TransferError::Rejected(
+            "requested path is not shared".into(),
+        ));
+    }
+    if meta.len() > max_size {
+        return Err(TransferError::Rejected(format!(
+            "file size {} exceeds max transfer size {max_size}",
+            meta.len()
+        )));
+    }
+    Ok(canon)
+}
+
 /// Spawn a background task that listens for incoming file transfer messages.
 ///
 /// - **OFFER**: Creates a [`FileOffer`] + [`OfferResponder`] pair, sends them
 ///   on the `offer_tx` channel, and waits up to 60 seconds for a decision.
-/// - **PULL_REQUEST**: Auto-serves the requested file (same as CLI).
+/// - **PULL_REQUEST**: Serves the requested file only if its canonicalized path
+///   is inside a configured pull root (see [`super::FileTransfer::add_pull_root`]);
+///   denied by default.
 /// - **ACCEPT / REJECT**: Ignored (handled by send/pull initiators).
 pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
     node: Arc<Node<N>>,
@@ -481,13 +528,40 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
     node: &Node<N>,
     from: &str,
     path: &str,
-    _token: &str,
+    token: &str,
     event_tx: &broadcast::Sender<FileTransferEvent>,
 ) -> Result<(), TransferError> {
     info!(from = from, path = path, "Processing PULL_REQUEST");
 
+    // Authorize the peer-supplied path against the deny-by-default pull-root
+    // allowlist BEFORE any filesystem I/O. This blocks arbitrary absolute-path
+    // reads (e.g. `/etc/hosts`) and enforces the max transfer size + regular-file
+    // check on the serving side.
+    let max_size = node
+        .file_transfer_state
+        .max_transfer_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let roots = node.file_transfer_state.pull_roots.read().unwrap().clone();
+    let serve_path = match authorize_pull_path(&roots, path, max_size) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(from = from, path = path, "Denying PULL_REQUEST: {e}");
+            // Best-effort Reject so the requester fails fast instead of timing out.
+            let reject = FtMessage::Reject {
+                token: token.to_string(),
+                reason: "pull denied by peer".to_string(),
+            };
+            if let Ok(payload) = serde_json::to_value(&reject) {
+                if let Err(send_err) = node.send_typed(from, "ft", "reject", &payload).await {
+                    warn!(from = from, "Failed to send pull REJECT: {send_err}");
+                }
+            }
+            return Err(e);
+        }
+    };
+
     // Read and hash the file
-    let data = tokio::fs::read(path)
+    let data = tokio::fs::read(&serve_path)
         .await
         .map_err(|e| TransferError::Io(e))?;
     let size = data.len() as u64;
@@ -627,6 +701,15 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
 mod tests {
     use super::*;
 
+    // Extra imports for the behavioral mock-node test (`handle_pull_request_*`).
+    use crate::envelope::codec::JsonCodec;
+    use crate::envelope::EnvelopeCodec;
+    use crate::network::*;
+    use crate::session::PeerRegistry;
+    use crate::transport::websocket::WebSocketTransport;
+    use crate::transport::WsConfig;
+    use std::time::Duration;
+
     #[test]
     fn safe_base_name_strips_directories() {
         assert_eq!(safe_base_name("file.txt").as_deref(), Some("file.txt"));
@@ -670,6 +753,247 @@ mod tests {
         assert_eq!(
             resolve_dest_path("/tmp/truffle-explicit-file.bin", "ignored").unwrap(),
             "/tmp/truffle-explicit-file.bin"
+        );
+    }
+
+    // ── PULL_REQUEST authorization (pull-arbitrary-read fix) ──────────
+
+    #[test]
+    fn pull_denied_when_no_roots() {
+        // Deny-by-default: with no roots registered, even a real file is denied.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, b"hi").unwrap();
+        let err = authorize_pull_path(&[], file.to_str().unwrap(), u64::MAX).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+    }
+
+    #[test]
+    fn pull_allowlisted_file_authorized() {
+        // A regular file inside a registered root is served (returns its canonical path).
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("f.txt");
+        std::fs::write(&file, b"hi").unwrap();
+        let got = authorize_pull_path(&[root], file.to_str().unwrap(), u64::MAX).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&file).unwrap());
+    }
+
+    #[test]
+    fn pull_outside_root_rejected() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let root_a = std::fs::canonicalize(dir_a.path()).unwrap();
+        let file_b = dir_b.path().join("secret.txt");
+        std::fs::write(&file_b, b"secret").unwrap();
+
+        // (1) A file that lives entirely outside the root is rejected.
+        let err =
+            authorize_pull_path(&[root_a.clone()], file_b.to_str().unwrap(), u64::MAX).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+
+        // (2) A `..` escape that climbs out of the root is rejected: canonicalize
+        //     resolves the `..`, so the resulting path fails the starts_with check.
+        let dir_b_name = dir_b.path().file_name().unwrap().to_str().unwrap();
+        let dotdot = format!("{}/../{}/secret.txt", dir_a.path().display(), dir_b_name);
+        let err = authorize_pull_path(&[root_a], &dotdot, u64::MAX).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+    }
+
+    #[test]
+    fn pull_prefix_collision_rejected() {
+        // "shared-evil" shares a string prefix with the "shared" root but is a
+        // different path component — Path::starts_with must not be fooled.
+        let base = tempfile::tempdir().unwrap();
+        let shared = base.path().join("shared");
+        let evil = base.path().join("shared-evil");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&evil).unwrap();
+        let evil_file = evil.join("f.txt");
+        std::fs::write(&evil_file, b"x").unwrap();
+
+        let root = std::fs::canonicalize(&shared).unwrap();
+        let err = authorize_pull_path(&[root], evil_file.to_str().unwrap(), u64::MAX).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_symlink_escape_rejected() {
+        // A symlink inside the root pointing at a file outside it must not leak
+        // the target: canonicalize resolves the link to its out-of-root target.
+        let root_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root_dir.path()).unwrap();
+
+        let secret = outside_dir.path().join("secret.txt");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let err = authorize_pull_path(&[root], link.to_str().unwrap(), u64::MAX).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+    }
+
+    #[test]
+    fn pull_oversize_file_rejected() {
+        // A 4-byte file under the root is rejected when max_size is 3.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("big.bin");
+        std::fs::write(&file, b"1234").unwrap();
+        let err = authorize_pull_path(&[root], file.to_str().unwrap(), 3).unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)));
+    }
+
+    // ── Mock network provider (per-module copy, mirrors request_reply.rs) ──
+
+    struct MockNetworkProvider {
+        identity: NodeIdentity,
+        local_addr: PeerAddr,
+        peer_event_tx: tokio::sync::broadcast::Sender<NetworkPeerEvent>,
+        mock_peers: Arc<tokio::sync::RwLock<Vec<NetworkPeer>>>,
+    }
+
+    impl MockNetworkProvider {
+        fn new(id: &str) -> Self {
+            let (peer_event_tx, _) = tokio::sync::broadcast::channel(64);
+            Self {
+                identity: NodeIdentity {
+                    app_id: "test".to_string(),
+                    device_id: id.to_string(),
+                    device_name: format!("Test Node {id}"),
+                    tailscale_hostname: format!("truffle-test-{id}"),
+                    tailscale_id: id.to_string(),
+                    dns_name: None,
+                    ip: Some("127.0.0.1".parse().unwrap()),
+                },
+                local_addr: PeerAddr {
+                    ip: Some("127.0.0.1".parse().unwrap()),
+                    hostname: format!("truffle-test-{id}"),
+                    dns_name: None,
+                },
+                peer_event_tx,
+                mock_peers: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            }
+        }
+
+        fn event_sender(&self) -> tokio::sync::broadcast::Sender<NetworkPeerEvent> {
+            self.peer_event_tx.clone()
+        }
+    }
+
+    impl NetworkProvider for MockNetworkProvider {
+        fn local_identity(&self) -> NodeIdentity {
+            self.identity.clone()
+        }
+        fn local_addr(&self) -> PeerAddr {
+            self.local_addr.clone()
+        }
+        fn peer_events(&self) -> tokio::sync::broadcast::Receiver<NetworkPeerEvent> {
+            self.peer_event_tx.subscribe()
+        }
+
+        async fn start(&mut self) -> Result<(), NetworkError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), NetworkError> {
+            Ok(())
+        }
+        async fn peers(&self) -> Vec<NetworkPeer> {
+            self.mock_peers.read().await.clone()
+        }
+        async fn dial_tcp(
+            &self,
+            _addr: &str,
+            _port: u16,
+        ) -> Result<tokio::net::TcpStream, NetworkError> {
+            Err(NetworkError::DialFailed("mock".into()))
+        }
+        async fn listen_tcp(&self, _port: u16) -> Result<NetworkTcpListener, NetworkError> {
+            Err(NetworkError::ListenFailed("mock".into()))
+        }
+        async fn unlisten_tcp(&self, _port: u16) -> Result<(), NetworkError> {
+            Ok(())
+        }
+        async fn bind_udp(&self, _port: u16) -> Result<NetworkUdpSocket, NetworkError> {
+            Err(NetworkError::NotRunning)
+        }
+        async fn ping(&self, _addr: &str) -> Result<PingResult, NetworkError> {
+            Ok(PingResult {
+                latency: Duration::from_millis(1),
+                connection: "direct".to_string(),
+                peer_addr: None,
+            })
+        }
+        async fn health(&self) -> HealthInfo {
+            HealthInfo {
+                state: "running".to_string(),
+                healthy: true,
+                ..Default::default()
+            }
+        }
+    }
+
+    fn ws_config(port: u16) -> WsConfig {
+        WsConfig {
+            port,
+            ping_interval: Duration::from_secs(300),
+            pong_timeout: Duration::from_secs(300),
+            ..Default::default()
+        }
+    }
+
+    async fn random_port() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    async fn make_test_node(
+        id: &str,
+        ws_port: u16,
+    ) -> (
+        Node<MockNetworkProvider>,
+        tokio::sync::broadcast::Sender<NetworkPeerEvent>,
+    ) {
+        let provider = MockNetworkProvider::new(id);
+        let event_tx = provider.event_sender();
+        let network = Arc::new(provider);
+        let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(ws_port)));
+        let session = Arc::new(PeerRegistry::new(network.clone(), ws_transport));
+        session.start().await;
+
+        let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
+        let node = Node::from_parts(network, session, codec);
+        (node, event_tx)
+    }
+
+    /// Regression test for the pull-arbitrary-read finding: a PULL_REQUEST for a
+    /// real, readable file is denied when the node has registered no pull roots,
+    /// and the denial happens WITHOUT any network/file transfer taking place.
+    ///
+    /// Before the fix this returned `TransferError::Node(...)` (the file was read,
+    /// then the OFFER send to the unknown peer failed); after the fix it is a
+    /// `Rejected` produced before any file I/O.
+    #[tokio::test]
+    async fn handle_pull_request_denied_by_default() {
+        let (node, _event_tx) = make_test_node("node-a", random_port().await).await;
+
+        // A real, readable file the attacker would love to exfiltrate.
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, b"top secret").unwrap();
+        let secret_path = secret.to_str().unwrap();
+
+        let (event_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let err = handle_pull_request(&node, "peer-x", secret_path, "tok-1", &event_tx)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, TransferError::Rejected(_)),
+            "expected Rejected, got {err}"
         );
     }
 }

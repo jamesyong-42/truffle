@@ -14,7 +14,8 @@ use truffle_core::node::Node;
 ///
 /// Delegates to `node.file_transfer().auto_accept()` which handles:
 /// - Incoming OFFERs (auto-accept, receive via TCP, verify SHA-256)
-/// - Incoming PULL_REQUESTs (read file, send OFFER, stream via TCP)
+/// - Incoming PULL_REQUESTs (read file, send OFFER, stream via TCP) — pull
+///   serving is restricted to `output_dir` via `add_pull_root` (deny-by-default).
 ///
 /// Uses concrete `TailscaleProvider` to ensure futures are Send.
 pub fn spawn_receive_handler(
@@ -37,6 +38,10 @@ pub fn spawn_receive_handler(
         }
 
         let ft = node.file_transfer();
+        // Restrict PULL_REQUEST serving to the download directory (deny-by-default).
+        if let Err(e) = ft.add_pull_root(&output_dir) {
+            tracing::warn!(dir = output_dir.as_str(), "Pull serving disabled: {e}");
+        }
         ft.auto_accept(node.clone(), &output_dir).await;
 
         // Keep the task alive — auto_accept spawns its own internal task

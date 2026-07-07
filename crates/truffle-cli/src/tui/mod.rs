@@ -58,6 +58,10 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
             "Failed to create output dir: {e}"
         );
     }
+    // Restrict PULL_REQUEST serving to the download directory (deny-by-default).
+    if let Err(e) = node.file_transfer().add_pull_root(&output_dir) {
+        tracing::warn!(dir = output_dir.as_str(), "Pull serving disabled: {e}");
+    }
     let offer_rx = node.file_transfer().offer_channel(node.clone()).await;
 
     // Subscribe to peer events, chat messages, and file transfer events
