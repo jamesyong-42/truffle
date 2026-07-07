@@ -40,8 +40,8 @@
   },
   "files": [
     "dist",
-    "bin",
-    "scripts"
+    "scripts",
+    "sidecar-checksums.json"
   ],
   "scripts": {
     "build": "tsc",
@@ -53,7 +53,7 @@
     "@vibecook/truffle-native": "workspace:*"
   },
   "optionalDependencies": {
-    "@vibecook/truffle-sidecar-darwin-arm64": "^0.3.0",
+    "@vibecook/truffle-sidecar-darwin-arm64": "^0.4.6",
     "@vibecook/truffle-sidecar-darwin-x64": "^0.4.6",
     "@vibecook/truffle-sidecar-linux-x64": "^0.4.5",
     "@vibecook/truffle-sidecar-linux-arm64": "^0.4.5",

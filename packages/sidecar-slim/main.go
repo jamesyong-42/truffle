@@ -45,6 +45,22 @@ const (
 	dirOutgoing = 0x02
 
 	writeDeadline = 60 * time.Second
+	// idleDeadline reaps bridged/relayed connections that go idle in BOTH
+	// directions, so a peer that opens a connection and stops talking cannot
+	// pin a goroutine + fds forever.
+	idleDeadline = 10 * time.Minute
+	// dialTimeout bounds an outbound tsnet dial so a blackholed peer can't hang
+	// a dial goroutine until stop.
+	dialTimeout = 30 * time.Second
+	// whoisTimeout bounds the per-connection WhoIs identity lookup.
+	whoisTimeout = 3 * time.Second
+	// statusTimeout bounds LocalClient.Status() calls.
+	statusTimeout = 10 * time.Second
+	// maxCommandBytes caps a single stdin command line. Over-size lines are
+	// skipped with an error rather than killing the sidecar.
+	maxCommandBytes = 8 * 1024 * 1024
+	// maxWaitingFileBytes caps a single received Taildrop file (F8).
+	maxWaitingFileBytes = 10 << 30 // 10 GiB
 )
 
 // Command/Event JSON types
@@ -150,8 +166,9 @@ type unlistenedData struct {
 
 // pingData is the payload for tsnet:ping commands.
 type pingData struct {
-	Target   string `json:"target"`
-	PingType string `json:"pingType,omitempty"` // "TSMP", "Disco", "ICMP" (default: "TSMP")
+	Target    string `json:"target"`
+	PingType  string `json:"pingType,omitempty"`  // "TSMP", "Disco", "ICMP" (default: "TSMP")
+	RequestID string `json:"requestId,omitempty"` // optional correlation id echoed back
 }
 
 // pingResultData is the payload for tsnet:pingResult events.
@@ -162,6 +179,7 @@ type pingResultData struct {
 	Relay     string  `json:"relay,omitempty"`
 	PeerAddr  string  `json:"peerAddr,omitempty"`
 	Error     string  `json:"error,omitempty"`
+	RequestID string  `json:"requestId,omitempty"` // echoes pingData.RequestID (P12)
 }
 
 // pushFileData is the payload for tsnet:pushFile commands.
@@ -233,8 +251,8 @@ type peerChangedData struct {
 
 // keyExpiringData is the payload for tsnet:keyExpiring events.
 type keyExpiringData struct {
-	ExpiresAt  string `json:"expiresAt"`
-	ExpiresIn  int64  `json:"expiresInSecs"`
+	ExpiresAt string `json:"expiresAt"`
+	ExpiresIn int64  `json:"expiresInSecs"`
 }
 
 // healthWarningData is the payload for tsnet:healthWarning events.
@@ -310,6 +328,47 @@ type proxyEntry struct {
 	listener     net.Listener
 	server       *http.Server
 	cancel       context.CancelFunc
+
+	// wsConns tracks live hijacked WebSocket connections. http.Server.Shutdown
+	// does NOT close hijacked conns, so we close them explicitly on teardown (P1).
+	wsMu    sync.Mutex
+	wsConns map[net.Conn]struct{}
+}
+
+func (e *proxyEntry) addWS(c net.Conn) {
+	e.wsMu.Lock()
+	if e.wsConns == nil {
+		e.wsConns = make(map[net.Conn]struct{})
+	}
+	e.wsConns[c] = struct{}{}
+	e.wsMu.Unlock()
+}
+
+func (e *proxyEntry) removeWS(c net.Conn) {
+	e.wsMu.Lock()
+	delete(e.wsConns, c)
+	e.wsMu.Unlock()
+}
+
+// shutdown tears the proxy down in the correct order (P5): cancel in-flight
+// round-trips first, then graceful HTTP shutdown, then close the listener and
+// any hijacked WebSocket conns Shutdown does not touch (P1).
+func (e *proxyEntry) shutdown(timeout time.Duration) {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	e.server.Shutdown(ctx)
+	cancel()
+	if e.listener != nil {
+		e.listener.Close()
+	}
+	e.wsMu.Lock()
+	for c := range e.wsConns {
+		c.Close()
+		delete(e.wsConns, c)
+	}
+	e.wsMu.Unlock()
 }
 
 // listenPacketData is the payload for tsnet:listenPacket commands.
@@ -334,15 +393,20 @@ type udpRelay struct {
 
 // shim is the main application state.
 type shim struct {
-	server       *tsnet.Server
+	// serverMu guards server + dnsName, both written from the dispatch loop
+	// (start/stop) and read from many spawned goroutines.
+	serverMu sync.RWMutex
+	server   *tsnet.Server
+	dnsName  string // set when status becomes "running"
+
 	sessionToken []byte // 32 bytes
 	bridgePort   uint16
 
 	writeMu sync.Mutex // protects stdout writes
 	writer  *json.Encoder
 
-	listenerMu sync.Mutex   // protects listeners
-	listeners  []net.Listener // active listeners (TLS :443, TCP :9417)
+	listenerMu sync.Mutex     // protects listeners
+	listeners  []net.Listener // active listeners (TLS :443, dynamic)
 
 	// dynamicListeners tracks listeners created via tsnet:listen, keyed by port.
 	dynamicListenerMu sync.Mutex
@@ -356,10 +420,46 @@ type shim struct {
 	proxyMu sync.Mutex
 	proxies map[string]*proxyEntry
 
-	dnsName string // set when status becomes "running"
+	// watchCancel stops a running WatchIPNBus goroutine (guarded by watchMu).
+	watchMu     sync.Mutex
+	watchCancel context.CancelFunc
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// getServer returns the current tsnet server (nil if not started/stopped).
+func (s *shim) getServer() *tsnet.Server {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	return s.server
+}
+
+func (s *shim) setServer(srv *tsnet.Server) {
+	s.serverMu.Lock()
+	s.server = srv
+	s.serverMu.Unlock()
+}
+
+func (s *shim) getDNSName() string {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	return s.dnsName
+}
+
+func (s *shim) setDNSName(name string) {
+	s.serverMu.Lock()
+	s.dnsName = name
+	s.serverMu.Unlock()
+}
+
+// recoverPanic contains a panic in a spawned goroutine so a single bad
+// connection/command can't crash the whole sidecar (dropping the node off the
+// mesh). Deferred at the top of every goroutine and bridgeToRust.
+func (s *shim) recoverPanic(where string) {
+	if r := recover(); r != nil {
+		log.Printf("panic recovered in %s: %v", where, r)
+	}
 }
 
 func main() {
@@ -375,12 +475,22 @@ func main() {
 		cancel:           cancel,
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB max line
+	reader := bufio.NewReader(os.Stdin)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
+	for {
+		line, tooLong, err := readCommandLine(reader, maxCommandBytes)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("stdin read error: %v", err)
+			}
+			break
+		}
+		if tooLong {
+			s.sendError("COMMAND_TOO_LARGE", fmt.Sprintf("command exceeded %d bytes; skipped", maxCommandBytes))
+			continue
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
@@ -409,6 +519,8 @@ func main() {
 			s.handleWatchPeers(cmd.Data)
 		case "tsnet:listenPacket":
 			s.handleListenPacket(cmd.Data)
+		case "tsnet:unlistenPacket":
+			s.handleUnlistenPacket(cmd.Data)
 		case "tsnet:pushFile":
 			s.handlePushFile(cmd.Data)
 		case "tsnet:waitingFiles":
@@ -428,18 +540,46 @@ func main() {
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("stdin read error: %v", err)
-	}
-
 	// Stdin closed — clean shutdown
 	s.handleStop()
+}
+
+// readCommandLine reads one '\n'-terminated command line, bounding memory usage
+// to max bytes. A line longer than max is fully drained (so the stream stays in
+// sync) and reported as tooLong, instead of killing the process — the old
+// bufio.Scanner 1MB cap turned a single over-size line into a full shutdown.
+func readCommandLine(r *bufio.Reader, max int) (line string, tooLong bool, err error) {
+	var sb strings.Builder
+	for {
+		chunk, isPrefix, e := r.ReadLine()
+		if e != nil {
+			return "", false, e
+		}
+		if !tooLong && sb.Len()+len(chunk) <= max {
+			sb.Write(chunk)
+		} else {
+			tooLong = true // keep draining to end-of-line without buffering
+		}
+		if !isPrefix {
+			break
+		}
+	}
+	if tooLong {
+		return "", true, nil
+	}
+	return sb.String(), false, nil
 }
 
 func (s *shim) handleStart(data json.RawMessage) {
 	var d startData
 	if err := json.Unmarshal(data, &d); err != nil {
 		s.sendError("START_ERROR", fmt.Sprintf("invalid start data: %v", err))
+		return
+	}
+
+	// G12: reject a double start rather than orphaning the previous server.
+	if s.getServer() != nil {
+		s.sendError("START_ERROR", "node already started")
 		return
 	}
 
@@ -451,32 +591,47 @@ func (s *shim) handleStart(data json.RawMessage) {
 	s.sessionToken = token
 	s.bridgePort = d.BridgePort
 
+	// F10: re-arm the root context if a previous tsnet:stop cancelled it, so a
+	// restart-in-place doesn't leave every ctx-gated goroutine dead on arrival.
+	if s.ctx.Err() != nil {
+		s.ctx, s.cancel = context.WithCancel(context.Background())
+	}
+
 	s.sendStatus("starting", d.Hostname, "", "", "")
 
-	s.server = &tsnet.Server{
+	srv := &tsnet.Server{
 		Hostname:  d.Hostname,
 		Dir:       d.StateDir,
 		Logf:      log.Printf,
 		Ephemeral: d.Ephemeral,
 	}
 	if d.AuthKey != "" {
-		s.server.AuthKey = d.AuthKey
+		srv.AuthKey = d.AuthKey
 	}
 	if len(d.Tags) > 0 {
-		s.server.AdvertiseTags = d.Tags
+		srv.AdvertiseTags = d.Tags
 	}
 
-	if err := s.server.Start(); err != nil {
+	// M4: only publish the server after a successful Start(), so a failed start
+	// doesn't leave a dead server visible to later commands.
+	if err := srv.Start(); err != nil {
 		s.sendStatus("error", "", "", "", err.Error())
 		return
 	}
+	s.setServer(srv)
 
 	// Wait for running state in background
 	go s.waitForRunning(d.Hostname)
 }
 
 func (s *shim) waitForRunning(hostname string) {
-	lc, err := s.server.LocalClient()
+	defer s.recoverPanic("waitForRunning")
+
+	srv := s.getServer()
+	if srv == nil {
+		return
+	}
+	lc, err := srv.LocalClient()
 	if err != nil {
 		log.Printf("failed to get local client: %v", err)
 		s.sendStatus("error", "", "", "", err.Error())
@@ -484,6 +639,7 @@ func (s *shim) waitForRunning(hostname string) {
 	}
 
 	authURLSent := false
+	needsApprovalSent := false
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -506,8 +662,14 @@ func (s *shim) waitForRunning(hostname string) {
 			authURLSent = true
 		}
 
+		// G10: emit needsApproval only when entering the state, not every 500ms.
 		if status.BackendState == "NeedsMachineAuth" {
-			s.sendEvent("tsnet:needsApproval", nil)
+			if !needsApprovalSent {
+				s.sendEvent("tsnet:needsApproval", nil)
+				needsApprovalSent = true
+			}
+		} else {
+			needsApprovalSent = false
 		}
 
 		if status.BackendState == "Running" {
@@ -517,7 +679,7 @@ func (s *shim) waitForRunning(hostname string) {
 			}
 			dnsName := strings.TrimSuffix(status.Self.DNSName, ".")
 			nodeID := string(status.Self.ID)
-			s.dnsName = dnsName
+			s.setDNSName(dnsName)
 
 			s.sendStatus("running", hostname, dnsName, ip, "")
 			s.sendEvent("tsnet:started", statusData{
@@ -551,7 +713,13 @@ func (s *shim) trackListener(ln net.Listener) {
 }
 
 func (s *shim) listenTLS(lc *tailscale.LocalClient) {
-	ln, err := s.server.ListenTLS("tcp", ":443")
+	defer s.recoverPanic("listenTLS")
+
+	srv := s.getServer()
+	if srv == nil {
+		return
+	}
+	ln, err := srv.ListenTLS("tcp", ":443")
 	if err != nil {
 		log.Printf("ListenTLS :443 failed: %v", err)
 		s.sendError("LISTEN_ERROR", fmt.Sprintf("ListenTLS :443: %v", err))
@@ -570,33 +738,12 @@ func (s *shim) listenTLS(lc *tailscale.LocalClient) {
 			log.Printf("accept :443 error: %v", err)
 			continue
 		}
-		peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
-		go s.bridgeToRust(conn, 443, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
-	}
-}
-
-func (s *shim) listenTCP(lc *tailscale.LocalClient) {
-	ln, err := s.server.Listen("tcp", ":9417")
-	if err != nil {
-		log.Printf("Listen :9417 failed: %v", err)
-		s.sendError("LISTEN_ERROR", fmt.Sprintf("Listen :9417: %v", err))
-		return
-	}
-	s.trackListener(ln)
-	defer ln.Close()
-
-	log.Printf("listening TCP on :9417")
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if s.ctx.Err() != nil {
-				return
-			}
-			log.Printf("accept :9417 error: %v", err)
-			continue
-		}
-		peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
-		go s.bridgeToRust(conn, 9417, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
+		// G7: resolve peer identity inside the per-connection goroutine so a
+		// slow WhoIs doesn't serialize acceptance of the next connection.
+		go func(c net.Conn) {
+			peerIdentity := s.resolvePeerIdentity(lc, c.RemoteAddr().String())
+			s.bridgeToRust(c, 443, dirIncoming, "", c.RemoteAddr().String(), peerIdentity)
+		}(conn)
 	}
 }
 
@@ -604,6 +751,14 @@ func (s *shim) handleStop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+
+	// Stop any running peer watcher (F4).
+	s.watchMu.Lock()
+	if s.watchCancel != nil {
+		s.watchCancel()
+		s.watchCancel = nil
+	}
+	s.watchMu.Unlock()
 
 	// Close listeners first so accept loops exit before server teardown
 	s.listenerMu.Lock()
@@ -650,85 +805,67 @@ func (s *shim) handleStop() {
 
 	for _, entry := range proxyEntries {
 		log.Printf("shutting down proxy %s", entry.id)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		entry.server.Shutdown(ctx)
-		cancel()
-		if entry.cancel != nil {
-			entry.cancel()
-		}
-		entry.listener.Close()
+		entry.shutdown(2 * time.Second)
 	}
 
-	if s.server != nil {
+	if srv := s.getServer(); srv != nil {
 		// Explicitly disconnect from the control plane before closing.
 		// This makes the control server detect the disconnect immediately
 		// and push Online=false to other peers within seconds.
 		// We use EditPrefs to set WantRunning=false which tells the control
 		// server we're intentionally going offline (vs a crash/network issue).
-		lc, lcErr := s.server.LocalClient()
+		lc, lcErr := srv.LocalClient()
 		if lcErr == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
 			_, _ = lc.EditPrefs(ctx, &ipn.MaskedPrefs{
 				Prefs: ipn.Prefs{
 					WantRunning: false,
 				},
 				WantRunningSet: true,
 			})
+			cancel()
 		}
-		if err := s.server.Close(); err != nil {
+		if err := srv.Close(); err != nil {
 			log.Printf("server close error: %v", err)
 		}
-		s.server = nil
+		s.setServer(nil)
 	}
 	s.sendEvent("tsnet:stopped", nil)
 }
 
 func (s *shim) handleGetPeers() {
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
-	lc, err := s.server.LocalClient()
-	if err != nil {
-		s.sendError("PEERS_ERROR", err.Error())
-		return
-	}
+	// G3: run off the dispatch loop so a slow Status() can't stall every other
+	// command (including tsnet:stop). F11: reuse statusPeerToInfo.
+	go func() {
+		defer s.recoverPanic("handleGetPeers")
 
-	status, err := lc.Status(s.ctx)
-	if err != nil {
-		s.sendError("PEERS_ERROR", err.Error())
-		return
-	}
+		lc, err := srv.LocalClient()
+		if err != nil {
+			s.sendError("PEERS_ERROR", err.Error())
+			return
+		}
 
-	var peers []peerInfo
-	for _, peer := range status.Peer {
-		var ips []string
-		for _, ip := range peer.TailscaleIPs {
-			ips = append(ips, ip.String())
+		ctx, cancel := context.WithTimeout(s.ctx, statusTimeout)
+		defer cancel()
+		status, err := lc.Status(ctx)
+		if err != nil {
+			s.sendError("PEERS_ERROR", err.Error())
+			return
 		}
-		p := peerInfo{
-			ID:           string(peer.ID),
-			Hostname:     peer.HostName,
-			DNSName:      strings.TrimSuffix(peer.DNSName, "."),
-			TailscaleIPs: ips,
-			Online:       peer.Online,
-			OS:           peer.OS,
-			CurAddr:      peer.CurAddr,
-			Relay:        peer.Relay,
-			Expired:      peer.Expired,
-		}
-		if !peer.LastSeen.IsZero() {
-			p.LastSeen = peer.LastSeen.UTC().Format(time.RFC3339)
-		}
-		if peer.KeyExpiry != nil && !peer.KeyExpiry.IsZero() {
-			p.KeyExpiry = peer.KeyExpiry.UTC().Format(time.RFC3339)
-		}
-		peers = append(peers, p)
-	}
 
-	s.sendEvent("tsnet:peers", peersData{Peers: peers})
+		peers := make([]peerInfo, 0, len(status.Peer))
+		for _, peer := range status.Peer {
+			peers = append(peers, statusPeerToInfo(peer))
+		}
+
+		s.sendEvent("tsnet:peers", peersData{Peers: peers})
+	}()
 }
 
 func (s *shim) handleDial(data json.RawMessage) {
@@ -739,7 +876,10 @@ func (s *shim) handleDial(data json.RawMessage) {
 	}
 
 	go func() {
-		if s.server == nil {
+		defer s.recoverPanic("handleDial")
+
+		srv := s.getServer()
+		if srv == nil {
 			log.Printf("[handleDial] rid=%s FAIL: node not running", d.RequestID)
 			s.sendEvent("bridge:dialResult", dialResultData{
 				RequestID: d.RequestID,
@@ -749,10 +889,14 @@ func (s *shim) handleDial(data json.RawMessage) {
 			return
 		}
 
+		// G8: bound the dial so a blackholed peer can't hang this goroutine.
+		dialCtx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+		defer cancel()
+
 		// Dial via tsnet
 		addr := fmt.Sprintf("%s:%d", d.Target, d.Port)
 		log.Printf("[handleDial] rid=%s dialing %s", d.RequestID, addr)
-		tsnetConn, err := s.server.Dial(s.ctx, "tcp", addr)
+		tsnetConn, err := srv.Dial(dialCtx, "tcp", addr)
 		if err != nil {
 			log.Printf("[handleDial] rid=%s DIAL FAILED: %v", d.RequestID, err)
 			s.sendEvent("bridge:dialResult", dialResultData{
@@ -770,7 +914,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 			tlsConn := tls.Client(tsnetConn, &tls.Config{
 				ServerName: d.Target, // SNI = peer's DNS name
 			})
-			if err := tlsConn.HandshakeContext(s.ctx); err != nil {
+			if err := tlsConn.HandshakeContext(dialCtx); err != nil {
 				tsnetConn.Close()
 				s.sendEvent("bridge:dialResult", dialResultData{
 					RequestID: d.RequestID,
@@ -794,7 +938,8 @@ func (s *shim) handleListen(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
@@ -809,7 +954,9 @@ func (s *shim) handleListen(data json.RawMessage) {
 	s.dynamicListenerMu.Unlock()
 
 	go func() {
-		lc, err := s.server.LocalClient()
+		defer s.recoverPanic("handleListen")
+
+		lc, err := srv.LocalClient()
 		if err != nil {
 			s.sendError("LISTEN_ERROR", fmt.Sprintf("failed to get local client: %v", err))
 			return
@@ -819,9 +966,9 @@ func (s *shim) handleListen(data json.RawMessage) {
 		var ln net.Listener
 
 		if d.TLS {
-			ln, err = s.server.ListenTLS("tcp", addr)
+			ln, err = srv.ListenTLS("tcp", addr)
 		} else {
-			ln, err = s.server.Listen("tcp", addr)
+			ln, err = srv.Listen("tcp", addr)
 		}
 		if err != nil {
 			s.sendError("LISTEN_ERROR", fmt.Sprintf("Listen :%d: %v", d.Port, err))
@@ -848,7 +995,15 @@ func (s *shim) handleListen(data json.RawMessage) {
 			}
 		}
 
+		// G13: re-check under the lock at insert time to close the check→insert
+		// TOCTOU window (the OS bind already rejects duplicate fixed ports).
 		s.dynamicListenerMu.Lock()
+		if _, exists := s.dynamicListeners[actualPort]; exists {
+			s.dynamicListenerMu.Unlock()
+			ln.Close()
+			s.sendError("LISTEN_ERROR", fmt.Sprintf("already listening on port %d", actualPort))
+			return
+		}
 		s.dynamicListeners[actualPort] = ln
 		s.dynamicListenerMu.Unlock()
 
@@ -881,10 +1036,13 @@ func (s *shim) handleListen(data json.RawMessage) {
 				log.Printf("accept :%d error: %v", actualPort, err)
 				continue
 			}
-			peerIdentity := s.resolvePeerIdentity(lc, conn.RemoteAddr().String())
 			// Route using actualPort — the Rust bridge registered its
 			// listener channel under the real port, not the requested 0.
-			go s.bridgeToRust(conn, actualPort, dirIncoming, "", conn.RemoteAddr().String(), peerIdentity)
+			// G7: resolve identity inside the goroutine, off the accept path.
+			go func(c net.Conn) {
+				peerIdentity := s.resolvePeerIdentity(lc, c.RemoteAddr().String())
+				s.bridgeToRust(c, actualPort, dirIncoming, "", c.RemoteAddr().String(), peerIdentity)
+			}(conn)
 		}
 	}()
 }
@@ -921,7 +1079,8 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
@@ -936,8 +1095,10 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 	s.udpRelayMu.Unlock()
 
 	go func() {
+		defer s.recoverPanic("handleListenPacket")
+
 		// Get the tailscale IP for binding
-		status, err := s.server.LocalClient()
+		status, err := srv.LocalClient()
 		if err != nil {
 			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("failed to get local client: %v", err))
 			return
@@ -959,7 +1120,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 
 		// Bind tsnet PacketConn
 		log.Printf("UDP relay: calling ListenPacket(%q, %q)", "udp", listenAddr)
-		tsnetPC, err := s.server.ListenPacket("udp", listenAddr)
+		tsnetPC, err := srv.ListenPacket("udp", listenAddr)
 		if err != nil {
 			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("ListenPacket %s: %v", listenAddr, err))
 			return
@@ -987,7 +1148,17 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			cancel:    relayCancel,
 		}
 
+		// B4: re-check under the lock before inserting (closes the check→insert
+		// TOCTOU; the tsnet ListenPacket bind above also rejects duplicates).
 		s.udpRelayMu.Lock()
+		if _, exists := s.udpRelays[d.Port]; exists {
+			s.udpRelayMu.Unlock()
+			relayCancel()
+			tsnetPC.Close()
+			localPC.Close()
+			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("already listening UDP on port %d", d.Port))
+			return
+		}
 		s.udpRelays[d.Port] = relay
 		s.udpRelayMu.Unlock()
 
@@ -1096,19 +1267,30 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 				continue
 			}
 
-			// Remember the Rust peer's address
+			isRegister := n >= 20 && string(buf[:20]) == "TRUFFLE_UDP_REGISTER"
+
+			// P11: the loopback relay socket is otherwise unauthenticated, so
+			// only (re)learn the trusted Rust peer address from an explicit
+			// REGISTER packet, and only forward datagrams that come from it —
+			// otherwise another local process could hijack the relay by racing
+			// a datagram to the loopback port.
 			rustAddrMu.Lock()
-			prevRustAddr := rustAddr
-			rustAddr = senderAddr
+			if isRegister {
+				if rustAddr == nil {
+					log.Printf("UDP relay: learned Rust peer address: %v", senderAddr)
+				}
+				rustAddr = senderAddr
+			}
+			trusted := rustAddr != nil && senderAddr.String() == rustAddr.String()
 			rustAddrMu.Unlock()
 
-			if prevRustAddr == nil {
-				log.Printf("UDP relay: learned Rust peer address: %v", senderAddr)
+			if isRegister {
+				log.Printf("UDP relay: registration packet from Rust at %v", senderAddr)
+				continue
 			}
 
-			// Check for registration packet — learn address but don't forward
-			if n >= 20 && string(buf[:20]) == "TRUFFLE_UDP_REGISTER" {
-				log.Printf("UDP relay: registration packet from Rust at %v", senderAddr)
+			if !trusted {
+				log.Printf("UDP relay: dropping datagram from untrusted local sender %v", senderAddr)
 				continue
 			}
 
@@ -1142,6 +1324,33 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 	}()
 }
 
+func (s *shim) handleUnlistenPacket(data json.RawMessage) {
+	var d listenPacketData
+	if err := json.Unmarshal(data, &d); err != nil {
+		s.sendError("UNLISTEN_PACKET_ERROR", fmt.Sprintf("invalid unlistenPacket data: %v", err))
+		return
+	}
+
+	s.udpRelayMu.Lock()
+	relay, exists := s.udpRelays[d.Port]
+	if !exists {
+		s.udpRelayMu.Unlock()
+		s.sendError("UNLISTEN_PACKET_ERROR", fmt.Sprintf("no UDP relay on port %d", d.Port))
+		return
+	}
+	delete(s.udpRelays, d.Port)
+	s.udpRelayMu.Unlock()
+
+	// P9/P10: cancel AND close both conns so the relay goroutines (blocked in
+	// ReadFrom, which ctx cancellation alone cannot interrupt) exit promptly.
+	relay.cancel()
+	relay.tsnetConn.Close()
+	relay.localConn.Close()
+
+	log.Printf("stopped UDP relay on :%d", d.Port)
+	s.sendEvent("tsnet:unlistenedPacket", listenPacketData{Port: d.Port})
+}
+
 func (s *shim) handlePing(data json.RawMessage) {
 	var d pingData
 	if err := json.Unmarshal(data, &d); err != nil {
@@ -1149,27 +1358,32 @@ func (s *shim) handlePing(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
 	go func() {
-		lc, err := s.server.LocalClient()
+		defer s.recoverPanic("handlePing")
+
+		// P12: stamp Target + RequestID on every result so concurrent pings can
+		// be correlated by the caller.
+		emit := func(r pingResultData) {
+			r.Target = d.Target
+			r.RequestID = d.RequestID
+			s.sendEvent("tsnet:pingResult", r)
+		}
+
+		lc, err := srv.LocalClient()
 		if err != nil {
-			s.sendEvent("tsnet:pingResult", pingResultData{
-				Target: d.Target,
-				Error:  fmt.Sprintf("failed to get local client: %v", err),
-			})
+			emit(pingResultData{Error: fmt.Sprintf("failed to get local client: %v", err)})
 			return
 		}
 
 		addr, err := netip.ParseAddr(d.Target)
 		if err != nil {
-			s.sendEvent("tsnet:pingResult", pingResultData{
-				Target: d.Target,
-				Error:  fmt.Sprintf("failed to parse target IP: %v", err),
-			})
+			emit(pingResultData{Error: fmt.Sprintf("failed to parse target IP: %v", err)})
 			return
 		}
 
@@ -1186,10 +1400,7 @@ func (s *shim) handlePing(data json.RawMessage) {
 		case "TSMP", "":
 			pt = tailcfg.PingTSMP
 		default:
-			s.sendEvent("tsnet:pingResult", pingResultData{
-				Target: d.Target,
-				Error:  fmt.Sprintf("unknown ping type: %s (valid: TSMP, disco, ICMP, peerapi)", d.PingType),
-			})
+			emit(pingResultData{Error: fmt.Sprintf("unknown ping type: %s (valid: TSMP, disco, ICMP, peerapi)", d.PingType)})
 			return
 		}
 
@@ -1198,24 +1409,17 @@ func (s *shim) handlePing(data json.RawMessage) {
 
 		result, err := lc.Ping(ctx, addr, pt)
 		if err != nil {
-			s.sendEvent("tsnet:pingResult", pingResultData{
-				Target: d.Target,
-				Error:  fmt.Sprintf("ping failed: %v", err),
-			})
+			emit(pingResultData{Error: fmt.Sprintf("ping failed: %v", err)})
 			return
 		}
 
 		// If the PingResult contains an error string, report it.
 		if result.Err != "" {
-			s.sendEvent("tsnet:pingResult", pingResultData{
-				Target: d.Target,
-				Error:  result.Err,
-			})
+			emit(pingResultData{Error: result.Err})
 			return
 		}
 
-		s.sendEvent("tsnet:pingResult", pingResultData{
-			Target:    d.Target,
+		emit(pingResultData{
 			LatencyMs: result.LatencySeconds * 1000.0,
 			Direct:    result.Endpoint != "" && result.DERPRegionID == 0,
 			Relay:     result.DERPRegionCode,
@@ -1225,114 +1429,158 @@ func (s *shim) handlePing(data json.RawMessage) {
 }
 
 func (s *shim) handleWatchPeers(data json.RawMessage) {
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
+	lc, err := srv.LocalClient()
+	if err != nil {
+		s.sendError("WATCH_PEERS_ERROR", fmt.Sprintf("failed to get local client: %v", err))
+		return
+	}
+
+	// F4: only one watcher at a time — cancel any previous one and start fresh.
+	watchCtx, watchCancel := context.WithCancel(s.ctx)
+	s.watchMu.Lock()
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
+	s.watchCancel = watchCancel
+	s.watchMu.Unlock()
+
 	go func() {
-		lc, err := s.server.LocalClient()
-		if err != nil {
-			s.sendError("WATCH_PEERS_ERROR", fmt.Sprintf("failed to get local client: %v", err))
-			return
-		}
+		defer s.recoverPanic("handleWatchPeers")
+		defer watchCancel()
 
-		// WatchIPNBus gives us real-time notifications about network changes.
-		// We watch for engine updates which include peer state changes.
-		watcher, err := lc.WatchIPNBus(s.ctx, ipn.NotifyWatchEngineUpdates)
-		if err != nil {
-			s.sendError("WATCH_PEERS_ERROR", fmt.Sprintf("WatchIPNBus failed: %v", err))
-			return
-		}
-		defer watcher.Close()
-
-		log.Printf("WatchIPNBus started, listening for peer changes")
-
-		// Track known peers by their stable ID to detect joins/leaves/updates.
-		// We use the same peerInfo format as getPeers so Rust can deserialize uniformly.
+		// knownPeers persists across watcher reconnects so a transient error
+		// doesn't cause a spurious "joined" storm (F3).
 		knownPeers := make(map[string]peerInfo)
+		seeded := false
 
-		// Seed with current peers via the status API (same as handleGetPeers).
-		status, err := lc.Status(s.ctx)
-		if err == nil {
-			for _, peer := range status.Peer {
-				pi := statusPeerToInfo(peer)
-				knownPeers[pi.ID] = pi
+		// diff re-fetches full status and emits joined/left/updated. It also
+		// backs the periodic poll (F1): Tailscale's delta path only pushes a
+		// NetMap notify for Online/LastSeen, NOT relay/endpoint changes, so a
+		// timer-driven re-diff is the safety net that catches peer roaming.
+		diff := func() {
+			ctx, cancel := context.WithTimeout(watchCtx, statusTimeout)
+			defer cancel()
+			newStatus, err := lc.Status(ctx)
+			if err != nil {
+				if watchCtx.Err() == nil {
+					log.Printf("WatchIPNBus: status fetch failed: %v", err)
+				}
+				return
 			}
+			current := make(map[string]peerInfo, len(newStatus.Peer))
+			for _, peer := range newStatus.Peer {
+				pi := statusPeerToInfo(peer)
+				current[pi.ID] = pi
+			}
+			if !seeded {
+				// First successful fetch is the baseline; don't report every
+				// existing peer as "joined".
+				knownPeers = current
+				seeded = true
+				return
+			}
+			for id, pi := range current {
+				if _, ok := knownPeers[id]; !ok {
+					piCopy := pi
+					s.sendEvent("tsnet:peerChanged", peerChangedData{ChangeType: "joined", PeerID: id, Peer: &piCopy})
+				}
+			}
+			for id := range knownPeers {
+				if _, ok := current[id]; !ok {
+					s.sendEvent("tsnet:peerChanged", peerChangedData{ChangeType: "left", PeerID: id})
+				}
+			}
+			for id, newPi := range current {
+				if oldPi, ok := knownPeers[id]; ok && watchPeerChanged(oldPi, newPi) {
+					piCopy := newPi
+					s.sendEvent("tsnet:peerChanged", peerChangedData{ChangeType: "updated", PeerID: id, Peer: &piCopy})
+				}
+			}
+			knownPeers = current
 		}
 
+		// F1: periodic re-diff as a safety net for missed delta notifies.
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		// F2: (re)establish the watcher, retrying transient errors with backoff
+		// instead of dying permanently on the first hiccup.
+		backoff := time.Second
 		for {
-			n, err := watcher.Next()
-			if err != nil {
-				if s.ctx.Err() != nil {
-					return // context cancelled, clean shutdown
-				}
-				log.Printf("WatchIPNBus error: %v", err)
+			if watchCtx.Err() != nil {
 				return
 			}
 
-			// When we get a NetMap update, re-fetch the full status and diff
-			// against our known peers. This is simpler and more reliable than
-			// parsing the NetMap directly, and reuses the same code path as
-			// handleGetPeers for consistent output.
-			if n.NetMap == nil {
-				continue
-			}
-
-			newStatus, err := lc.Status(s.ctx)
+			watcher, err := lc.WatchIPNBus(watchCtx, ipn.NotifyWatchEngineUpdates)
 			if err != nil {
-				if s.ctx.Err() != nil {
+				if watchCtx.Err() != nil {
 					return
 				}
-				log.Printf("WatchIPNBus: status fetch failed: %v", err)
+				log.Printf("WatchIPNBus failed: %v", err)
+				s.sendEvent("tsnet:watchPeersError", errorData{Code: "WATCH_PEERS_ERROR", Message: err.Error()})
+				select {
+				case <-watchCtx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
 				continue
 			}
+			backoff = time.Second // reset on a successful (re)connect
+			log.Printf("WatchIPNBus started, listening for peer changes")
 
-			// Build current peer map
-			currentPeers := make(map[string]peerInfo)
-			for _, peer := range newStatus.Peer {
-				pi := statusPeerToInfo(peer)
-				currentPeers[pi.ID] = pi
-			}
+			// Seed / re-baseline on (re)connect.
+			diff()
 
-			// Detect new peers (joined)
-			for id, pi := range currentPeers {
-				if _, exists := knownPeers[id]; !exists {
-					piCopy := pi
-					s.sendEvent("tsnet:peerChanged", peerChangedData{
-						ChangeType: "joined",
-						PeerID:     id,
-						Peer:       &piCopy,
-					})
-				}
-			}
-
-			// Detect removed peers (left)
-			for id := range knownPeers {
-				if _, exists := currentPeers[id]; !exists {
-					s.sendEvent("tsnet:peerChanged", peerChangedData{
-						ChangeType: "left",
-						PeerID:     id,
-					})
-				}
-			}
-
-			// Detect updated peers
-			for id, newPi := range currentPeers {
-				if oldPi, exists := knownPeers[id]; exists {
-					if watchPeerChanged(oldPi, newPi) {
-						piCopy := newPi
-						s.sendEvent("tsnet:peerChanged", peerChangedData{
-							ChangeType: "updated",
-							PeerID:     id,
-							Peer:       &piCopy,
-						})
+			// Pump blocking watcher.Next() into channels so the select below can
+			// also service the periodic ticker and context cancellation.
+			notifyCh := make(chan struct{}, 1)
+			watchErrCh := make(chan error, 1)
+			go func() {
+				for {
+					n, err := watcher.Next()
+					if err != nil {
+						watchErrCh <- err
+						return
+					}
+					if n.NetMap == nil {
+						continue
+					}
+					select {
+					case notifyCh <- struct{}{}:
+					default:
 					}
 				}
-			}
+			}()
 
-			// Update known peers for next iteration
-			knownPeers = currentPeers
+		inner:
+			for {
+				select {
+				case <-watchCtx.Done():
+					watcher.Close()
+					return
+				case <-ticker.C:
+					diff()
+				case <-notifyCh:
+					diff()
+				case werr := <-watchErrCh:
+					watcher.Close()
+					if watchCtx.Err() != nil {
+						return
+					}
+					log.Printf("WatchIPNBus error: %v", werr)
+					s.sendEvent("tsnet:watchPeersError", errorData{Code: "WATCH_PEERS_ERROR", Message: werr.Error()})
+					break inner // reconnect
+				}
+			}
 		}
 	}()
 }
@@ -1394,13 +1642,16 @@ func (s *shim) handlePushFile(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
 	go func() {
-		lc, err := s.server.LocalClient()
+		defer s.recoverPanic("handlePushFile")
+
+		lc, err := srv.LocalClient()
 		if err != nil {
 			s.sendEvent("tsnet:pushFileResult", pushFileResultData{
 				Success: false,
@@ -1447,13 +1698,16 @@ func (s *shim) handlePushFile(data json.RawMessage) {
 }
 
 func (s *shim) handleWaitingFiles() {
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
 	go func() {
-		lc, err := s.server.LocalClient()
+		defer s.recoverPanic("handleWaitingFiles")
+
+		lc, err := srv.LocalClient()
 		if err != nil {
 			s.sendError("WAITING_FILES_ERROR", fmt.Sprintf("failed to get local client: %v", err))
 			return
@@ -1489,54 +1743,63 @@ func (s *shim) handleGetWaitingFile(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
 	go func() {
-		lc, err := s.server.LocalClient()
-		if err != nil {
+		defer s.recoverPanic("handleGetWaitingFile")
+
+		fail := func(msg string) {
 			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
 				Success:  false,
 				FileName: d.FileName,
 				SavePath: d.SavePath,
-				Error:    fmt.Sprintf("failed to get local client: %v", err),
+				Error:    msg,
 			})
+		}
+
+		lc, err := srv.LocalClient()
+		if err != nil {
+			fail(fmt.Sprintf("failed to get local client: %v", err))
 			return
 		}
 
-		rc, _, err := lc.GetWaitingFile(s.ctx, d.FileName)
+		// F7: bound the fetch so a stalled transfer can't hang forever.
+		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+		defer cancel()
+
+		rc, size, err := lc.GetWaitingFile(ctx, d.FileName)
 		if err != nil {
-			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
-				Success:  false,
-				FileName: d.FileName,
-				SavePath: d.SavePath,
-				Error:    fmt.Sprintf("get waiting file failed: %v", err),
-			})
+			fail(fmt.Sprintf("get waiting file failed: %v", err))
 			return
 		}
 		defer rc.Close()
 
-		outFile, err := os.Create(d.SavePath)
-		if err != nil {
-			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
-				Success:  false,
-				FileName: d.FileName,
-				SavePath: d.SavePath,
-				Error:    fmt.Sprintf("failed to create save file: %v", err),
-			})
+		// F8: reject an oversized file rather than exhausting local disk.
+		if size > maxWaitingFileBytes {
+			fail(fmt.Sprintf("waiting file too large: %d bytes (max %d)", size, maxWaitingFileBytes))
 			return
 		}
-		defer outFile.Close()
 
-		if _, err := io.Copy(outFile, rc); err != nil {
-			s.sendEvent("tsnet:getWaitingFileResult", getWaitingFileResultData{
-				Success:  false,
-				FileName: d.FileName,
-				SavePath: d.SavePath,
-				Error:    fmt.Sprintf("failed to write file: %v", err),
-			})
+		outFile, err := os.Create(d.SavePath)
+		if err != nil {
+			fail(fmt.Sprintf("failed to create save file: %v", err))
+			return
+		}
+
+		// F8/F9: copy at most `size` bytes; remove the partial file on failure.
+		if _, err := io.CopyN(outFile, rc, size); err != nil {
+			outFile.Close()
+			os.Remove(d.SavePath)
+			fail(fmt.Sprintf("failed to write file: %v", err))
+			return
+		}
+		if err := outFile.Close(); err != nil {
+			os.Remove(d.SavePath)
+			fail(fmt.Sprintf("failed to finalize file: %v", err))
 			return
 		}
 
@@ -1555,13 +1818,16 @@ func (s *shim) handleDeleteWaitingFile(data json.RawMessage) {
 		return
 	}
 
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
 
 	go func() {
-		lc, err := s.server.LocalClient()
+		defer s.recoverPanic("handleDeleteWaitingFile")
+
+		lc, err := srv.LocalClient()
 		if err != nil {
 			s.sendEvent("tsnet:deleteWaitingFileResult", deleteWaitingFileResultData{
 				Success:  false,
@@ -1589,7 +1855,8 @@ func (s *shim) handleDeleteWaitingFile(data json.RawMessage) {
 }
 
 func (s *shim) handleProxyAdd(raw json.RawMessage) {
-	if s.server == nil {
+	srv := s.getServer()
+	if srv == nil {
 		s.sendError("NOT_RUNNING", "node not running")
 		return
 	}
@@ -1657,7 +1924,9 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
 	if data.TargetScheme == "https" {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		// P6: only skip TLS verification for loopback targets; verify certs for
+		// any non-loopback host.
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: isLoopbackHost(data.TargetHost)}
 	}
 	proxy.Transport = transport
 
@@ -1666,21 +1935,27 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		if strings.Contains(err.Error(), "connection refused") {
 			s.sendEvent("proxy:error", proxyErrorEventData{ID: proxyID, Code: "CONNECTION_REFUSED", Message: err.Error()})
 		}
-		w.WriteHeader(http.StatusBadGateway)
-		fmt.Fprintf(w, "Bad Gateway: %v", err)
+		// P7: don't leak internal error detail (target host/port, dial state) to
+		// the remote caller; the detail is reported on the local event above.
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isProxyWebSocketRequest(r) {
-			s.handleProxyWebSocket(w, r, data.TargetHost, data.TargetPort, data.TargetScheme)
+			s.proxyMu.Lock()
+			entry := s.proxies[data.ID]
+			s.proxyMu.Unlock()
+			s.handleProxyWebSocket(w, r, entry, data.TargetHost, data.TargetPort, data.TargetScheme)
 			return
 		}
 		proxy.ServeHTTP(w, r)
 	})
 
 	go func() {
+		defer s.recoverPanic("handleProxyAdd")
+
 		addr := fmt.Sprintf(":%d", data.ListenPort)
-		ln, err := s.server.ListenTLS("tcp", addr)
+		ln, err := srv.ListenTLS("tcp", addr)
 		if err != nil {
 			// Clean up placeholder on listen failure
 			s.proxyMu.Lock()
@@ -1691,7 +1966,7 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		}
 
 		// Guard against empty dnsName (node not fully started yet)
-		if s.dnsName == "" {
+		if s.getDNSName() == "" {
 			ln.Close()
 			s.proxyMu.Lock()
 			delete(s.proxies, data.ID)
@@ -1701,7 +1976,14 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		}
 
 		ctx, cancel := context.WithCancel(s.ctx)
-		srv := &http.Server{Handler: handler, BaseContext: func(net.Listener) context.Context { return ctx }}
+		// P4: bound header reads (slow-loris) and idle keep-alives. ReadTimeout
+		// is intentionally unset so long-lived streaming/WebSocket bodies work.
+		httpSrv := &http.Server{
+			Handler:           handler,
+			BaseContext:       func(net.Listener) context.Context { return ctx },
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 
 		// Replace the nil placeholder with the real entry
 		s.proxyMu.Lock()
@@ -1709,14 +1991,14 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 			id: data.ID, name: data.Name, listenPort: data.ListenPort,
 			targetHost: data.TargetHost, targetPort: data.TargetPort,
 			targetScheme: data.TargetScheme, targetURL: targetURL,
-			listener: ln, server: srv, cancel: cancel,
+			listener: ln, server: httpSrv, cancel: cancel,
 		}
 		s.proxyMu.Unlock()
 
-		proxyURL := fmt.Sprintf("https://%s:%d", s.dnsName, data.ListenPort)
+		proxyURL := fmt.Sprintf("https://%s:%d", s.getDNSName(), data.ListenPort)
 		s.sendEvent("proxy:added", proxyAddedEventData{ID: data.ID, ListenPort: data.ListenPort, URL: proxyURL})
 
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: "SERVE_ERROR", Message: err.Error()})
 		}
 	}()
@@ -1728,14 +2010,15 @@ func isProxyWebSocketRequest(r *http.Request) bool {
 	return strings.Contains(connection, "upgrade") && upgrade == "websocket"
 }
 
-func (s *shim) handleProxyWebSocket(w http.ResponseWriter, r *http.Request, targetHost string, targetPort uint16, targetScheme string) {
-	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
+func (s *shim) handleProxyWebSocket(w http.ResponseWriter, r *http.Request, entry *proxyEntry, targetHost string, targetPort uint16, targetScheme string) {
+	targetAddr := net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort)))
 
 	var targetConn net.Conn
 	var err error
 	if targetScheme == "https" {
 		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		targetConn, err = tls.DialWithDialer(dialer, "tcp", targetAddr, &tls.Config{InsecureSkipVerify: true})
+		// P6: only skip TLS verification for loopback targets.
+		targetConn, err = tls.DialWithDialer(dialer, "tcp", targetAddr, &tls.Config{InsecureSkipVerify: isLoopbackHost(targetHost)})
 	} else {
 		targetConn, err = net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	}
@@ -1753,10 +2036,21 @@ func (s *shim) handleProxyWebSocket(w http.ResponseWriter, r *http.Request, targ
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		targetConn.Close() // Fix 6: close backend conn on hijack failure
+		targetConn.Close() // close backend conn on hijack failure
 		// http.Error may not work after partial hijack, but attempt it
 		http.Error(w, "WebSocket hijack failed", http.StatusInternalServerError)
 		return
+	}
+
+	// P1: register both conns so proxy:remove / tsnet:stop can force them closed
+	// (http.Server.Shutdown does not touch hijacked connections).
+	if entry != nil {
+		entry.addWS(clientConn)
+		entry.addWS(targetConn)
+		defer func() {
+			entry.removeWS(clientConn)
+			entry.removeWS(targetConn)
+		}()
 	}
 
 	// Rewrite Host header for the target
@@ -1770,27 +2064,24 @@ func (s *shim) handleProxyWebSocket(w http.ResponseWriter, r *http.Request, targ
 		return
 	}
 
-	// Bidirectional copy — goroutines own closing the connections.
-	// Use halfCloser interface since *tls.Conn doesn't implement CloseWrite;
-	// fall back to full Close when half-close is unavailable.
+	// P2/P3: bidirectional copy with an idle deadline in each direction. On EOF
+	// half-close the write side when supported; otherwise leave the peer to the
+	// idle deadline rather than a full Close that could truncate an in-flight
+	// reverse direction (the bug bridgeCopy documents).
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(targetConn, clientConn)
+		idleCopy(targetConn, clientConn, idleDeadline)
 		if hc, ok := targetConn.(halfCloser); ok {
 			hc.CloseWrite()
-		} else {
-			targetConn.Close()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(clientConn, targetConn)
+		idleCopy(clientConn, targetConn, idleDeadline)
 		if hc, ok := clientConn.(halfCloser); ok {
 			hc.CloseWrite()
-		} else {
-			clientConn.Close()
 		}
 	}()
 	wg.Wait()
@@ -1816,16 +2107,13 @@ func (s *shim) handleProxyRemove(raw json.RawMessage) {
 	delete(s.proxies, data.ID)
 	s.proxyMu.Unlock()
 
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	entry.server.Shutdown(ctx)
-	if entry.cancel != nil {
-		entry.cancel()
-	}
-	entry.listener.Close()
-
-	s.sendEvent("proxy:removed", proxyRemovedEventData{ID: data.ID})
+	// G9: shut down off the dispatch loop so a slow Shutdown can't stall other
+	// commands. entry.shutdown handles cancel→shutdown→listener→WS conns (P1/P5).
+	go func() {
+		defer s.recoverPanic("handleProxyRemove")
+		entry.shutdown(5 * time.Second)
+		s.sendEvent("proxy:removed", proxyRemovedEventData{ID: data.ID})
+	}()
 }
 
 func (s *shim) handleProxyList() {
@@ -1835,11 +2123,11 @@ func (s *shim) handleProxyList() {
 		if entry == nil {
 			continue // skip placeholders still being set up
 		}
-		proxyURL := fmt.Sprintf("https://%s:%d", s.dnsName, entry.listenPort)
+		proxyURL := fmt.Sprintf("https://%s:%d", s.getDNSName(), entry.listenPort)
 		proxies = append(proxies, proxyInfoData{
 			ID: entry.id, Name: entry.name,
-			ListenPort:   entry.listenPort,
-			TargetHost:   entry.targetHost, TargetPort: entry.targetPort,
+			ListenPort: entry.listenPort,
+			TargetHost: entry.targetHost, TargetPort: entry.targetPort,
 			TargetScheme: entry.targetScheme, URL: proxyURL,
 		})
 	}
@@ -1851,6 +2139,8 @@ func (s *shim) handleProxyList() {
 // bridgeToRust connects to Rust's local bridge port, sends the binary header,
 // then does bidirectional io.Copy.
 func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, requestID, remoteAddr, remoteDNS string) {
+	defer s.recoverPanic("bridgeToRust")
+
 	localConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", s.bridgePort))
 	if err != nil {
 		log.Printf("bridge connect failed: %v", err)
@@ -1891,6 +2181,13 @@ func writeHeader(w io.Writer, token []byte, direction byte, port uint16, request
 	reqIDBytes := []byte(requestID)
 	addrBytes := []byte(remoteAddr)
 	dnsBytes := []byte(remoteDNS)
+
+	// G11: each string is framed with a u16 length; refuse to emit a header that
+	// would truncate a length field and desync the stream on the Rust side.
+	if len(reqIDBytes) > 0xFFFF || len(addrBytes) > 0xFFFF || len(dnsBytes) > 0xFFFF {
+		return fmt.Errorf("bridge header field too large: reqID=%d addr=%d dns=%d",
+			len(reqIDBytes), len(addrBytes), len(dnsBytes))
+	}
 
 	// Calculate total size
 	size := 4 + 1 + 32 + 1 + 2 + 2 + len(reqIDBytes) + 2 + len(addrBytes) + 2 + len(dnsBytes)
@@ -1950,17 +2247,6 @@ func bridgeCopy(tsnetConn, localConn net.Conn) {
 	}
 	defer closeAll()
 
-	// Wrap connections with write-deadline-refreshing writers
-	tsnetWriter := &deadlineWriter{conn: tsnetConn, timeout: writeDeadline}
-	localWriter := &deadlineWriter{conn: localConn, timeout: writeDeadline}
-
-	// Use a WaitGroup to wait for both copy directions to complete.
-	// Previously, we closed both connections when either direction hit EOF,
-	// which could drop in-flight data (e.g., a 1-byte ACK in the reverse
-	// direction that hasn't been flushed through the bridge yet).
-	// Now we use half-close: when one direction sees EOF, we shut down
-	// the write half of the destination, signaling "no more data" without
-	// closing the read half. Both goroutines must finish before we close.
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -1972,19 +2258,20 @@ func bridgeCopy(tsnetConn, localConn net.Conn) {
 		}
 	}
 
-	// remote (tsnet) -> local (Rust)
+	// G5: idleCopy applies an idle read/write deadline in each direction, so a
+	// bridged connection that goes silent both ways is reaped instead of leaking
+	// two goroutines + two fds until process exit. On EOF we half-close the
+	// write half of the destination, preserving any in-flight data in the
+	// reverse direction (e.g. a trailing ACK) rather than closing both.
 	go func() {
 		defer wg.Done()
-		io.Copy(localWriter, tsnetConn)
-		// Remote EOF: shut down local write half so Rust sees EOF
+		idleCopy(localConn, tsnetConn, idleDeadline)
 		closeWrite(localConn)
 	}()
 
-	// local (Rust) -> remote (tsnet)
 	go func() {
 		defer wg.Done()
-		io.Copy(tsnetWriter, localConn)
-		// Local EOF: shut down tsnet write half so remote sees EOF
+		idleCopy(tsnetConn, localConn, idleDeadline)
 		closeWrite(tsnetConn)
 	}()
 
@@ -1992,22 +2279,44 @@ func bridgeCopy(tsnetConn, localConn net.Conn) {
 	// Both directions complete -> close everything
 }
 
-// deadlineWriter wraps a net.Conn and refreshes the write deadline on each Write.
-type deadlineWriter struct {
-	conn    net.Conn
-	timeout time.Duration
+// idleCopy is io.Copy with an idle timeout applied to each direction: if no
+// bytes flow for `timeout`, the read deadline fires and the copy returns, so an
+// idle-but-open bridged/relayed connection can't pin a goroutine + fds forever.
+func idleCopy(dst, src net.Conn, timeout time.Duration) {
+	buf := make([]byte, 32*1024)
+	for {
+		_ = src.SetReadDeadline(time.Now().Add(timeout))
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			_ = dst.SetWriteDeadline(time.Now().Add(timeout))
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
-func (w *deadlineWriter) Write(p []byte) (int, error) {
-	w.conn.SetWriteDeadline(time.Now().Add(w.timeout))
-	return w.conn.Write(p)
+// isLoopbackHost reports whether host refers to the local loopback interface.
+func isLoopbackHost(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // resolvePeerIdentity maps a remote address to a PeerIdentity JSON string via WhoIs.
 // The JSON is placed into the bridge header's remoteDNS field so Rust can
 // extract rich identity info about the connecting peer.
 func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) string {
-	whois, err := lc.WhoIs(s.ctx, remoteAddr)
+	ctx, cancel := context.WithTimeout(s.ctx, whoisTimeout)
+	defer cancel()
+	whois, err := lc.WhoIs(ctx, remoteAddr)
 	if err != nil {
 		log.Printf("resolvePeerIdentity: WhoIs(%s) failed: %v", remoteAddr, err)
 		return ""
@@ -2089,7 +2398,9 @@ func (s *shim) monitorState(lc *tailscale.LocalClient) {
 func (s *shim) sendEvent(eventType string, data interface{}) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	s.writer.Encode(event{Event: eventType, Data: data})
+	if err := s.writer.Encode(event{Event: eventType, Data: data}); err != nil {
+		log.Printf("sendEvent(%s) encode failed: %v", eventType, err)
+	}
 }
 
 // sendStatus is a convenience for sending tsnet:status events.

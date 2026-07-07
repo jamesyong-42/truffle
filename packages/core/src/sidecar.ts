@@ -9,12 +9,52 @@
  * Follows the esbuild pattern for distributing platform-specific binaries.
  */
 
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
+
+/**
+ * Best-effort check that a local binary's architecture matches this process.
+ *
+ * The `bin/` fallback is populated by postinstall for the *current* platform,
+ * but a stray/leftover binary of the wrong arch would otherwise be returned and
+ * fail later with a cryptic `ENOEXEC`. We sniff the executable's magic bytes and
+ * only reject on a *positive* mismatch; when we can't tell, we allow it.
+ */
+function binaryMatchesPlatform(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const buf = Buffer.alloc(20);
+    if (readSync(fd, buf, 0, 20, 0) < 20) return true; // too small to judge
+
+    // Mach-O 64-bit (macOS): LE magic 0xFEEDFACF, cputype at offset 4.
+    if (buf[0] === 0xcf && buf[1] === 0xfa && buf[2] === 0xed && buf[3] === 0xfe) {
+      const cpuType = buf.readUInt32LE(4);
+      if (process.arch === 'arm64') return cpuType === 0x0100000c; // CPU_TYPE_ARM64
+      if (process.arch === 'x64') return cpuType === 0x01000007; // CPU_TYPE_X86_64
+      return true;
+    }
+    // ELF (Linux): magic 0x7F 'E' 'L' 'F', e_machine at offset 18 (LE).
+    if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
+      const machine = buf.readUInt16LE(18);
+      if (process.arch === 'x64') return machine === 0x3e; // EM_X86_64
+      if (process.arch === 'arm64') return machine === 0xb7; // EM_AARCH64
+      return true;
+    }
+    // PE (Windows) / unknown format — don't block.
+    return true;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 const PLATFORM_PACKAGES: Record<string, string> = {
   'darwin-arm64': '@vibecook/truffle-sidecar-darwin-arm64',
@@ -50,10 +90,11 @@ export function resolveSidecarPath(): string {
     }
   }
 
-  // 2. Try postinstall-downloaded binary (fallback)
+  // 2. Try postinstall-downloaded binary (fallback), but only if its arch
+  //    matches this process — a wrong-arch leftover would fail with ENOEXEC.
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const localBin = join(__dirname, '..', 'bin', binName);
-  if (existsSync(localBin)) return localBin;
+  if (existsSync(localBin) && binaryMatchesPlatform(localBin)) return localBin;
 
   // 3. Nothing found
   const supported = Object.keys(PLATFORM_PACKAGES).join(', ');

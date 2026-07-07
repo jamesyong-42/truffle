@@ -1,0 +1,12 @@
+{
+  "_comment": "SHA-256 of each GitHub Release sidecar asset, keyed by release version then by asset filename. This file ships inside the npm package (which npm integrity-protects), so it is the trust anchor for the postinstall HTTPS download fallback. When an entry for the installing version/asset is present, postinstall FAILS CLOSED on a checksum mismatch; when absent it warns that integrity was not verified. Populate this at release time, e.g. `shasum -a 256 tsnet-sidecar-*` over the built assets. Keys must match GITHUB_ASSETS in scripts/postinstall.cjs.",
+  "_example": {
+    "0.4.7": {
+      "tsnet-sidecar-darwin-arm64": "<sha256-hex>",
+      "tsnet-sidecar-darwin-amd64": "<sha256-hex>",
+      "tsnet-sidecar-linux-amd64": "<sha256-hex>",
+      "tsnet-sidecar-linux-arm64": "<sha256-hex>",
+      "tsnet-sidecar-windows-amd64.exe": "<sha256-hex>"
+    }
+  }
+}

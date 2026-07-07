@@ -159,21 +159,22 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     /// `{output_dir}/{file_name}`.
     pub async fn auto_accept(&self, node: Arc<Node<N>>, output_dir: &str) {
         let mut rx = self.offer_channel(node).await;
-        let output_dir = output_dir.to_string();
+        // Normalize to a directory path (trailing separator) so the receiver
+        // treats it as a directory and appends a *sanitized* base name derived
+        // from the peer's `file_name`. We deliberately IGNORE the peer-supplied
+        // `suggested_path`: honoring it would let a remote peer choose an
+        // arbitrary destination (path traversal / absolute path → arbitrary file
+        // overwrite). See `receiver::resolve_dest_path`.
+        let output_dir = format!("{}/", output_dir.trim_end_matches(['/', '\\']));
 
         tokio::spawn(async move {
             while let Some((offer, responder)) = rx.recv().await {
-                let dest = if offer.suggested_path.is_empty() || offer.suggested_path == "." {
-                    format!("{}/{}", output_dir, offer.file_name)
-                } else {
-                    offer.suggested_path.clone()
-                };
                 info!(
                     file = offer.file_name.as_str(),
-                    dest = dest.as_str(),
+                    dir = output_dir.as_str(),
                     "Auto-accepting file offer"
                 );
-                responder.accept(&dest);
+                responder.accept(&output_dir);
             }
         });
     }
@@ -350,6 +351,17 @@ async fn pull_file<N: NetworkProvider + 'static>(
         }
     })?
     .map_err(|e| e)?;
+
+    // M1: reject an over-size OFFER before accepting the pull.
+    let max_size = node
+        .file_transfer_state
+        .max_transfer_size
+        .load(Ordering::Relaxed);
+    if offer_size > max_size {
+        return Err(TransferError::Protocol(format!(
+            "Offered file size {offer_size} exceeds max transfer size {max_size}"
+        )));
+    }
 
     // 3. Start TCP listener, then send ACCEPT with our port
     let mut listener = node
