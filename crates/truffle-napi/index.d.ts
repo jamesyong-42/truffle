@@ -356,7 +356,10 @@ export declare class NapiQuicStream {
    * peer. Reading remains possible. Idempotent.
    */
   finish(): Promise<void>
-  /** Fully close the stream (finish writes, stop reads). Idempotent. */
+  /**
+   * Fully close the stream (finish writes, stop reads). Unblocks any
+   * pending `read()` (it resolves `null`). Idempotent.
+   */
   close(): Promise<void>
 }
 
@@ -441,7 +444,10 @@ export declare class NapiTcpSocket {
    * Reading remains possible until the peer closes its side. Idempotent.
    */
   end(): Promise<void>
-  /** Fully close the socket (both directions). Idempotent. */
+  /**
+   * Fully close the socket (both directions). Unblocks any pending
+   * `read()` (it resolves `null`). Idempotent.
+   */
   close(): Promise<void>
   /**
    * The logical remote address (`host:port` for outbound connections,

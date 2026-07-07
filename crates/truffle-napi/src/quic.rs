@@ -6,11 +6,12 @@
 //! head-of-line blocking between them; each stream's read and write halves
 //! hold independent locks so full-duplex use never self-blocks.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::transport::quic::{QuicConnection, QuicListener};
@@ -109,6 +110,10 @@ impl NapiQuicConnection {
 pub struct NapiQuicStream {
     send: Arc<Mutex<Option<quinn::SendStream>>>,
     recv: Arc<Mutex<Option<quinn::RecvStream>>>,
+    /// Set by `close()`; `close_notify` unblocks a pending `read()` so the
+    /// recv-half lock is never held past close.
+    closed: Arc<AtomicBool>,
+    close_notify: Arc<Notify>,
 }
 
 impl NapiQuicStream {
@@ -117,6 +122,8 @@ impl NapiQuicStream {
         Self {
             send: Arc::new(Mutex::new(Some(send))),
             recv: Arc::new(Mutex::new(Some(recv))),
+            closed: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -133,6 +140,15 @@ impl NapiQuicStream {
             .unwrap_or(DEFAULT_READ_BYTES)
             .clamp(1, MAX_READ_BYTES) as usize;
 
+        // Register for the close signal BEFORE checking the flag, so a
+        // concurrent close() can never slip between check and select.
+        let notified = self.close_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+
         let mut guard = self.recv.lock().await;
         let half = match guard.as_mut() {
             Some(half) => half,
@@ -140,13 +156,17 @@ impl NapiQuicStream {
         };
 
         let mut buf = vec![0u8; cap];
-        match half.read(&mut buf).await {
-            Ok(Some(n)) => {
-                buf.truncate(n);
-                Ok(Some(buf.into()))
+        tokio::select! {
+            biased;
+            _ = &mut notified => Ok(None),
+            result = half.read(&mut buf) => match result {
+                Ok(Some(n)) => {
+                    buf.truncate(n);
+                    Ok(Some(buf.into()))
+                }
+                Ok(None) => Ok(None), // clean EOF
+                Err(e) => Err(Error::from_reason(format!("quic read: {e}"))),
             }
-            Ok(None) => Ok(None), // clean EOF
-            Err(e) => Err(Error::from_reason(format!("quic read: {e}"))),
         }
     }
 
@@ -173,9 +193,14 @@ impl NapiQuicStream {
         Ok(())
     }
 
-    /// Fully close the stream (finish writes, stop reads). Idempotent.
+    /// Fully close the stream (finish writes, stop reads). Unblocks any
+    /// pending `read()` (it resolves `null`). Idempotent.
     #[napi]
     pub async fn close(&self) -> Result<()> {
+        // Signal first: a pending read() exits with None and releases the
+        // recv-half lock, so the take below cannot block on it.
+        self.closed.store(true, Ordering::Release);
+        self.close_notify.notify_waiters();
         {
             let mut guard = self.send.lock().await;
             if let Some(mut half) = guard.take() {

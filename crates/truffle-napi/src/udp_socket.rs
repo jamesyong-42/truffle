@@ -96,6 +96,11 @@ impl NapiUdpSocket {
     /// unreliable: datagrams may be dropped or reordered.
     #[napi]
     pub async fn recv(&self) -> Result<Option<NapiDatagram>> {
+        // Register for the close signal BEFORE checking the flag, so a
+        // concurrent close() can never slip between check and select.
+        let notified = self.close_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -103,7 +108,7 @@ impl NapiUdpSocket {
         let mut buf = vec![0u8; RECV_BUF_BYTES];
         tokio::select! {
             biased;
-            _ = self.close_notify.notified() => Ok(None),
+            _ = &mut notified => Ok(None),
             result = self.socket.recv_from(&mut buf) => {
                 let (n, addr) = result
                     .map_err(|e| Error::from_reason(format!("udp recv: {e}")))?;

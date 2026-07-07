@@ -6,13 +6,14 @@
 //! The `@vibecook/truffle` TS layer wraps these in `stream.Duplex` /
 //! `net`-style classes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::transport::RawListener;
@@ -36,6 +37,11 @@ const MAX_READ_BYTES: u32 = 4 * 1024 * 1024;
 pub struct NapiTcpSocket {
     read: Arc<Mutex<Option<OwnedReadHalf>>>,
     write: Arc<Mutex<Option<OwnedWriteHalf>>>,
+    /// Set by `close()`; `close_notify` unblocks a pending `read()` so the
+    /// read-half lock is never held past close (a pending pull-model read
+    /// would otherwise block `close()` until the peer sends data).
+    closed: Arc<AtomicBool>,
+    close_notify: Arc<Notify>,
     remote_address: String,
     remote_peer_id: Option<String>,
     remote_peer_name: Option<String>,
@@ -53,6 +59,8 @@ impl NapiTcpSocket {
         Self {
             read: Arc::new(Mutex::new(Some(read))),
             write: Arc::new(Mutex::new(Some(write))),
+            closed: Arc::new(AtomicBool::new(false)),
+            close_notify: Arc::new(Notify::new()),
             remote_address,
             remote_peer_id,
             remote_peer_name,
@@ -72,6 +80,16 @@ impl NapiTcpSocket {
             .unwrap_or(DEFAULT_READ_BYTES)
             .clamp(1, MAX_READ_BYTES) as usize;
 
+        // Register for the close signal BEFORE checking the flag, so a
+        // concurrent close() can never slip between check and select
+        // (Notified::enable makes the waiter eligible for notify_waiters).
+        let notified = self.close_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+
         let mut guard = self.read.lock().await;
         let half = match guard.as_mut() {
             Some(half) => half,
@@ -79,15 +97,18 @@ impl NapiTcpSocket {
         };
 
         let mut buf = vec![0u8; cap];
-        let n = half
-            .read(&mut buf)
-            .await
-            .map_err(|e| Error::from_reason(format!("tcp read: {e}")))?;
-        if n == 0 {
-            return Ok(None); // clean EOF
+        tokio::select! {
+            biased;
+            _ = &mut notified => Ok(None),
+            result = half.read(&mut buf) => {
+                let n = result.map_err(|e| Error::from_reason(format!("tcp read: {e}")))?;
+                if n == 0 {
+                    return Ok(None); // clean EOF
+                }
+                buf.truncate(n);
+                Ok(Some(buf.into()))
+            }
         }
-        buf.truncate(n);
-        Ok(Some(buf.into()))
     }
 
     /// Write all of `data` to the socket.
@@ -114,9 +135,14 @@ impl NapiTcpSocket {
         Ok(())
     }
 
-    /// Fully close the socket (both directions). Idempotent.
+    /// Fully close the socket (both directions). Unblocks any pending
+    /// `read()` (it resolves `null`). Idempotent.
     #[napi]
     pub async fn close(&self) -> Result<()> {
+        // Signal first: a pending read() exits with None and releases the
+        // read-half lock, so the take below cannot block on it.
+        self.closed.store(true, Ordering::Release);
+        self.close_notify.notify_waiters();
         {
             let mut guard = self.write.lock().await;
             if let Some(mut half) = guard.take() {
@@ -157,6 +183,7 @@ impl NapiTcpSocket {
 pub struct NapiTcpListener {
     listener: Arc<Mutex<Option<RawListener>>>,
     node: Arc<Node<TailscaleProvider>>,
+    closed: Arc<AtomicBool>,
     port: u16,
 }
 
@@ -166,6 +193,7 @@ impl NapiTcpListener {
         Self {
             listener: Arc::new(Mutex::new(Some(listener))),
             node,
+            closed: Arc::new(AtomicBool::new(false)),
             port,
         }
     }
@@ -178,6 +206,9 @@ impl NapiTcpListener {
     /// Resolves with `null` once the listener has been closed.
     #[napi]
     pub async fn accept(&self) -> Result<Option<NapiTcpSocket>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         let mut guard = self.listener.lock().await;
         let listener = match guard.as_mut() {
             Some(listener) => listener,
@@ -217,12 +248,18 @@ impl NapiTcpListener {
     /// Pending `accept()` calls resolve with `null`. Idempotent.
     #[napi]
     pub async fn close(&self) -> Result<()> {
-        let had_listener = self.listener.lock().await.take().is_some();
-        if had_listener {
-            if let Err(e) = self.node.unlisten_tcp(self.port).await {
-                tracing::debug!(port = self.port, "unlisten_tcp on close: {e}");
-            }
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
         }
+        // Unlisten FIRST, without taking the listener lock: a pending
+        // accept() holds that lock across its await, and only returns once
+        // unlisten collapses the incoming channel (bridge drops the sender →
+        // forwarding task ends → RawListener yields None). Taking the lock
+        // first would deadlock until the next inbound connection.
+        if let Err(e) = self.node.unlisten_tcp(self.port).await {
+            tracing::debug!(port = self.port, "unlisten_tcp on close: {e}");
+        }
+        let _ = self.listener.lock().await.take();
         Ok(())
     }
 }
