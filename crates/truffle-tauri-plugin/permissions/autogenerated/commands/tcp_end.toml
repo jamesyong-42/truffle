@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tcp-end"
+description = "Enables the tcp_end command without any pre-configured scope."
+commands.allow = ["tcp_end"]
+
+[[permission]]
+identifier = "deny-tcp-end"
+description = "Denies the tcp_end command without any pre-configured scope."
+commands.deny = ["tcp_end"]

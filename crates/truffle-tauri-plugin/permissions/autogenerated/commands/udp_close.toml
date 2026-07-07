@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-udp-close"
+description = "Enables the udp_close command without any pre-configured scope."
+commands.allow = ["udp_close"]
+
+[[permission]]
+identifier = "deny-udp-close"
+description = "Denies the udp_close command without any pre-configured scope."
+commands.deny = ["udp_close"]

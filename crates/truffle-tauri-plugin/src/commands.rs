@@ -19,7 +19,7 @@ use crate::TruffleState;
 // Helper: get a clone of the Arc<Node> from state, or error
 // ---------------------------------------------------------------------------
 
-async fn get_node(state: &TruffleState) -> Result<Arc<Node<TailscaleProvider>>, String> {
+pub(crate) async fn get_node(state: &TruffleState) -> Result<Arc<Node<TailscaleProvider>>, String> {
     state
         .node
         .read()

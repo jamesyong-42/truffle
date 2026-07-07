@@ -89,3 +89,19 @@ pnpm --filter @vibecook/example-express-over-mesh run client <device-name>
 ```
 
 See `examples/express-over-mesh/README.md` for details.
+
+### WebSocket over the mesh
+
+Group chat built on `mesh.ws` (RFC 021) — the `ws` package running over mesh
+TCP, zero new protocol code. One device hosts and broadcasts; the others
+connect and chat:
+
+```bash
+# device A (host)
+pnpm --filter @vibecook/example-ws-chat-over-mesh exec tsx src/main.ts serve 9500
+# devices B, C, … (join)
+pnpm --filter @vibecook/example-ws-chat-over-mesh exec tsx src/main.ts connect <device-name> 9500
+```
+
+`ws` is an optional peer dependency of `@vibecook/truffle` — install it
+alongside (this example does). See `examples/ws-chat-over-mesh/README.md`.

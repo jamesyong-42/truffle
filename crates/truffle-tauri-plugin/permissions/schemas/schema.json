@@ -535,6 +535,138 @@
           "markdownDescription": "Denies the pull_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the quic_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-accept",
+          "markdownDescription": "Enables the quic_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-accept",
+          "markdownDescription": "Denies the quic_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_accept_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-accept-stream",
+          "markdownDescription": "Enables the quic_accept_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_accept_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-accept-stream",
+          "markdownDescription": "Denies the quic_accept_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-close",
+          "markdownDescription": "Enables the quic_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-close",
+          "markdownDescription": "Denies the quic_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-connect",
+          "markdownDescription": "Enables the quic_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-connect",
+          "markdownDescription": "Denies the quic_connect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_listen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-listen",
+          "markdownDescription": "Enables the quic_listen command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_listen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-listen",
+          "markdownDescription": "Denies the quic_listen command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_listener_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-listener-close",
+          "markdownDescription": "Enables the quic_listener_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_listener_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-listener-close",
+          "markdownDescription": "Denies the quic_listener_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_open_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-open-stream",
+          "markdownDescription": "Enables the quic_open_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_open_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-open-stream",
+          "markdownDescription": "Denies the quic_open_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_stream_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-stream-close",
+          "markdownDescription": "Enables the quic_stream_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_stream_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-stream-close",
+          "markdownDescription": "Denies the quic_stream_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_stream_finish command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-stream-finish",
+          "markdownDescription": "Enables the quic_stream_finish command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_stream_finish command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-stream-finish",
+          "markdownDescription": "Denies the quic_stream_finish command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_stream_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-stream-read",
+          "markdownDescription": "Enables the quic_stream_read command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_stream_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-stream-read",
+          "markdownDescription": "Denies the quic_stream_read command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the quic_stream_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-quic-stream-write",
+          "markdownDescription": "Enables the quic_stream_write command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the quic_stream_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-quic-stream-write",
+          "markdownDescription": "Denies the quic_stream_write command without any pre-configured scope."
+        },
+        {
           "description": "Enables the reject_offer command without any pre-configured scope.",
           "type": "string",
           "const": "allow-reject-offer",
@@ -629,6 +761,150 @@
           "type": "string",
           "const": "deny-stop",
           "markdownDescription": "Denies the stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-accept",
+          "markdownDescription": "Enables the tcp_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_accept command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-accept",
+          "markdownDescription": "Denies the tcp_accept command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-close",
+          "markdownDescription": "Enables the tcp_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-close",
+          "markdownDescription": "Denies the tcp_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_end command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-end",
+          "markdownDescription": "Enables the tcp_end command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_end command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-end",
+          "markdownDescription": "Denies the tcp_end command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_listen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-listen",
+          "markdownDescription": "Enables the tcp_listen command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_listen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-listen",
+          "markdownDescription": "Denies the tcp_listen command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-open",
+          "markdownDescription": "Enables the tcp_open command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_open command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-open",
+          "markdownDescription": "Denies the tcp_open command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-read",
+          "markdownDescription": "Enables the tcp_read command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_read command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-read",
+          "markdownDescription": "Denies the tcp_read command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_unlisten command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-unlisten",
+          "markdownDescription": "Enables the tcp_unlisten command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_unlisten command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-unlisten",
+          "markdownDescription": "Denies the tcp_unlisten command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the tcp_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-tcp-write",
+          "markdownDescription": "Enables the tcp_write command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tcp_write command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-tcp-write",
+          "markdownDescription": "Denies the tcp_write command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the udp_bind command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-udp-bind",
+          "markdownDescription": "Enables the udp_bind command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the udp_bind command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-udp-bind",
+          "markdownDescription": "Denies the udp_bind command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the udp_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-udp-close",
+          "markdownDescription": "Enables the udp_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the udp_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-udp-close",
+          "markdownDescription": "Denies the udp_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the udp_recv command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-udp-recv",
+          "markdownDescription": "Enables the udp_recv command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the udp_recv command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-udp-recv",
+          "markdownDescription": "Denies the udp_recv command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the udp_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-udp-send",
+          "markdownDescription": "Enables the udp_send command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the udp_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-udp-send",
+          "markdownDescription": "Denies the udp_send command without any pre-configured scope."
         },
         {
           "description": "Default permissions for the Truffle plugin\n#### This default permission set includes:\n\n- `allow-start`\n- `allow-stop`\n- `allow-is-running`\n- `allow-device-id`\n- `allow-devices`\n- `allow-device-by-id`\n- `allow-is-primary`\n- `allow-primary-id`\n- `allow-role`\n- `allow-send-envelope`\n- `allow-broadcast-envelope`\n- `allow-handle-tailnet-peers`\n- `allow-set-local-online`\n- `allow-proxy-add`\n- `allow-proxy-remove`\n- `allow-proxy-list`",

@@ -6594,6 +6594,7 @@ name = "truffle-tauri-plugin"
 version = "0.2.2"
 dependencies = [
  "loro",
+ "quinn",
  "serde",
  "serde_json",
  "tauri",
@@ -6601,6 +6602,7 @@ dependencies = [
  "tokio",
  "tracing",
  "truffle-core",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tcp-read"
+description = "Enables the tcp_read command without any pre-configured scope."
+commands.allow = ["tcp_read"]
+
+[[permission]]
+identifier = "deny-tcp-read"
+description = "Denies the tcp_read command without any pre-configured scope."
+commands.deny = ["tcp_read"]

@@ -69,5 +69,14 @@ export {
   type TruffleRemoteInfo,
 } from './dgram.js';
 
+// WebSocket over the mesh via the `ws` package (RFC 021)
+export {
+  createWsNamespace,
+  type TruffleWs,
+  type TruffleWsServer,
+  type TruffleWsServerOptions,
+  type WsLoader,
+} from './ws.js';
+
 // High-level API
 export { createMeshNode, type CreateMeshNodeOptions, type MeshNode } from './create-mesh-node.js';

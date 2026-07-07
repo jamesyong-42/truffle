@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-quic-connect"
+description = "Enables the quic_connect command without any pre-configured scope."
+commands.allow = ["quic_connect"]
+
+[[permission]]
+identifier = "deny-quic-connect"
+description = "Denies the quic_connect command without any pre-configured scope."
+commands.deny = ["quic_connect"]

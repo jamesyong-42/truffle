@@ -1,7 +1,8 @@
 /**
  * Chat Example - Simple cross-device messaging
  *
- * Starts a mesh node and uses broadcastEnvelope for pub/sub chat.
+ * Starts a mesh node and uses broadcast()/onMessage() on the 'chat'
+ * namespace for pub/sub chat.
  *
  * Prerequisites:
  *   - Tailscale installed and running
@@ -10,83 +11,67 @@
  * Usage:
  *   npx tsx examples/chat/index.ts
  *
- * Run on multiple devices on the same Tailscale network to chat.
+ * Run on multiple devices on the same Tailscale network to chat. Every
+ * device must use the same appId ('chat-example') to see each other as
+ * peers. Set NAME to pick your display name.
  */
 
-import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
-import type { NapiMeshEvent } from '@vibecook/truffle';
+import { createMeshNode, type NapiNamespacedMessage, type NapiPeerEvent } from '@vibecook/truffle';
 import { createInterface } from 'readline';
 
-const deviceId = `chat-${Date.now()}`;
-const deviceName = process.env.NAME ?? `User-${deviceId.slice(-4)}`;
-
-const node = new NapiMeshNode({
-  deviceId,
-  deviceName,
-  deviceType: 'desktop',
-  hostnamePrefix: 'truffle-chat',
-  sidecarPath: resolveSidecarPath(),
-  stateDir: `./tmp/chat-state-${deviceId}`,
-});
+const CHAT_NAMESPACE = 'chat';
+const deviceName = process.env.NAME ?? `User-${Date.now().toString().slice(-4)}`;
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 rl.setPrompt(`${deviceName}> `);
 
-// Subscribe to mesh events
-node.onEvent((err: null | Error, event: NapiMeshEvent) => {
-  if (err) return;
+interface ChatPayload {
+  name: string;
+  text: string;
+}
 
-  switch (event.eventType) {
-    case 'started':
-      console.log(`Chat started as "${deviceName}" (${deviceId})`);
-      console.log('Waiting for peers...\n');
-      rl.prompt();
-      break;
-
-    case 'deviceDiscovered':
-      console.log(`* ${event.deviceId} joined`);
-      rl.prompt();
-      break;
-
-    case 'deviceOffline':
-      console.log(`* ${event.deviceId} left`);
-      rl.prompt();
-      break;
-
-    case 'authRequired':
-      console.log(`Auth required - visit: ${event.payload}`);
-      break;
-
-    case 'message': {
-      // Incoming application-level message
-      if (event.payload && typeof event.payload === 'object') {
-        const p = event.payload as Record<string, unknown>;
-        if (p.namespace === 'chat' && p.type === 'message') {
-          const inner = p.payload as Record<string, unknown> | undefined;
-          if (inner && event.deviceId !== deviceId) {
-            console.log(`\n[${inner.name ?? event.deviceId}]: ${inner.text}`);
-            rl.prompt();
-          }
-        }
-      }
-      break;
+const mesh = await createMeshNode({
+  appId: 'chat-example',
+  deviceName,
+  onAuthRequired: (url) => {
+    console.log(`Auth required - visit: ${url}`);
+  },
+  onPeerChange: (event: NapiPeerEvent) => {
+    switch (event.eventType) {
+      case 'joined':
+        console.log(`* ${event.peer?.deviceName ?? event.peerId} joined`);
+        rl.prompt();
+        break;
+      case 'left':
+        console.log(`* ${event.peerId} left`);
+        rl.prompt();
+        break;
     }
-  }
+  },
 });
 
-// Start node
-await node.start();
+mesh.onMessage(CHAT_NAMESPACE, (msg: NapiNamespacedMessage) => {
+  const payload = msg.payload as ChatPayload | null;
+  if (!payload || typeof payload.text !== 'string') return;
+  console.log(`\n[${payload.name ?? msg.from}]: ${payload.text}`);
+  rl.prompt();
+});
+
+console.log(`Chat started as "${deviceName}" (${mesh.getLocalInfo().deviceId})`);
+console.log('Waiting for peers...\n');
+rl.prompt();
 
 rl.on('line', async (line) => {
   const text = line.trim();
   if (text) {
-    await node.broadcastEnvelope('chat', 'message', { name: deviceName, text });
+    const payload: ChatPayload = { name: deviceName, text };
+    await mesh.broadcast(CHAT_NAMESPACE, Buffer.from(JSON.stringify(payload)));
   }
   rl.prompt();
 });
 
 rl.on('close', async () => {
   console.log('\nBye!');
-  await node.stop();
+  await mesh.stop();
   process.exit(0);
 });

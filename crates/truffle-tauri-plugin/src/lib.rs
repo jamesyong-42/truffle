@@ -44,6 +44,19 @@
 //! - `crdt_doc_text_insert(doc_id, container, pos, text)` — Insert text
 //! - `crdt_doc_counter_increment(doc_id, container, value)` — Increment a counter
 //!
+//! # Raw Transport Commands (RFC 021 §7)
+//!
+//! Id-keyed parity with the NAPI raw surface — see [`raw_transport`]. Handles
+//! live in [`TruffleState`] registries; commands take/return string ids.
+//!
+//! - TCP: `tcp_open`, `tcp_read`, `tcp_write`, `tcp_end`, `tcp_close`,
+//!   `tcp_listen`, `tcp_accept`, `tcp_unlisten`
+//! - UDP: `udp_bind`, `udp_send`, `udp_recv`, `udp_close`
+//! - QUIC: `quic_connect`, `quic_open_stream`, `quic_accept_stream`,
+//!   `quic_stream_read`, `quic_stream_write`, `quic_stream_finish`,
+//!   `quic_stream_close`, `quic_close`, `quic_listen`, `quic_accept`,
+//!   `quic_listener_close`
+//!
 //! # Events
 //!
 //! - `truffle://peer-event` — Peer state changes
@@ -57,7 +70,7 @@ use std::sync::Arc;
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
@@ -65,7 +78,13 @@ use truffle_core::{CrdtDoc, Node, OfferResponder};
 
 pub mod commands;
 pub mod events;
+pub mod raw_transport;
 pub mod types;
+
+use raw_transport::{
+    QuicConnectionEntry, QuicListenerEntry, QuicStreamEntry, TcpListenerEntry, TcpSocketEntry,
+    UdpSocketEntry,
+};
 
 /// Shared state managed by the Tauri plugin.
 ///
@@ -81,6 +100,23 @@ pub struct TruffleState {
     /// Each entry stores the doc and the handle to its event-forwarding task
     /// so that the task can be aborted when the doc is destroyed.
     pub crdt_docs: Arc<RwLock<HashMap<String, (Arc<CrdtDoc>, JoinHandle<()>)>>>,
+
+    // ── Raw transport registries (RFC 021 §7, Phase 4) ───────────────────
+    // Live socket/stream/listener handles cannot cross Tauri IPC, so each is
+    // parked here keyed by a short string id; the `raw_transport` commands
+    // take/return those ids. See `raw_transport.rs`.
+    /// Raw TCP sockets, keyed by socket id.
+    pub tcp_sockets: Mutex<HashMap<String, TcpSocketEntry>>,
+    /// Raw TCP listeners, keyed by listener id.
+    pub tcp_listeners: Mutex<HashMap<String, TcpListenerEntry>>,
+    /// UDP datagram sockets, keyed by socket id.
+    pub udp_sockets: Mutex<HashMap<String, UdpSocketEntry>>,
+    /// QUIC connections, keyed by connection id.
+    pub quic_connections: Mutex<HashMap<String, QuicConnectionEntry>>,
+    /// QUIC streams, keyed by stream id (tagged with their connection id).
+    pub quic_streams: Mutex<HashMap<String, QuicStreamEntry>>,
+    /// QUIC listeners, keyed by listener id.
+    pub quic_listeners: Mutex<HashMap<String, QuicListenerEntry>>,
 }
 
 /// Initialize the Truffle Tauri v2 plugin.
@@ -121,12 +157,42 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::proxy_add,
             commands::proxy_remove,
             commands::proxy_list,
+            // Raw transport (RFC 021 §7, Phase 4) — NAPI parity.
+            raw_transport::tcp_open,
+            raw_transport::tcp_read,
+            raw_transport::tcp_write,
+            raw_transport::tcp_end,
+            raw_transport::tcp_close,
+            raw_transport::tcp_listen,
+            raw_transport::tcp_accept,
+            raw_transport::tcp_unlisten,
+            raw_transport::udp_bind,
+            raw_transport::udp_send,
+            raw_transport::udp_recv,
+            raw_transport::udp_close,
+            raw_transport::quic_connect,
+            raw_transport::quic_open_stream,
+            raw_transport::quic_accept_stream,
+            raw_transport::quic_stream_read,
+            raw_transport::quic_stream_write,
+            raw_transport::quic_stream_finish,
+            raw_transport::quic_stream_close,
+            raw_transport::quic_close,
+            raw_transport::quic_listen,
+            raw_transport::quic_accept,
+            raw_transport::quic_listener_close,
         ])
         .setup(|app, _| {
             app.manage(TruffleState {
                 node: RwLock::new(None),
                 pending_offers: Arc::new(RwLock::new(HashMap::new())),
                 crdt_docs: Arc::new(RwLock::new(HashMap::new())),
+                tcp_sockets: Mutex::new(HashMap::new()),
+                tcp_listeners: Mutex::new(HashMap::new()),
+                udp_sockets: Mutex::new(HashMap::new()),
+                quic_connections: Mutex::new(HashMap::new()),
+                quic_streams: Mutex::new(HashMap::new()),
+                quic_listeners: Mutex::new(HashMap::new()),
             });
             Ok(())
         })

@@ -1,0 +1,15 @@
+{
+  "name": "@vibecook/example-ws-chat-over-mesh",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vibecook/truffle": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  }
+}

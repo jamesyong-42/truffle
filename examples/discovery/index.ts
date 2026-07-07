@@ -11,68 +11,53 @@
  *   - npm install @vibecook/truffle
  */
 
-import { NapiMeshNode, resolveSidecarPath } from '@vibecook/truffle';
-import type { NapiMeshEvent } from '@vibecook/truffle';
+import { createMeshNode, type NapiPeer, type NapiPeerEvent } from '@vibecook/truffle';
 
-const node = new NapiMeshNode({
-  deviceId: `discovery-${Date.now()}`,
+function printPeer(peer: NapiPeer): void {
+  console.log(`\nDiscovered: ${peer.deviceName}`);
+  console.log(`  ID:      ${peer.deviceId}`);
+  console.log(`  IP:      ${peer.ip}`);
+  console.log(`  OS:      ${peer.os ?? 'unknown'}`);
+  console.log(`  Online:  ${peer.online}`);
+}
+
+const mesh = await createMeshNode({
+  appId: 'discovery-example',
   deviceName: 'Discovery Example',
-  deviceType: 'desktop',
-  hostnamePrefix: 'truffle-example',
-  sidecarPath: resolveSidecarPath(),
-  stateDir: './tmp/discovery-state',
+  onAuthRequired: (url) => {
+    console.log(`\nAuth required - visit: ${url}`);
+  },
+  onPeerChange: (event: NapiPeerEvent) => {
+    switch (event.eventType) {
+      case 'joined':
+        if (event.peer) printPeer(event.peer);
+        break;
+      case 'left':
+        console.log(`Device offline: ${event.peerId}`);
+        break;
+      case 'updated':
+        if (event.peer) console.log(`Updated: ${event.peer.deviceName} (${event.peer.deviceId})`);
+        break;
+      case 'ws_connected':
+        console.log(`Connected: ${event.peerId}`);
+        break;
+      case 'ws_disconnected':
+        console.log(`Disconnected: ${event.peerId}`);
+        break;
+    }
+  },
 });
 
-// Subscribe to mesh events via NAPI callback
-node.onEvent((err: null | Error, event: NapiMeshEvent) => {
-  if (err) return;
+console.log('Mesh node started');
+console.log('Local device:', mesh.getLocalInfo());
+console.log('Discovering peers...');
 
-  switch (event.eventType) {
-    case 'started':
-      console.log('Mesh node started');
-      node.localDevice().then((device) => {
-        console.log('Local device:', device);
-      });
-      console.log('Discovering peers...');
-      break;
-
-    case 'deviceDiscovered':
-      console.log(`\nDiscovered: ${event.payload?.name ?? event.deviceId}`);
-      console.log(`  ID:   ${event.deviceId}`);
-      if (event.payload && typeof event.payload === 'object') {
-        const p = event.payload as Record<string, unknown>;
-        console.log(`  Type: ${p.deviceType ?? 'unknown'}`);
-        console.log(`  IP:   ${p.tailscaleIp ?? 'unknown'}`);
-        console.log(`  OS:   ${p.os ?? 'unknown'}`);
-      }
-      break;
-
-    case 'deviceOffline':
-      console.log(`Device offline: ${event.deviceId}`);
-      break;
-
-    case 'roleChanged':
-      if (event.payload && typeof event.payload === 'object') {
-        const p = event.payload as Record<string, unknown>;
-        console.log(`Role: ${p.role} (isPrimary=${p.isPrimary})`);
-      }
-      break;
-
-    case 'authRequired':
-      console.log(`\nAuth required - visit: ${event.payload}`);
-      break;
-
-    case 'error':
-      console.error('Error:', event.payload);
-      break;
-  }
-});
+const initialPeers = await mesh.getPeers();
+initialPeers.forEach(printPeer);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('\nShutting down...');
-  await node.stop();
+  await mesh.stop();
   process.exit(0);
 });
-
-await node.start();

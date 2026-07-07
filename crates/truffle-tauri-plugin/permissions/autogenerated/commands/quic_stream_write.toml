@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-quic-stream-write"
+description = "Enables the quic_stream_write command without any pre-configured scope."
+commands.allow = ["quic_stream_write"]
+
+[[permission]]
+identifier = "deny-quic-stream-write"
+description = "Denies the quic_stream_write command without any pre-configured scope."
+commands.deny = ["quic_stream_write"]

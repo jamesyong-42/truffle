@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tcp-accept"
+description = "Enables the tcp_accept command without any pre-configured scope."
+commands.allow = ["tcp_accept"]
+
+[[permission]]
+identifier = "deny-tcp-accept"
+description = "Denies the tcp_accept command without any pre-configured scope."
+commands.deny = ["tcp_accept"]

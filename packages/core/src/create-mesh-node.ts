@@ -4,6 +4,7 @@ import { createNetNamespace, type TruffleNet } from './net.js';
 import { createHttpNamespace, type TruffleHttp } from './http.js';
 import { createQuicNamespace, type TruffleQuic } from './quic.js';
 import { createDgramNamespace, type TruffleDgram } from './dgram.js';
+import { createWsNamespace, type TruffleWs } from './ws.js';
 import { resolveSidecarPath } from './sidecar.js';
 
 /**
@@ -32,6 +33,12 @@ export type MeshNode = NapiNode & {
    * with `'message'` events and preserved datagram boundaries.
    */
   dgram: TruffleDgram;
+  /**
+   * WebSocket over the mesh (RFC 021): thin wrappers over the `ws` package —
+   * `ws.connect(peer, port)` for a client, `ws.createServer({ port })` for a
+   * server. Requires the optional `ws` peer dependency to be installed.
+   */
+  ws: TruffleWs;
   /** The underlying native handle (escape hatch; the same object). */
   native: NapiNode;
 };
@@ -215,6 +222,7 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
   mesh.http = createHttpNamespace(mesh.net);
   mesh.quic = createQuicNamespace(node);
   mesh.dgram = createDgramNamespace(node);
+  mesh.ws = createWsNamespace(mesh.net);
   mesh.native = node;
 
   return mesh;
