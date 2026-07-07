@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.8](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.7...truffle-v0.4.8) (2026-07-07)
+
+
+### Bug Fixes
+
+* **deps:** bump crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204) ([#118](https://github.com/jamesyong-42/truffle/issues/118)) ([c3ad909](https://github.com/jamesyong-42/truffle/commit/c3ad909d3ead0e31b8bffc3e1217dc14d71c4786))
+* **deps:** bump plist to 1.10.0 to patch quick-xml (RUSTSEC-2026-0194/0195) ([#119](https://github.com/jamesyong-42/truffle/issues/119)) ([91b2261](https://github.com/jamesyong-42/truffle/commit/91b2261048325a01f53a5c9b2e8dfed5399748c8))
+* **napi:** stop tracking generated index.js; rebuild it at release ([#121](https://github.com/jamesyong-42/truffle/issues/121)) ([8606b8c](https://github.com/jamesyong-42/truffle/commit/8606b8c8fc4df508ded99b6ae80caa5deccf4001))
+* patch file-transfer path traversal + harden sidecar & packaging ([#116](https://github.com/jamesyong-42/truffle/issues/116)) ([93e1e76](https://github.com/jamesyong-42/truffle/commit/93e1e76ba4c70f26e925f5369d9d91914b58338d))
+
 ## [0.4.7](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.6...truffle-v0.4.7) (2026-07-03)
 
 
