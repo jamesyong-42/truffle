@@ -5,9 +5,9 @@
 #   git config core.hooksPath .githooks
 #
 # Catches issues that would otherwise only surface in CI:
-#   1. NAPI binding drift — if crates/truffle-napi/src/ changed but
-#      index.d.ts / index.js weren't regenerated (caused 0.3.17 pipeline
-#      to ship stale types)
+#   1. NAPI binding drift — if crates/truffle-napi/src/ changed but the
+#      committed index.d.ts wasn't regenerated. index.js is generated +
+#      gitignored (rebuilt at release); 0.3.17 shipped stale types.
 #   2. Workflow YAML parse errors
 #   3. Rustfmt violations on staged Rust files
 #   4. Prettier violations on staged TypeScript files in packages/
@@ -61,11 +61,12 @@ if [ "$napi_src_changed" -eq 1 ]; then
     exit 1
   fi
 
-  # If index.d.ts or index.js changed after regen, the commit is missing them
-  if ! git diff --quiet -- crates/truffle-napi/index.d.ts crates/truffle-napi/index.js; then
-    echo "${RED}[pre-commit] NAPI bindings are out of date.${NC}"
-    echo "${RED}            Stage the regenerated files and commit again:${NC}"
-    echo "            git add crates/truffle-napi/index.d.ts crates/truffle-napi/index.js"
+  # index.js is generated + gitignored (regenerated at build/publish); only
+  # the committed index.d.ts must stay in sync with the Rust exports.
+  if ! git diff --quiet -- crates/truffle-napi/index.d.ts; then
+    echo "${RED}[pre-commit] NAPI index.d.ts is out of date.${NC}"
+    echo "${RED}            Stage the regenerated file and commit again:${NC}"
+    echo "            git add crates/truffle-napi/index.d.ts"
     fail=1
   else
     echo "${GREEN}[pre-commit] NAPI bindings up to date.${NC}"
@@ -210,7 +211,7 @@ fi
 ts_build_relevant=0
 while IFS= read -r f; do
   case "$f" in
-    packages/*/src/*.ts|packages/*/src/**/*.ts|packages/*/package.json|crates/truffle-napi/index.d.ts|crates/truffle-napi/index.js)
+    packages/*/src/*.ts|packages/*/src/**/*.ts|packages/*/package.json|crates/truffle-napi/index.d.ts)
       ts_build_relevant=1
       break
       ;;
