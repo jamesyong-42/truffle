@@ -30,6 +30,12 @@
 
 use std::path::{Path, PathBuf};
 
+// Pure integrity helpers shared with `build.rs` (which pulls the same file in
+// via `include!`). Compiled only under test so `sha2`/`serde_json` stay out of
+// the published library's regular dependencies — they are dev-dependencies.
+#[cfg(test)]
+mod integrity;
+
 /// Known sidecar binary names (platform-aware).
 const SIDECAR_NAMES: &[&str] = if cfg!(windows) {
     &[

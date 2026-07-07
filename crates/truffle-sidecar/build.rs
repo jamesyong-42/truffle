@@ -37,15 +37,56 @@ fn main() {
         }
     };
 
+    // Look up the pinned checksum for this version/asset from the committed
+    // trust anchor. A malformed file is fatal; a missing entry only warns (so a
+    // freshly tagged release whose hash isn't committed yet still builds).
+    println!("cargo:rerun-if-changed=sidecar-checksums.json");
+    let expected =
+        match lookup_checksum(include_str!("sidecar-checksums.json"), version, asset_name) {
+            Ok(v) => v,
+            Err(e) => panic!("truffle-sidecar: invalid sidecar-checksums.json: {e}"),
+        };
+    if expected.is_none() {
+        println!(
+            "cargo:warning=truffle-sidecar: integrity NOT verified — no checksum entry for {version}/{asset_name} in sidecar-checksums.json"
+        );
+    }
+
     let sidecar_path = out_dir.join(bin_name);
 
-    // Skip download if already present (cached build)
+    // Skip download if already present (cached build) — but only trust the
+    // cached OUT_DIR binary if it still matches the pinned checksum. A cached
+    // file that no longer verifies (tampered, or a stale hash) is re-downloaded
+    // rather than used.
     if sidecar_path.exists() {
-        println!(
-            "cargo:rustc-env=TRUFFLE_SIDECAR_PATH={}",
-            sidecar_path.display()
-        );
-        return;
+        let cached_ok = match &expected {
+            Some(exp) => match fs::read(&sidecar_path) {
+                Ok(bytes) => match verify_sha256(&bytes, exp) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!(
+                            "truffle-sidecar: cached sidecar failed integrity check ({e}); re-downloading"
+                        );
+                        false
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "truffle-sidecar: could not read cached sidecar ({e}); re-downloading"
+                    );
+                    false
+                }
+            },
+            // No pinned checksum: preserve the previous cache-hit behavior.
+            None => true,
+        };
+        if cached_ok {
+            println!(
+                "cargo:rustc-env=TRUFFLE_SIDECAR_PATH={}",
+                sidecar_path.display()
+            );
+            return;
+        }
     }
 
     let url = format!(
@@ -54,7 +95,7 @@ fn main() {
 
     eprintln!("truffle-sidecar: downloading {url}");
 
-    match download(&url, &sidecar_path) {
+    match download(&url, &sidecar_path, expected.as_deref()) {
         Ok(()) => {
             #[cfg(unix)]
             set_executable(&sidecar_path);
@@ -76,7 +117,11 @@ fn main() {
     }
 }
 
-fn download(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn download(
+    url: &str,
+    dest: &Path,
+    expected_sha256: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let response = ureq::get(url).call()?;
 
     let status = response.status();
@@ -87,6 +132,20 @@ fn download(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = response.into_body().into_reader();
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+
+    // Integrity gate. A checksum mismatch is a HARD failure: we panic rather
+    // than return Err so it can never be swallowed by main()'s Err arm, which
+    // falls back to a bare "sidecar-slim" PATH lookup. Network/HTTP errors
+    // above stay as Err (retry / PATH fallback); tampered bytes must stop the
+    // build. Verified BEFORE writing so bad bytes never touch disk.
+    if let Some(exp) = expected_sha256 {
+        if let Err(e) = verify_sha256(&bytes, exp) {
+            panic!(
+                "truffle-sidecar: integrity check FAILED for {url}: {e}. Refusing to install the binary. If the release asset was legitimately rebuilt, update crates/truffle-sidecar/sidecar-checksums.json."
+            );
+        }
+        eprintln!("truffle-sidecar: sha256 verified for {url}");
+    }
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -105,3 +164,10 @@ fn set_executable(path: &Path) {
         let _ = fs::set_permissions(path, perms);
     }
 }
+
+// Shared pure integrity helpers: `sha256_hex`, `verify_sha256`,
+// `lookup_checksum`. Pulled in textually so the exact code exercised by the
+// build script is also unit-tested via `#[cfg(test)] mod integrity;` in lib.rs.
+// The file's `#[cfg(test)] mod tests` is stripped here (build scripts never see
+// cfg(test)).
+include!("src/integrity.rs");
