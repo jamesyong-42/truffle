@@ -34,9 +34,11 @@ pub(crate) const MAX_REQUEST_ID_LEN: u16 = 128;
 /// Maximum length for RemoteAddr field.
 pub(crate) const MAX_REMOTE_ADDR_LEN: u16 = 256;
 
-/// Maximum length for RemoteDNSName field.
-/// Increased to 512 to accommodate JSON-encoded PeerIdentity payloads.
-pub(crate) const MAX_REMOTE_DNS_NAME_LEN: u16 = 512;
+/// Maximum length for RemoteDNSName field. This field carries the JSON-encoded
+/// PeerIdentity from the sidecar's WhoIs lookup (dnsName, loginName, displayName,
+/// profilePicUrl, nodeId), not just a DNS name. Must match `maxRemoteDNSNameLen`
+/// in packages/sidecar-slim/main.go.
+pub(crate) const MAX_REMOTE_DNS_NAME_LEN: u16 = 4096;
 
 /// Minimum header size: magic(4) + version(1) + token(32) + direction(1) + port(2) + 3 length fields(2 each).
 /// Used in tests to verify wire format sizes.
@@ -440,5 +442,53 @@ mod tests {
         assert_eq!(Direction::from_byte(0x02).unwrap(), Direction::Outgoing);
         assert!(Direction::from_byte(0x00).is_err());
         assert!(Direction::from_byte(0x03).is_err());
+    }
+
+    #[tokio::test]
+    async fn roundtrip_identity_json_at_cap() {
+        // A realistic identity JSON padded to exactly MAX_REMOTE_DNS_NAME_LEN
+        // bytes. `overhead` is the same literal with an empty padding value, so
+        // the arithmetic is exact regardless of the fixed text's length. Before
+        // the cap was raised from 512, write_to rejected this with
+        // RemoteDnsNameTooLong (4096 > 512); at 4096 it roundtrips intact.
+        let overhead =
+            r#"{"dnsName":"peer.ts.net","nodeId":"nWXYZ1","profilePicUrl":"https://p.example/"}"#
+                .len();
+        let padding = "a".repeat(MAX_REMOTE_DNS_NAME_LEN as usize - overhead);
+        let dns = format!(
+            r#"{{"dnsName":"peer.ts.net","nodeId":"nWXYZ1","profilePicUrl":"https://p.example/{padding}"}}"#
+        );
+        assert_eq!(dns.len(), MAX_REMOTE_DNS_NAME_LEN as usize);
+
+        let mut original = make_incoming_header();
+        original.remote_dns_name = dns;
+
+        let mut buf = Vec::new();
+        original.write_to(&mut buf).await.unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let parsed = BridgeHeader::read_from(&mut cursor).await.unwrap();
+        assert_eq!(original, parsed);
+    }
+
+    #[tokio::test]
+    async fn reject_oversize_remote_dns_name() {
+        // A RemoteDNSName length field one byte over the cap must be rejected
+        // BEFORE the body is allocated/read, proving the pre-allocation bound
+        // still holds after the cap was raised.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC.to_be_bytes());
+        buf.push(VERSION);
+        buf.extend_from_slice(&[0u8; 32]); // token
+        buf.push(0x01); // direction = incoming
+        buf.extend_from_slice(&443u16.to_be_bytes()); // port
+        buf.extend_from_slice(&0u16.to_be_bytes()); // req_id_len
+        buf.extend_from_slice(&0u16.to_be_bytes()); // remote_addr_len
+        buf.extend_from_slice(&(MAX_REMOTE_DNS_NAME_LEN + 1).to_be_bytes()); // remote_dns_len over cap
+                                                                             // No body follows: read_from must reject on the length check first.
+
+        let mut cursor = Cursor::new(buf);
+        let err = BridgeHeader::read_from(&mut cursor).await.unwrap_err();
+        assert!(matches!(err, HeaderError::RemoteDnsNameTooLong(_)));
     }
 }

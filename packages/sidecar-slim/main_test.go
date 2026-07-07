@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -239,4 +240,83 @@ func TestRestartLifecycleFieldsSynchronized(t *testing.T) {
 		_ = s.armLifecycle(testToken(), 9000)
 	}
 	wg.Wait()
+}
+
+// TestWriteHeaderRejectsOversizeDNS is the RemoteDNSName-cap regression: a DNS
+// field one byte over maxRemoteDNSNameLen must be refused, so the sidecar never
+// emits a header the paired Rust core is guaranteed to reject. Before the cap
+// guard, only the 0xFFFF framing guard applied, so a 4097-byte field wrote
+// successfully.
+func TestWriteHeaderRejectsOversizeDNS(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeHeader(&buf, testToken(), dirIncoming, 443, "", "100.64.0.2:1", strings.Repeat("a", maxRemoteDNSNameLen+1))
+	if err == nil {
+		t.Fatal("writeHeader accepted an oversize RemoteDNSName; want error")
+	}
+}
+
+// TestWriteHeaderAcceptsDNSAtCap verifies the inclusive boundary: a DNS field of
+// exactly maxRemoteDNSNameLen bytes is accepted (Rust caps inclusively too).
+func TestWriteHeaderAcceptsDNSAtCap(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeHeader(&buf, testToken(), dirIncoming, 443, "", "100.64.0.2:1", strings.Repeat("a", maxRemoteDNSNameLen))
+	if err != nil {
+		t.Fatalf("writeHeader rejected a DNS field at the cap: %v", err)
+	}
+}
+
+// TestMarshalPeerIdentityDropsOversizeOptionalFields verifies graceful
+// degradation: an identity whose profilePicUrl blows past the cap is still
+// emitted, with only the offending optional field dropped — dnsName, nodeId, and
+// loginName survive so identity verification/display still work.
+func TestMarshalPeerIdentityDropsOversizeOptionalFields(t *testing.T) {
+	identity := peerIdentityData{
+		DNSName:       "peer.tailnet.ts.net",
+		NodeID:        "nABC123",
+		LoginName:     "alice@example.com",
+		DisplayName:   "Alice",
+		ProfilePicURL: strings.Repeat("x", 8192),
+	}
+	out := marshalPeerIdentity(identity)
+	if len(out) > maxRemoteDNSNameLen {
+		t.Fatalf("marshalPeerIdentity output %d exceeds cap %d", len(out), maxRemoteDNSNameLen)
+	}
+
+	var got peerIdentityData
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("marshalPeerIdentity produced invalid JSON: %v", err)
+	}
+	if got.ProfilePicURL != "" {
+		t.Errorf("profilePicUrl: got %q, want empty (should have been dropped)", got.ProfilePicURL)
+	}
+	if got.NodeID != "nABC123" {
+		t.Errorf("nodeId: got %q, want nABC123", got.NodeID)
+	}
+	if got.DNSName != "peer.tailnet.ts.net" {
+		t.Errorf("dnsName: got %q, want peer.tailnet.ts.net", got.DNSName)
+	}
+	if got.LoginName != "alice@example.com" {
+		t.Errorf("loginName: got %q, want alice@example.com", got.LoginName)
+	}
+}
+
+// TestMarshalPeerIdentitySmallIdentityUnchanged verifies the common case: an
+// identity that fits within the cap is emitted verbatim with every field intact.
+func TestMarshalPeerIdentitySmallIdentityUnchanged(t *testing.T) {
+	identity := peerIdentityData{
+		DNSName:       "peer.tailnet.ts.net",
+		NodeID:        "nABC123",
+		LoginName:     "alice@example.com",
+		DisplayName:   "Alice",
+		ProfilePicURL: "https://example.com/pic.png",
+	}
+	out := marshalPeerIdentity(identity)
+
+	var got peerIdentityData
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("marshalPeerIdentity produced invalid JSON: %v", err)
+	}
+	if got != identity {
+		t.Errorf("identity round-trip mismatch: got %+v, want %+v", got, identity)
+	}
 }

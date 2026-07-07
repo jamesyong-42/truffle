@@ -42,6 +42,11 @@ const (
 	headerMagic   = 0x54524646 // "TRFF"
 	headerVersion = 0x01
 
+	// maxRemoteDNSNameLen bounds the RemoteDNSName header field, which carries
+	// JSON-encoded peer identity. Must match MAX_REMOTE_DNS_NAME_LEN in
+	// crates/truffle-core/src/network/tailscale/header.rs.
+	maxRemoteDNSNameLen = 4096
+
 	dirIncoming = 0x01
 	dirOutgoing = 0x02
 
@@ -2229,6 +2234,13 @@ func writeHeader(w io.Writer, token []byte, direction byte, port uint16, request
 			len(reqIDBytes), len(addrBytes), len(dnsBytes))
 	}
 
+	// Tighter bound on the DNS/identity field: the Rust header parser caps it at
+	// maxRemoteDNSNameLen and would reject the connection outright, so never emit
+	// a field it is guaranteed to refuse.
+	if len(dnsBytes) > maxRemoteDNSNameLen {
+		return fmt.Errorf("bridge header RemoteDNSName %d exceeds cap %d; Rust would reject the connection", len(dnsBytes), maxRemoteDNSNameLen)
+	}
+
 	// Calculate total size
 	size := 4 + 1 + 32 + 1 + 2 + 2 + len(reqIDBytes) + 2 + len(addrBytes) + 2 + len(dnsBytes)
 	buf := make([]byte, size)
@@ -2373,12 +2385,32 @@ func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string)
 		identity.ProfilePicURL = whois.UserProfile.ProfilePicURL
 	}
 
-	data, err := json.Marshal(identity)
-	if err != nil {
-		log.Printf("resolvePeerIdentity: marshal failed: %v", err)
-		return ""
+	return marshalPeerIdentity(identity)
+}
+
+// marshalPeerIdentity encodes identity as JSON bounded to maxRemoteDNSNameLen.
+// Oversize OPTIONAL fields are dropped (profilePicUrl, then displayName, then
+// loginName) rather than emitting a field the Rust header parser would reject;
+// dnsName and nodeId are always kept so identity verification still works.
+func marshalPeerIdentity(identity peerIdentityData) string {
+	for _, drop := range []func(*peerIdentityData){
+		func(*peerIdentityData) {},
+		func(id *peerIdentityData) { id.ProfilePicURL = "" },
+		func(id *peerIdentityData) { id.DisplayName = "" },
+		func(id *peerIdentityData) { id.LoginName = "" },
+	} {
+		drop(&identity)
+		data, err := json.Marshal(identity)
+		if err != nil {
+			log.Printf("marshalPeerIdentity: marshal failed: %v", err)
+			return ""
+		}
+		if len(data) <= maxRemoteDNSNameLen {
+			return string(data)
+		}
 	}
-	return string(data)
+	log.Printf("marshalPeerIdentity: identity exceeds %d bytes even after dropping optional fields; omitting", maxRemoteDNSNameLen)
+	return ""
 }
 
 // monitorState polls Tailscale status every 60 seconds and emits events for
