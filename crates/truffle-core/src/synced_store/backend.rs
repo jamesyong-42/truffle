@@ -80,7 +80,7 @@ impl FileBackend {
 
 /// Replace characters that could cause path traversal or filesystem issues.
 fn sanitize(s: &str) -> String {
-    s.replace('/', "_").replace('\\', "_").replace("..", "_")
+    s.replace(['/', '\\'], "_").replace("..", "_")
 }
 
 impl StoreBackend for FileBackend {

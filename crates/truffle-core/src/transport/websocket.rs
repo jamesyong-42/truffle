@@ -739,6 +739,7 @@ impl std::fmt::Debug for WsFramedStream {
 // We need the explicit Sync impl because `SplitStream` is not Sync,
 // but `WsFramedStream` is only accessed via `&mut self` (exclusive ref)
 // so Sync is safe.
+#[allow(unsafe_code)]
 unsafe impl Sync for WsFramedStream {}
 
 /// Get the current epoch time in milliseconds.

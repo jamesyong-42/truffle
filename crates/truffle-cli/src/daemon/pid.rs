@@ -24,11 +24,13 @@ pub fn read_pid(path: &Path) -> io::Result<Option<u32>> {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 pub fn is_process_running(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 pub fn is_process_running(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};

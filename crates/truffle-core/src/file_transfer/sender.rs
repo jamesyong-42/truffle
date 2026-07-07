@@ -172,8 +172,7 @@ pub async fn send_file<N: NetworkProvider + 'static>(
         crate::request_reply::RequestError::ChannelClosed => {
             TransferError::Protocol("Channel closed".into())
         }
-    })?
-    .map_err(|e| e)?;
+    })??;
 
     info!(tcp_port = accept_port, "Received ACCEPT from peer");
 

@@ -230,12 +230,10 @@ impl DatagramSocket {
                 let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| {
                     TransportError::ConnectFailed(format!("invalid address '{addr}': {e}"))
                 })?;
-                socket.send_to(data, sock_addr).await.map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })
+                socket
+                    .send_to(data, sock_addr)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))
             }
         }
     }
@@ -248,12 +246,10 @@ impl DatagramSocket {
                 Ok((n, addr.to_string()))
             }
             Self::Network { socket } => {
-                let (n, addr) = socket.recv_from(buf).await.map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
-                })?;
+                let (n, addr) = socket
+                    .recv_from(buf)
+                    .await
+                    .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
                 Ok((n, addr.to_string()))
             }
         }
@@ -263,12 +259,9 @@ impl DatagramSocket {
     pub fn local_addr(&self) -> Result<std::net::SocketAddr, TransportError> {
         match self {
             Self::Direct { socket } => socket.local_addr().map_err(TransportError::Io),
-            Self::Network { socket } => socket.local_addr().map_err(|e| {
-                TransportError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
-            }),
+            Self::Network { socket } => socket
+                .local_addr()
+                .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string()))),
         }
     }
 }

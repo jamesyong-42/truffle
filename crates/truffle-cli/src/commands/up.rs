@@ -188,6 +188,7 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
     Ok(())
 }
 
+#[allow(unsafe_code)]
 async fn run_background(
     config: &TruffleConfig,
     device_name: Option<&str>,
@@ -251,10 +252,8 @@ async fn run_background(
             ));
         }
 
-        if client.is_daemon_running() {
-            if client.connect().await.is_ok() {
-                break;
-            }
+        if client.is_daemon_running() && client.connect().await.is_ok() {
+            break;
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

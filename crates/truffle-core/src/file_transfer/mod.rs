@@ -381,8 +381,7 @@ async fn pull_file<N: NetworkProvider + 'static>(
         crate::request_reply::RequestError::ChannelClosed => {
             TransferError::Protocol("Channel closed".into())
         }
-    })?
-    .map_err(|e| e)?;
+    })??;
 
     // M1: reject an over-size OFFER before accepting the pull.
     let max_size = node

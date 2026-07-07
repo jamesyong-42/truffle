@@ -292,7 +292,7 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
             .network
             .local_addr()
             .ip
-            .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
 
         let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
@@ -342,7 +342,7 @@ impl<N: NetworkProvider + 'static> QuicTransport<N> {
             .network
             .local_addr()
             .ip
-            .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         let tsnet_addr = SocketAddr::new(local_ip, tsnet_port);
 
         let tsnet_socket = Arc::new(TsnetUdpSocket::new(net_socket, tsnet_addr));
@@ -661,6 +661,7 @@ impl std::fmt::Debug for QuicFramedStream {
 // SAFETY: QuicFramedStream is only accessed via &mut self (exclusive reference).
 // SendStream and RecvStream are Send but not Sync; since we never share
 // references across threads (only &mut self access), this is safe.
+#[allow(unsafe_code)]
 unsafe impl Sync for QuicFramedStream {}
 
 impl QuicFramedStream {

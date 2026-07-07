@@ -623,7 +623,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         let conns = self.ws_connections.read().await;
 
         for (peer_id, handle) in conns.iter() {
-            if let Err(_) = handle.send_tx.send(data.to_vec()).await {
+            if handle.send_tx.send(data.to_vec()).await.is_err() {
                 tracing::warn!(
                     peer_id = %peer_id,
                     "session: broadcast send failed (connection task closed)"

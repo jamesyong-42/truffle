@@ -29,11 +29,7 @@ use super::types::{
 /// every directory component (both `/` and `\`) and rejects empty, `.`, `..`,
 /// or NUL-bearing names. Returns `None` when nothing safe remains.
 fn safe_base_name(name: &str) -> Option<String> {
-    let last = name
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or("")
-        .trim();
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
     if last.is_empty() || last == "." || last == ".." || last.contains('\0') {
         return None;
     }
@@ -229,6 +225,7 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
 
 /// Handle an incoming OFFER: forward to offer channel, wait for decision,
 /// then accept/reject accordingly.
+#[allow(clippy::too_many_arguments)]
 async fn handle_incoming_offer<N: NetworkProvider + 'static>(
     node: &Node<N>,
     from: &str,
@@ -323,6 +320,7 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
 
 /// Accept an incoming offer: open TCP listener, receive file streaming to
 /// disk, verify SHA-256, and send ACK.
+#[allow(clippy::too_many_arguments)]
 async fn accept_and_receive<N: NetworkProvider + 'static>(
     node: &Node<N>,
     from: &str,
@@ -563,7 +561,7 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
     // Read and hash the file
     let data = tokio::fs::read(&serve_path)
         .await
-        .map_err(|e| TransferError::Io(e))?;
+        .map_err(TransferError::Io)?;
     let size = data.len() as u64;
 
     let mut hasher = Sha256::new();
@@ -626,8 +624,7 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
         crate::request_reply::RequestError::ChannelClosed => {
             TransferError::Protocol("Channel closed".into())
         }
-    })?
-    .map_err(|e| e)?;
+    })??;
 
     // Open TCP to peer and stream the file
     let mut stream = node.open_tcp(from, _accept_port).await.map_err(|e| {

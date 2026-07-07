@@ -97,7 +97,7 @@ impl CrdtFileBackend {
 
 /// Replace characters that could cause path traversal or filesystem issues.
 fn sanitize(s: &str) -> String {
-    let replaced = s.replace('/', "_").replace('\\', "_").replace("..", "__");
+    let replaced = s.replace(['/', '\\'], "_").replace("..", "__");
     if replaced.is_empty() || replaced == "." {
         "_".to_string()
     } else {

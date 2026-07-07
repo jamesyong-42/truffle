@@ -129,7 +129,7 @@ pub async fn run(
             } else {
                 match proxies {
                     Some(arr) if !arr.is_empty() => {
-                        println!("{:<16} {:<8} {:<24} {}", "NAME", "PORT", "TARGET", "URL");
+                        println!("{:<16} {:<8} {:<24} URL", "NAME", "PORT", "TARGET");
                         for proxy in arr {
                             let name = proxy["name"].as_str().unwrap_or("-");
                             let port = proxy["listen_port"].as_u64().unwrap_or(0);
