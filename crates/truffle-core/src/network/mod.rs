@@ -88,6 +88,21 @@ pub trait NetworkProvider: Send + Sync {
         port: u16,
     ) -> impl std::future::Future<Output = Result<TcpStream, NetworkError>> + Send;
 
+    /// Dial a TCP connection with explicit options (e.g. a TLS override).
+    ///
+    /// The default implementation ignores the options and delegates to
+    /// [`dial_tcp`](Self::dial_tcp), so providers that don't support the
+    /// options keep working unchanged.
+    fn dial_tcp_opts(
+        &self,
+        addr: &str,
+        port: u16,
+        opts: DialOpts,
+    ) -> impl std::future::Future<Output = Result<TcpStream, NetworkError>> + Send {
+        let _ = opts;
+        self.dial_tcp(addr, port)
+    }
+
     /// Listen for incoming TCP connections on a port via the Tailscale tunnel.
     ///
     /// The returned receiver yields `TcpStream`s for each accepted connection.
@@ -161,6 +176,15 @@ pub trait NetworkProvider: Send + Sync {
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+/// Options for [`NetworkProvider::dial_tcp_opts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DialOpts {
+    /// Override TLS wrapping of the dial. `None` preserves the provider's
+    /// legacy behavior (the Tailscale sidecar wraps iff the target port is
+    /// 443); `Some(true)` / `Some(false)` force it on / off (RFC 021 §6.4).
+    pub tls: Option<bool>,
+}
 
 /// A peer as seen by the network layer (Layer 3).
 ///
@@ -289,6 +313,31 @@ pub struct IncomingConnection {
     pub remote_identity: String,
     /// Port the connection arrived on.
     pub port: u16,
+}
+
+/// A remote peer's Tailscale-authenticated identity, parsed from the WhoIs
+/// JSON the sidecar attaches to inbound bridge connections (the
+/// [`remote_identity`](IncomingConnection::remote_identity) field of
+/// [`IncomingConnection`]).
+///
+/// Produced by Layer 3 — the Go sidecar's `resolvePeerIdentity` writes this
+/// JSON into the bridge header — and consumed by Layer 4+ transports and the
+/// bindings. Every field is optional: the sidecar omits empty ones, WhoIs may
+/// return no Node, and legacy sidecars send a bare DNS name that does not
+/// parse as this struct at all.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscalePeerIdentity {
+    /// Tailnet DNS name (e.g., "kitchen.tailnet.ts.net"), trailing dot stripped.
+    pub dns_name: Option<String>,
+    /// Tailscale login (owner) name, e.g., "alice@example.com".
+    pub login_name: Option<String>,
+    /// Human-readable display name from the identity provider.
+    pub display_name: Option<String>,
+    /// URL of the peer owner's profile picture.
+    pub profile_pic_url: Option<String>,
+    /// Stable Tailscale node ID (WhoIs `Node.StableID`).
+    pub node_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

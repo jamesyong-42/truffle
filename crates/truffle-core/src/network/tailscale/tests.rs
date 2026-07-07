@@ -187,6 +187,7 @@ fn command_start_serialization() {
         session_token: "aa".repeat(32),
         ephemeral: Some(true),
         tags: Some(vec!["tag:truffle".to_string()]),
+        idle_timeout_secs: None,
     };
     let cmd = SidecarCommand {
         command: command_type::START,
@@ -228,6 +229,7 @@ fn command_dial_serialization() {
         request_id: "dial-uuid-456".to_string(),
         target: "peer-host.tailnet.ts.net".to_string(),
         port: 9417,
+        tls: None,
     };
     let cmd = SidecarCommand {
         command: command_type::DIAL,
@@ -512,6 +514,7 @@ async fn test_bind_udp_returns_not_running() {
         auth_key: None,
         ephemeral: None,
         tags: None,
+        idle_timeout_secs: None,
     };
     let provider = TailscaleProvider::new(config);
 
@@ -541,6 +544,7 @@ fn test_local_identity_default_before_start() {
         auth_key: None,
         ephemeral: None,
         tags: None,
+        idle_timeout_secs: None,
     };
     let provider = TailscaleProvider::new(config);
 
@@ -580,6 +584,7 @@ fn test_local_addr_default_before_start() {
         auth_key: None,
         ephemeral: None,
         tags: None,
+        idle_timeout_secs: None,
     };
     let provider = TailscaleProvider::new(config);
 

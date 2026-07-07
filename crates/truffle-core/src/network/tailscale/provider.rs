@@ -18,7 +18,7 @@ use super::bridge::{Bridge, DIAL_TIMEOUT};
 use super::protocol::ProxyAddCommandData;
 use super::sidecar::{GoSidecar, SidecarConfig, SidecarInternalEvent};
 use crate::network::{
-    HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
+    DialOpts, HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
     NetworkTcpListener, NodeIdentity, PeerAddr, PingResult, ProxyAddParams, ProxyAddResult,
     ProxyListEntry,
 };
@@ -49,6 +49,9 @@ pub struct TailscaleConfig {
     pub ephemeral: Option<bool>,
     /// ACL tags to advertise (e.g., ["tag:truffle"]).
     pub tags: Option<Vec<String>>,
+    /// Idle timeout for bridged connections in seconds (RFC 021 §6.5).
+    /// `None` → the sidecar's 600s default.
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// State of the provider.
@@ -486,6 +489,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
             session_token_hex: token_hex,
             ephemeral: self.config.ephemeral,
             tags: self.config.tags.clone(),
+            idle_timeout_secs: self.config.idle_timeout_secs,
         };
 
         // Spawn the sidecar
@@ -588,6 +592,15 @@ impl super::super::NetworkProvider for TailscaleProvider {
     }
 
     async fn dial_tcp(&self, addr: &str, port: u16) -> Result<TcpStream, NetworkError> {
+        self.dial_tcp_opts(addr, port, DialOpts::default()).await
+    }
+
+    async fn dial_tcp_opts(
+        &self,
+        addr: &str,
+        port: u16,
+        opts: DialOpts,
+    ) -> Result<TcpStream, NetworkError> {
         if *self.state.read().await != ProviderState::Running {
             return Err(NetworkError::NotRunning);
         }
@@ -613,7 +626,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
             let event_rx = sidecar.subscribe();
 
             sidecar
-                .send_dial(request_id.clone(), addr.to_string(), port)
+                .send_dial(request_id.clone(), addr.to_string(), port, opts.tls)
                 .await?;
 
             event_rx

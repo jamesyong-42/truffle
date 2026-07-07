@@ -41,7 +41,7 @@ Run on multiple devices on the same Tailscale network to chat.
 
 ### Shared State
 
-Todo list synced across devices using NapiStoreSyncAdapter:
+Todo list synced across devices using NapiSyncedStore:
 
 ```bash
 pnpm --filter @vibecook/example-shared-state exec tsx index.ts

@@ -34,6 +34,9 @@ pub(crate) struct SidecarConfig {
     pub ephemeral: Option<bool>,
     /// ACL tags to advertise.
     pub tags: Option<Vec<String>>,
+    /// Override the bridged-connection idle-reap deadline (seconds); `None`
+    /// leaves the sidecar's 600s default (RFC 021 §6.5).
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// Internal events from the sidecar event processing loop.
@@ -466,6 +469,7 @@ impl GoSidecar {
             session_token: config.session_token_hex.clone(),
             ephemeral: config.ephemeral,
             tags: config.tags.clone(),
+            idle_timeout_secs: config.idle_timeout_secs,
         };
         self.send_command(SidecarCommand {
             command: command_type::START,
@@ -493,16 +497,21 @@ impl GoSidecar {
     }
 
     /// Send the bridge:dial command.
+    ///
+    /// `tls` overrides TLS wrapping: `None` keeps the sidecar's legacy port==443
+    /// behavior; `Some(_)` forces it on/off (RFC 021 §6.4).
     pub async fn send_dial(
         &self,
         request_id: String,
         target: String,
         port: u16,
+        tls: Option<bool>,
     ) -> Result<(), NetworkError> {
         let data = DialCommandData {
             request_id,
             target,
             port,
+            tls,
         };
         self.send_command(SidecarCommand {
             command: command_type::DIAL,

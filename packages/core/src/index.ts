@@ -4,6 +4,8 @@ export {
   NapiFileTransfer,
   NapiOfferResponder,
   NapiSyncedStore,
+  NapiProxy,
+  NapiCrdtDoc,
 } from '@vibecook/truffle-native';
 
 // Re-export interfaces/types from the native Rust addon
@@ -21,6 +23,10 @@ export type {
   NapiFileTransferEvent,
   NapiSlice,
   NapiStoreEvent,
+  NapiProxyConfig,
+  NapiProxyInfo,
+  NapiProxyEvent,
+  NapiCrdtDocEvent,
 } from '@vibecook/truffle-native';
 
 // Sidecar binary resolution

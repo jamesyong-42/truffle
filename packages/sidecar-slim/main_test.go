@@ -322,6 +322,52 @@ func TestMarshalPeerIdentitySmallIdentityUnchanged(t *testing.T) {
 	}
 }
 
+// TestShouldWrapTLS covers the dial TLS-wrap decision: an explicit tls flag
+// wins in both directions, and when absent the legacy behavior (wrap iff the
+// target port is 443) applies.
+func TestShouldWrapTLS(t *testing.T) {
+	tru, fals := true, false
+	cases := []struct {
+		name string
+		port uint16
+		tls  *bool
+		want bool
+	}{
+		{"nil wraps on 443", 443, nil, true},
+		{"nil no-wrap off 443", 8080, nil, false},
+		{"explicit true wraps non-443", 8080, &tru, true},
+		{"explicit false skips 443", 443, &fals, false},
+		{"explicit true on 443", 443, &tru, true},
+		{"explicit false on non-443", 9000, &fals, false},
+	}
+	for _, tc := range cases {
+		if got := shouldWrapTLS(tc.port, tc.tls); got != tc.want {
+			t.Errorf("%s: shouldWrapTLS(%d, %v) = %v, want %v", tc.name, tc.port, tc.tls, got, tc.want)
+		}
+	}
+}
+
+// TestResolveIdleTimeout covers the idle-reap knob resolution: nil or a
+// non-positive value falls back to idleDeadline, a positive value is seconds.
+func TestResolveIdleTimeout(t *testing.T) {
+	secs := func(n int) *int { return &n }
+	cases := []struct {
+		name string
+		in   *int
+		want time.Duration
+	}{
+		{"nil uses default", nil, idleDeadline},
+		{"zero uses default", secs(0), idleDeadline},
+		{"negative uses default", secs(-5), idleDeadline},
+		{"positive is seconds", secs(30), 30 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := resolveIdleTimeout(tc.in); got != tc.want {
+			t.Errorf("%s: resolveIdleTimeout(%v) = %v, want %v", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
 // TestModulePath guards the go.mod module path against the stale
 // claude-code-on-the-go name reappearing.
 func TestModulePath(t *testing.T) {

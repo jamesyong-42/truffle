@@ -87,12 +87,18 @@ type startData struct {
 	SessionToken string   `json:"sessionToken"` // 32-byte hex
 	Ephemeral    bool     `json:"ephemeral,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
+	// IdleTimeoutSecs overrides the bridged-connection idle-reap deadline.
+	// nil or <=0 falls back to idleDeadline (RFC 021 §6.5).
+	IdleTimeoutSecs *int `json:"idleTimeoutSecs,omitempty"`
 }
 
 type dialData struct {
 	RequestID string `json:"requestId"`
 	Target    string `json:"target"`
 	Port      uint16 `json:"port"`
+	// Tls overrides TLS wrapping of the dial. nil keeps the legacy behavior
+	// (wrap iff port==443); non-nil is used verbatim (RFC 021 §6.4).
+	Tls *bool `json:"tls,omitempty"`
 }
 
 type dialResultData struct {
@@ -398,14 +404,15 @@ type udpRelay struct {
 
 // shim is the main application state.
 type shim struct {
-	// serverMu guards server, dnsName, sessionToken, bridgePort, ctx, and
-	// cancel — all written from the dispatch loop (start/stop) and read from
-	// many spawned goroutines.
+	// serverMu guards server, dnsName, sessionToken, bridgePort, idleTimeout,
+	// ctx, and cancel — all written from the dispatch loop (start/stop) and read
+	// from many spawned goroutines.
 	serverMu     sync.RWMutex
 	server       *tsnet.Server
 	dnsName      string // set when status becomes "running"
 	sessionToken []byte // 32 bytes
 	bridgePort   uint16
+	idleTimeout  time.Duration // bridged-conn idle-reap deadline (RFC 021 §6.5)
 	ctx          context.Context
 	cancel       context.CancelFunc
 
@@ -489,6 +496,26 @@ func (s *shim) setDNSName(name string) {
 	s.serverMu.Lock()
 	s.dnsName = name
 	s.serverMu.Unlock()
+}
+
+// setIdleTimeout records the bridged-connection idle-reap deadline for this
+// lifecycle. Guarded by serverMu like the other lifecycle fields so a restart's
+// write can't race the bridge goroutines that read it.
+func (s *shim) setIdleTimeout(d time.Duration) {
+	s.serverMu.Lock()
+	s.idleTimeout = d
+	s.serverMu.Unlock()
+}
+
+// idleTimeoutOrDefault returns the configured idle-reap deadline, falling back
+// to idleDeadline when unset.
+func (s *shim) idleTimeoutOrDefault() time.Duration {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	if s.idleTimeout > 0 {
+		return s.idleTimeout
+	}
+	return idleDeadline
 }
 
 // recoverPanic contains a panic in a spawned goroutine so a single bad
@@ -608,6 +635,15 @@ func readCommandLine(r *bufio.Reader, max int) (line string, tooLong bool, err e
 	return sb.String(), false, nil
 }
 
+// resolveIdleTimeout converts the optional idleTimeoutSecs start knob into a
+// duration, falling back to idleDeadline when unset or non-positive.
+func resolveIdleTimeout(secs *int) time.Duration {
+	if secs != nil && *secs > 0 {
+		return time.Duration(*secs) * time.Second
+	}
+	return idleDeadline
+}
+
 func (s *shim) handleStart(data json.RawMessage) {
 	var d startData
 	if err := json.Unmarshal(data, &d); err != nil {
@@ -627,6 +663,7 @@ func (s *shim) handleStart(data json.RawMessage) {
 		return
 	}
 	ctx := s.armLifecycle(token, d.BridgePort)
+	s.setIdleTimeout(resolveIdleTimeout(d.IdleTimeoutSecs))
 
 	s.sendStatus("starting", d.Hostname, "", "", "")
 
@@ -906,6 +943,16 @@ func (s *shim) handleGetPeers() {
 	}()
 }
 
+// shouldWrapTLS decides whether an outbound dial is TLS-wrapped. An explicit
+// tls flag from the dial command wins in both directions; when absent, the
+// legacy behavior applies: wrap iff the target port is 443.
+func shouldWrapTLS(port uint16, tls *bool) bool {
+	if tls != nil {
+		return *tls
+	}
+	return port == 443
+}
+
 func (s *shim) handleDial(data json.RawMessage) {
 	var d dialData
 	if err := json.Unmarshal(data, &d); err != nil {
@@ -946,9 +993,9 @@ func (s *shim) handleDial(data json.RawMessage) {
 		}
 		log.Printf("[handleDial] rid=%s dial succeeded, bridging to Rust", d.RequestID)
 
-		// For port 443, wrap with TLS
+		// TLS-wrap when requested (explicit tls flag, or legacy port==443).
 		var conn net.Conn = tsnetConn
-		if d.Port == 443 {
+		if shouldWrapTLS(d.Port, d.Tls) {
 			tlsConn := tls.Client(tsnetConn, &tls.Config{
 				ServerName: d.Target, // SNI = peer's DNS name
 			})
@@ -2217,7 +2264,7 @@ func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, req
 	}
 
 	// Bidirectional copy with close-all pattern
-	bridgeCopy(tsnetConn, localConn)
+	bridgeCopy(tsnetConn, localConn, s.idleTimeoutOrDefault())
 }
 
 // writeHeader writes the bridge binary header per RFC 003.
@@ -2288,7 +2335,7 @@ func writeHeader(w io.Writer, token []byte, direction byte, port uint16, request
 
 // bridgeCopy does bidirectional io.Copy with the close-all pattern.
 // When either copy finishes, both connections are closed.
-func bridgeCopy(tsnetConn, localConn net.Conn) {
+func bridgeCopy(tsnetConn, localConn net.Conn, idleTimeout time.Duration) {
 	var once sync.Once
 	closeAll := func() {
 		once.Do(func() {
@@ -2316,13 +2363,13 @@ func bridgeCopy(tsnetConn, localConn net.Conn) {
 	// reverse direction (e.g. a trailing ACK) rather than closing both.
 	go func() {
 		defer wg.Done()
-		idleCopy(localConn, tsnetConn, idleDeadline)
+		idleCopy(localConn, tsnetConn, idleTimeout)
 		closeWrite(localConn)
 	}()
 
 	go func() {
 		defer wg.Done()
-		idleCopy(tsnetConn, localConn, idleDeadline)
+		idleCopy(tsnetConn, localConn, idleTimeout)
 		closeWrite(tsnetConn)
 	}()
 

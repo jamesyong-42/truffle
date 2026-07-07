@@ -4,13 +4,13 @@
 //!
 //! - [`StreamTransport`] + [`FramedStream`]: Persistent, framed, bidirectional
 //!   connections used for messaging, pub/sub, and signaling. Implemented by
-//!   [`WebSocketTransport`](websocket::WebSocketTransport).
+//!   [`WebSocketTransport`](websocket::WebSocketTransport) and [`QuicTransport`](quic::QuicTransport).
 //!
 //! - [`RawTransport`] + [`RawListener`]: Raw byte streams used for file transfer,
 //!   TCP proxy, and HTTP. Implemented by [`TcpTransport`](tcp::TcpTransport).
 //!
 //! - [`DatagramTransport`] + [`DatagramSocket`]: Unreliable datagrams for
-//!   real-time video/audio and game state. Stubs only in this phase.
+//!   real-time video/audio and game state. Implemented by [`UdpTransport`](udp::UdpTransport).
 //!
 //! # Layer rules
 //!
@@ -163,6 +163,7 @@ impl<S: FramedStream> StreamListener<S> {
 ///
 /// Wraps a `tokio::sync::mpsc::Receiver` internally. Call [`accept()`](Self::accept)
 /// in a loop to handle incoming connections.
+#[derive(Debug)]
 pub struct RawListener {
     /// Receiver for incoming connections.
     rx: tokio::sync::mpsc::Receiver<RawIncoming>,
@@ -190,6 +191,11 @@ pub struct RawIncoming {
     pub stream: TcpStream,
     /// Remote address of the connecting peer.
     pub remote_addr: String,
+    /// The connecting peer's Tailscale-authenticated identity (WhoIs), parsed
+    /// from the bridge header. `None` when the network provider supplies no
+    /// identity (e.g., the mock provider) or the header value did not parse as
+    /// identity JSON (a legacy bare DNS name).
+    pub remote_identity: Option<crate::network::TailscalePeerIdentity>,
 }
 
 /// A datagram socket for sending and receiving unreliable packets.

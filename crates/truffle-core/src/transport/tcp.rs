@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::network::{NetworkProvider, PeerAddr};
+use crate::network::{NetworkProvider, PeerAddr, TailscalePeerIdentity};
 
 use super::{resolve_dial_addr, RawIncoming, RawListener, RawTransport, TransportError};
 
@@ -93,6 +93,7 @@ impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
                         let raw = RawIncoming {
                             stream: incoming.stream,
                             remote_addr: incoming.remote_addr,
+                            remote_identity: parse_remote_identity(&incoming.remote_identity),
                         };
                         if tx.send(raw).await.is_err() {
                             tracing::debug!("tcp: listener channel closed");
@@ -108,5 +109,74 @@ impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
         });
 
         Ok(RawListener::new(rx, actual_port))
+    }
+}
+
+/// Parse the bridge header's WhoIs identity into a [`TailscalePeerIdentity`].
+///
+/// Layer 3 delivers either a WhoIs identity JSON blob or, from legacy sidecars,
+/// a bare DNS name. Empty, whitespace-only, or unparseable input yields `None`:
+/// a missing or malformed identity is never an error on the raw path, only an
+/// absence of authenticated metadata.
+fn parse_remote_identity(raw: &str) -> Option<TailscalePeerIdentity> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<TailscalePeerIdentity>(trimmed) {
+        Ok(identity) => Some(identity),
+        Err(e) => {
+            tracing::debug!(error = %e, "tcp: unparseable remote identity header; treating as anonymous");
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn parse_remote_identity_round_trips_whois_json() {
+        // A realistic WhoIs blob as the sidecar's resolvePeerIdentity writes it
+        // into the bridge header.
+        let json = r#"{"dnsName":"kitchen.tailnet.ts.net","loginName":"alice@example.com","displayName":"Alice","profilePicUrl":"https://p.example/a.png","nodeId":"nABC123.ts-node"}"#;
+        let identity = parse_remote_identity(json).expect("well-formed WhoIs JSON must parse");
+        assert_eq!(
+            identity,
+            TailscalePeerIdentity {
+                dns_name: Some("kitchen.tailnet.ts.net".to_string()),
+                login_name: Some("alice@example.com".to_string()),
+                display_name: Some("Alice".to_string()),
+                profile_pic_url: Some("https://p.example/a.png".to_string()),
+                node_id: Some("nABC123.ts-node".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_remote_identity_omits_absent_optional_fields() {
+        // The sidecar drops empty optional fields (omitempty); absent fields
+        // deserialize to None rather than failing the whole parse.
+        let identity = parse_remote_identity(r#"{"dnsName":"peer.ts.net"}"#)
+            .expect("partial WhoIs JSON must parse");
+        assert_eq!(identity.dns_name.as_deref(), Some("peer.ts.net"));
+        assert_eq!(identity.login_name, None);
+        assert_eq!(identity.node_id, None);
+    }
+
+    #[test]
+    fn parse_remote_identity_returns_none_for_malformed_json() {
+        // A legacy bare DNS name (or any non-JSON) is not an error — it just
+        // means no authenticated identity metadata is available.
+        assert_eq!(parse_remote_identity("peer.tailnet.ts.net"), None);
+        assert_eq!(parse_remote_identity("{not json"), None);
+    }
+
+    #[test]
+    fn parse_remote_identity_returns_none_for_empty_input() {
+        // MockNetworkProvider and WhoIs failures deliver "".
+        assert_eq!(parse_remote_identity(""), None);
+        assert_eq!(parse_remote_identity("   "), None);
     }
 }

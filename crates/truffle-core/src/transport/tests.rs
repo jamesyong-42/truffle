@@ -689,6 +689,9 @@ async fn tcp_listen_and_accept() {
 
     // Accept on the RawListener
     let incoming = listener.accept().await.expect("should accept connection");
+    // The mock provider attaches no WhoIs identity, so the raw path surfaces
+    // None (parsed from the empty bridge-header identity string).
+    assert!(incoming.remote_identity.is_none());
     let mut stream = incoming.stream;
 
     let mut buf = Vec::new();

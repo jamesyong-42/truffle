@@ -33,6 +33,10 @@ pub(crate) struct StartCommandData {
     pub ephemeral: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Override the bridged-connection idle-reap deadline (seconds). Omitted
+    /// when None so old sidecars ignore it (RFC 021 §6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// Data payload for `bridge:dial`.
@@ -42,6 +46,10 @@ pub(crate) struct DialCommandData {
     pub request_id: String,
     pub target: String,
     pub port: u16,
+    /// Override TLS wrapping of the dial. Omitted when None so old sidecars fall
+    /// back to their legacy port==443 behavior (RFC 021 §6.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<bool>,
 }
 
 /// Data payload for `tsnet:listen`.
@@ -376,6 +384,7 @@ mod tests {
             session_token: "aa".repeat(32),
             ephemeral: None,
             tags: None,
+            idle_timeout_secs: None,
         };
         let cmd = SidecarCommand {
             command: command_type::START,
@@ -387,6 +396,24 @@ mod tests {
         assert!(json.contains("\"bridgePort\":12345"));
         // auth_key should be absent (None -> skip)
         assert!(!json.contains("authKey"));
+        // idle_timeout_secs should be absent (None -> skip)
+        assert!(!json.contains("idleTimeoutSecs"));
+    }
+
+    #[test]
+    fn serialize_start_command_with_idle_timeout() {
+        let data = StartCommandData {
+            hostname: "my-node".to_string(),
+            state_dir: "/tmp/tsnet".to_string(),
+            auth_key: None,
+            bridge_port: 12345,
+            session_token: "aa".repeat(32),
+            ephemeral: None,
+            tags: None,
+            idle_timeout_secs: Some(300),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"idleTimeoutSecs\":300"));
     }
 
     #[test]
@@ -395,6 +422,7 @@ mod tests {
             request_id: "req-123".to_string(),
             target: "peer.tailnet.ts.net".to_string(),
             port: 9417,
+            tls: None,
         };
         let cmd = SidecarCommand {
             command: command_type::DIAL,
@@ -404,6 +432,31 @@ mod tests {
         assert!(json.contains("\"command\":\"bridge:dial\""));
         assert!(json.contains("\"requestId\":\"req-123\""));
         assert!(json.contains("\"port\":9417"));
+        // tls should be absent (None -> skip)
+        assert!(!json.contains("tls"));
+    }
+
+    #[test]
+    fn serialize_dial_command_with_tls() {
+        // Explicit tls=false must be present on the wire so the sidecar can
+        // suppress its legacy port==443 auto-TLS behavior.
+        let data = DialCommandData {
+            request_id: "req-123".to_string(),
+            target: "peer.tailnet.ts.net".to_string(),
+            port: 443,
+            tls: Some(false),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"tls\":false"));
+
+        let data = DialCommandData {
+            request_id: "req-124".to_string(),
+            target: "peer.tailnet.ts.net".to_string(),
+            port: 8080,
+            tls: Some(true),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"tls\":true"));
     }
 
     #[test]

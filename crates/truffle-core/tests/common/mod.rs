@@ -307,6 +307,7 @@ fn build_config(
         auth_key: Some(authkey.to_string()),
         ephemeral: Some(test_ephemeral()),
         tags: test_tags(),
+        idle_timeout_secs: None,
     }
 }
 
