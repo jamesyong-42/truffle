@@ -237,6 +237,8 @@ fn ws_config_defaults() {
     assert_eq!(config.ping_interval, Duration::from_secs(10));
     assert_eq!(config.pong_timeout, Duration::from_secs(30));
     assert_eq!(config.max_message_size, 16 * 1024 * 1024);
+    assert_eq!(config.max_pending_handshakes, 256);
+    assert_eq!(config.handshake_timeout, Duration::from_secs(10));
 }
 
 // ===========================================================================
@@ -528,6 +530,98 @@ async fn ws_binary_frame_roundtrip() {
 
     client_stream.close().await.unwrap();
     server_stream.close().await.unwrap();
+}
+
+// ===========================================================================
+// WS handshake DoS bounds (max_pending_handshakes + handshake_timeout)
+// ===========================================================================
+
+#[tokio::test]
+async fn ws_drops_stalled_pre_hello_connection_after_handshake_timeout() {
+    use crate::transport::websocket::WebSocketTransport;
+    use tokio::io::AsyncReadExt;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("server"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Short handshake timeout so the test resolves quickly.
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        handshake_timeout: Duration::from_millis(300),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config);
+    // Keep the listener alive so the accept loop keeps running.
+    let _listener = server_ws.listen().await.unwrap();
+
+    // Open a raw TCP connection and send nothing — this stalls before the
+    // WebSocket upgrade even begins, modeling a pre-hello DoS attacker.
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // With the 300ms handshake timeout the server must drop the socket, so a
+    // read resolves to EOF (Ok(0)) or a reset (Err) well within 3s. Before the
+    // fix, accept_async_with_config has no timeout and the read hangs the full
+    // 3s, failing the test.
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(Duration::from_secs(3), stalled.read(&mut buf)).await {
+        Ok(Ok(0)) => { /* EOF — connection dropped as expected */ }
+        Ok(Err(_)) => { /* reset — also an acceptable drop */ }
+        Ok(Ok(n)) => panic!("stalled pre-hello connection unexpectedly received {n} bytes"),
+        Err(_) => panic!("stalled pre-hello connection was not dropped"),
+    }
+}
+
+#[tokio::test]
+async fn ws_caps_concurrent_pending_handshakes() {
+    use crate::transport::websocket::WebSocketTransport;
+    use tokio::io::AsyncReadExt;
+
+    let server_provider = Arc::new(MockNetworkProvider::new("server"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Cap at 2 in-flight handshakes with a long timeout, so the two stalled
+    // connections hold their permits for the whole test.
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        max_pending_handshakes: 2,
+        handshake_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config);
+    let _listener = server_ws.listen().await.unwrap();
+
+    // Two silent connections claim both handshake permits.
+    let _first = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _second = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // Give the accept loop time to pick both up and acquire their permits.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The third connection finds no permit left, so the accept loop must drop
+    // it immediately (pre-upgrade). Before the fix there is no cap, so it stays
+    // open and the read times out, failing the test.
+    let mut third = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(Duration::from_secs(2), third.read(&mut buf)).await {
+        Ok(Ok(0)) => { /* EOF — third connection dropped as expected */ }
+        Ok(Err(_)) => { /* reset — also an acceptable drop */ }
+        Ok(Ok(n)) => panic!("third pending connection unexpectedly received {n} bytes"),
+        Err(_) => panic!("third pending connection was not dropped despite the handshake cap"),
+    }
 }
 
 // ===========================================================================

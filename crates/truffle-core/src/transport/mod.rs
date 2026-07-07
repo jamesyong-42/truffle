@@ -315,6 +315,15 @@ pub struct WsConfig {
     pub pong_timeout: Duration,
     /// Maximum WebSocket message size in bytes.
     pub max_message_size: usize,
+    /// Maximum number of concurrent in-flight incoming handshakes (WS
+    /// upgrade + hello exchange). Connections beyond the cap are dropped
+    /// before the upgrade; established connections are not counted.
+    pub max_pending_handshakes: usize,
+    /// Maximum time an incoming connection may take to complete the WS
+    /// upgrade + hello exchange before it is dropped. Must exceed
+    /// HELLO_TIMEOUT (5s) so hello timeouts keep their specific
+    /// classification.
+    pub handshake_timeout: Duration,
 }
 
 impl Default for WsConfig {
@@ -324,6 +333,8 @@ impl Default for WsConfig {
             ping_interval: Duration::from_secs(10),
             pong_timeout: Duration::from_secs(30),
             max_message_size: 16 * 1024 * 1024, // 16 MiB
+            max_pending_handshakes: 256,
+            handshake_timeout: Duration::from_secs(10),
         }
     }
 }
