@@ -610,6 +610,68 @@ async fn test_bridge_local_port_returns_result() {
     assert!(port > 0, "port should be non-zero (ephemeral port)");
 }
 
+/// Regression test: a timed-out dial must clean up after itself.
+///
+/// Before the fix, the timeout `?` in `dial_tcp` early-returned before the
+/// error cleanup ran, leaking the `pending_dials` entry; and dropping the
+/// inner future detached the fail-watcher task, which held a broadcast
+/// receiver forever. A timed-out dial must leave the bridge's
+/// `pending_dials` map empty and release the watcher's event receiver.
+#[tokio::test(start_paused = true)]
+async fn test_dial_timeout_cleans_up_pending_dial_and_watcher() {
+    use super::bridge::Bridge;
+    use super::provider::TailscaleProvider;
+    use super::sidecar::SidecarInternalEvent;
+    use crate::network::NetworkError;
+    use std::time::Duration;
+    use tokio::sync::broadcast;
+
+    let bridge = Bridge::bind(test_token())
+        .await
+        .expect("bridge should bind");
+
+    let request_id = "req-timeout-test".to_string();
+    let dial_rx = bridge.register_dial(request_id.clone()).await;
+    assert_eq!(bridge.pending_dial_count().await, 1);
+
+    // Sidecar event channel: keep the sender alive (and silent) so the
+    // fail-watcher has nothing to report and the dial can only time out.
+    let (event_tx, event_rx) = broadcast::channel::<SidecarInternalEvent>(8);
+
+    let result = TailscaleProvider::await_dial_result(
+        &bridge,
+        &request_id,
+        dial_rx,
+        event_rx,
+        Duration::from_millis(50),
+    )
+    .await;
+
+    assert!(
+        matches!(result, Err(NetworkError::DialTimeout(_))),
+        "dial should time out"
+    );
+    assert_eq!(
+        bridge.pending_dial_count().await,
+        0,
+        "timed-out dial must remove its pending_dials entry"
+    );
+
+    // The fail-watcher must be aborted; once torn down it drops its
+    // broadcast receiver. Yield so the aborted task is reaped.
+    for _ in 0..50 {
+        if event_tx.receiver_count() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        event_tx.receiver_count(),
+        0,
+        "timed-out dial must abort the fail-watcher task"
+    );
+}
+
 /// Verify that BridgeHeader roundtrips correctly when request_id, remote_addr, and
 /// remote_dns_name are all empty with Outgoing direction.
 /// (Edge case: outgoing with empty remote fields — not the same as the existing
