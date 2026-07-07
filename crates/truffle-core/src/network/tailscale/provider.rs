@@ -546,7 +546,7 @@ impl super::super::NetworkProvider for TailscaleProvider {
         }
     }
 
-    async fn stop(&mut self) -> Result<(), NetworkError> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         *self.state.write().await = ProviderState::Stopping;
 
         // Shut down sidecar

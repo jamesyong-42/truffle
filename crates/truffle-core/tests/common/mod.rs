@@ -184,7 +184,7 @@ pub struct NodePair {
 impl NodePair {
     /// Gracefully stop both providers. Drop alone is enough for cleanup,
     /// but calling this gives a deterministic teardown point in tests.
-    pub async fn stop(mut self) {
+    pub async fn stop(self) {
         let _ = self.alpha.stop().await;
         let _ = self.beta.stop().await;
     }

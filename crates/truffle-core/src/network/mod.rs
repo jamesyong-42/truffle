@@ -50,7 +50,7 @@ pub trait NetworkProvider: Send + Sync {
     fn start(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Stop the network provider and clean up all resources.
-    fn stop(&mut self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
+    fn stop(&self) -> impl std::future::Future<Output = Result<(), NetworkError>> + Send;
 
     /// Local node's identity (stable ID, hostname, display name).
     ///
