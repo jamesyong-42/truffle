@@ -173,6 +173,22 @@ export declare class NapiNode {
   /** Broadcast a namespaced message to all connected peers. */
   broadcast(namespace: string, data: Buffer): Promise<void>
   /**
+   * Open a raw TCP connection to a peer on the given port (RFC 021).
+   *
+   * `host` accepts a device id (or a unique ≥4-char prefix), device
+   * name, Tailscale hostname, or Tailscale IP. The returned socket is
+   * pull-model — see `NapiTcpSocket`; the `@vibecook/truffle` package
+   * wraps it in a `stream.Duplex`.
+   */
+  openTcp(host: string, port: number): Promise<NapiTcpSocket>
+  /**
+   * Listen for raw TCP connections on a port (RFC 021).
+   *
+   * Port 0 binds an ephemeral port — read the resolved port from the
+   * returned listener. Ports 443 and 9417 are reserved.
+   */
+  listenTcp(port: number): Promise<NapiTcpListener>
+  /**
    * Subscribe to peer change events.
    *
    * The callback receives `NapiPeerEvent` objects whenever peers
@@ -285,6 +301,65 @@ export declare class NapiSyncedStore {
    * no other calls are made on this NapiSyncedStore while `stop()` is in progress.
    */
   stop(): Promise<void>
+}
+
+/** A listener for raw TCP connections on a mesh port. */
+export declare class NapiTcpListener {
+  /**
+   * Accept the next incoming connection.
+   *
+   * Resolves with `null` once the listener has been closed.
+   */
+  accept(): Promise<NapiTcpSocket | null>
+  /** The port this listener is bound to (resolved when 0 was requested). */
+  port(): number
+  /**
+   * Close the listener and release the tsnet port in the sidecar.
+   * Pending `accept()` calls resolve with `null`. Idempotent.
+   */
+  close(): Promise<void>
+}
+
+/**
+ * A raw TCP connection to a peer over the mesh.
+ *
+ * Reads are pull-model: `read()` resolves with the next chunk, `null` on
+ * clean EOF. Writes resolve once the bytes are handed to the transport
+ * (respecting backpressure). `end()` half-closes the write side (FIN);
+ * `close()` tears down both directions. Dropping the JS object without
+ * closing also closes the socket (no background tasks are held).
+ */
+export declare class NapiTcpSocket {
+  /**
+   * Read up to `maxBytes` (default 64 KiB) from the socket.
+   *
+   * Resolves with the next chunk of data, or `null` on clean EOF (the
+   * peer finished writing) and after `close()`.
+   */
+  read(maxBytes?: number | undefined | null): Promise<Buffer | null>
+  /** Write all of `data` to the socket. */
+  write(data: Buffer): Promise<void>
+  /**
+   * Half-close the write side (send FIN), like `socket.end()`.
+   *
+   * Reading remains possible until the peer closes its side. Idempotent.
+   */
+  end(): Promise<void>
+  /** Fully close the socket (both directions). Idempotent. */
+  close(): Promise<void>
+  /**
+   * The logical remote address (`host:port` for outbound connections,
+   * the peer's tailnet address for inbound ones).
+   */
+  remoteAddress(): string
+  /**
+   * The peer's stable id when known — the resolved device id for
+   * outbound connections, the WhoIs node id for inbound ones. `null`
+   * means "anonymous but tailnet-authenticated" (never gate on it).
+   */
+  remotePeerId(): string | null
+  /** Human-readable peer name from the WhoIs identity (inbound only). */
+  remotePeerName(): string | null
 }
 
 /** A CRDT document change event delivered to JS. */

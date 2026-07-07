@@ -802,6 +802,17 @@ impl<N: NetworkProvider + 'static> Node<N> {
         tcp.listen(port).await.map_err(NodeError::Transport)
     }
 
+    /// Stop listening on a previously opened TCP port.
+    ///
+    /// Dropping the [`RawListener`] alone stops local delivery but leaves
+    /// the tsnet port bound in the sidecar; this releases it.
+    pub async fn unlisten_tcp(&self, port: u16) -> Result<(), NodeError> {
+        self.network
+            .unlisten_tcp(port)
+            .await
+            .map_err(NodeError::Network)
+    }
+
     /// Open a raw QUIC connection to a peer on the given port.
     ///
     /// The connection carries multiple concurrent bidirectional byte

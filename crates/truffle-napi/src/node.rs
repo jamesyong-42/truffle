@@ -14,6 +14,7 @@ use truffle_core::Node;
 use crate::crdt_doc::NapiCrdtDoc;
 use crate::file_transfer::NapiFileTransfer;
 use crate::proxy::NapiProxy;
+use crate::raw_socket::{NapiTcpListener, NapiTcpSocket};
 use crate::synced_store::NapiSyncedStore;
 use crate::types::{
     NapiHealthInfo, NapiNamespacedMessage, NapiNodeConfig, NapiNodeIdentity, NapiPeer,
@@ -244,6 +245,44 @@ impl NapiNode {
         let node = self.require_node()?;
         node.broadcast(&namespace, data.as_ref()).await;
         Ok(())
+    }
+
+    /// Open a raw TCP connection to a peer on the given port (RFC 021).
+    ///
+    /// `host` accepts a device id (or a unique ≥4-char prefix), device
+    /// name, Tailscale hostname, or Tailscale IP. The returned socket is
+    /// pull-model — see `NapiTcpSocket`; the `@vibecook/truffle` package
+    /// wraps it in a `stream.Duplex`.
+    #[napi]
+    pub async fn open_tcp(&self, host: String, port: u16) -> Result<NapiTcpSocket> {
+        let node = self.require_node()?;
+        // Best-effort canonical id for socket metadata; open_tcp re-resolves
+        // the same identifier forms internally.
+        let peer_id = node.resolve_peer_id(&host).await.ok();
+        let stream = node
+            .open_tcp(&host, port)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiTcpSocket::from_stream(
+            stream,
+            format!("{host}:{port}"),
+            peer_id,
+            None,
+        ))
+    }
+
+    /// Listen for raw TCP connections on a port (RFC 021).
+    ///
+    /// Port 0 binds an ephemeral port — read the resolved port from the
+    /// returned listener. Ports 443 and 9417 are reserved.
+    #[napi]
+    pub async fn listen_tcp(&self, port: u16) -> Result<NapiTcpListener> {
+        let node = self.require_node()?;
+        let listener = node
+            .listen_tcp(port)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiTcpListener::new(listener, node))
     }
 
     /// Subscribe to peer change events.

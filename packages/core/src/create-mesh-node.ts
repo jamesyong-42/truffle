@@ -1,6 +1,28 @@
 import { execFile } from 'node:child_process';
 import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
+import { createNetNamespace, type TruffleNet } from './net.js';
+import { createHttpNamespace, type TruffleHttp } from './http.js';
 import { resolveSidecarPath } from './sidecar.js';
+
+/**
+ * A started mesh node: the full native `NapiNode` API plus protocol
+ * namespaces (RFC 021). Namespaces are attached to the same underlying
+ * instance, so every `NapiNode` method is available directly and new
+ * native methods surface automatically.
+ */
+export type MeshNode = NapiNode & {
+  /** node:net-shaped raw TCP API over the mesh (RFC 021). */
+  net: TruffleNet;
+  /**
+   * node:http interop over the mesh (RFC 021): a MeshAgent for outbound
+   * requests to peers plus `request`/`get`/`fetchText` sugar. Inbound HTTP
+   * is served by feeding `mesh.net` connections into an `http.Server` via
+   * `httpServer.emit('connection', socket)`.
+   */
+  http: TruffleHttp;
+  /** The underlying native handle (escape hatch; the same object). */
+  native: NapiNode;
+};
 
 /**
  * Options for {@link createMeshNode}. RFC 017 shape — `appId` is required,
@@ -86,17 +108,22 @@ function defaultOpenUrl(url: string): void {
  *
  * @example
  * ```ts
- * const node = await createMeshNode({
+ * const mesh = await createMeshNode({
  *   appId: 'playground',
  *   deviceName: 'alice-mbp',
  *   onPeerChange: (event) => console.log('Peer event:', event),
  * });
  *
- * const peers = await node.getPeers();
- * await node.send(peers[0].deviceId, 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
+ * const peers = await mesh.getPeers();
+ * await mesh.send(peers[0].deviceId, 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
+ *
+ * // Raw TCP over the mesh, node:net-style (RFC 021):
+ * const server = mesh.net.createServer((socket) => socket.pipe(socket));
+ * server.listen(8080);
+ * const client = mesh.net.connect({ host: 'other-machine', port: 8080 });
  * ```
  */
-export async function createMeshNode(options: CreateMeshNodeOptions): Promise<NapiNode> {
+export async function createMeshNode(options: CreateMeshNodeOptions): Promise<MeshNode> {
   const {
     appId,
     deviceName,
@@ -170,5 +197,11 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
     node.onPeerChange(onPeerChange);
   }
 
-  return node;
+  // Attach the protocol namespaces (RFC 021) to the native instance.
+  const mesh = node as MeshNode;
+  mesh.net = createNetNamespace(node);
+  mesh.http = createHttpNamespace(mesh.net);
+  mesh.native = node;
+
+  return mesh;
 }
