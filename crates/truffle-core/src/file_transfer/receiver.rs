@@ -20,6 +20,51 @@ use super::types::{
     TransferError, TransferProgress,
 };
 
+/// Reduce a peer-supplied file name to a safe base name.
+///
+/// A remote peer fully controls `file_name`/`save_path` in an OFFER, so these
+/// must never be allowed to escape the receiver's chosen directory. This strips
+/// every directory component (both `/` and `\`) and rejects empty, `.`, `..`,
+/// or NUL-bearing names. Returns `None` when nothing safe remains.
+fn safe_base_name(name: &str) -> Option<String> {
+    let last = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if last.is_empty() || last == "." || last == ".." || last.contains('\0') {
+        return None;
+    }
+    Some(last.to_string())
+}
+
+/// Resolve the final on-disk destination for a received file.
+///
+/// When `save_path` is a directory (exists as one, or ends with a separator)
+/// we append a **sanitized** base name derived from the peer-supplied
+/// `file_name`, which prevents path-traversal / absolute-path escapes such as
+/// `file_name = "../../../.ssh/authorized_keys"`. When `save_path` is an
+/// explicit file path it was chosen by the local application, which owns that
+/// decision.
+fn resolve_dest_path(save_path: &str, file_name: &str) -> Result<String, TransferError> {
+    let p = std::path::Path::new(save_path);
+    let treat_as_dir = p.is_dir() || save_path.ends_with('/') || save_path.ends_with('\\');
+    if treat_as_dir {
+        let safe = safe_base_name(file_name).ok_or_else(|| {
+            TransferError::Protocol(format!(
+                "Rejected unsafe file name from peer: {file_name:?}"
+            ))
+        })?;
+        Ok(format!(
+            "{}/{}",
+            save_path.trim_end_matches(['/', '\\']),
+            safe
+        ))
+    } else {
+        Ok(save_path.to_string())
+    }
+}
+
 /// Spawn a background task that listens for incoming file transfer messages.
 ///
 /// - **OFFER**: Creates a [`FileOffer`] + [`OfferResponder`] pair, sends them
@@ -155,14 +200,29 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
         "Received incoming file offer"
     );
 
-    // Build the FileOffer
+    // M1: reject over-size offers before doing any work. The peer controls
+    // `size`, so an unbounded value would otherwise let an auto-accepting node
+    // be driven to disk exhaustion.
+    let max_size = node
+        .file_transfer_state
+        .max_transfer_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if size > max_size {
+        return Err(TransferError::Protocol(format!(
+            "Offered file size {size} exceeds max transfer size {max_size}"
+        )));
+    }
+
+    // Build the FileOffer. `suggested_path` is peer-controlled, so we surface it
+    // only as a sanitized base-name hint — never a path a naive integrator could
+    // pass straight to `accept()` and have it escape their download directory.
     let offer = FileOffer {
         from_peer: from.to_string(),
         from_name: from.to_string(), // Best we have — the peer ID
         file_name: file_name.to_string(),
         size,
         sha256: sha256.to_string(),
-        suggested_path: save_path.to_string(),
+        suggested_path: safe_base_name(save_path).unwrap_or_default(),
         token: token.to_string(),
     };
 
@@ -228,8 +288,13 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
 ) -> Result<(), TransferError> {
     let start = std::time::Instant::now();
 
-    // Create parent directories
-    if let Some(parent) = std::path::Path::new(save_path).parent() {
+    // F6: resolve the final destination SAFELY up front. When `save_path` is a
+    // directory we append a sanitized base name from the peer's `file_name`,
+    // blocking path-traversal / absolute-path escapes.
+    let final_path = resolve_dest_path(save_path, file_name)?;
+
+    // Create parent directories for the resolved destination.
+    if let Some(parent) = std::path::Path::new(&final_path).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
@@ -286,8 +351,19 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         )));
     }
 
+    // M1: defense-in-depth — enforce the max size against the stream header too.
+    let max_size = node
+        .file_transfer_state
+        .max_transfer_size
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if file_size > max_size {
+        return Err(TransferError::Protocol(format!(
+            "File size {file_size} exceeds max transfer size {max_size}"
+        )));
+    }
+
     // Stream file data to disk (instead of memory buffer)
-    let temp_path = format!("{save_path}.truffle-tmp");
+    let temp_path = format!("{final_path}.truffle-tmp");
     let mut temp_file = tokio::fs::File::create(&temp_path).await?;
     let mut hasher = Sha256::new();
     let mut bytes_received: u64 = 0;
@@ -346,20 +422,7 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         });
     }
 
-    // Resolve final path: if save_path is a directory, append the file name
-    let final_path = {
-        let p = std::path::Path::new(save_path);
-        if p.is_dir() || save_path.ends_with('/') || save_path.ends_with('\\') {
-            format!("{}/{}", save_path.trim_end_matches(['/', '\\']), file_name)
-        } else {
-            save_path.to_string()
-        }
-    };
-
-    // Create parent directories for the final path
-    if let Some(parent) = std::path::Path::new(&final_path).parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    // (final_path was resolved and its parent created before streaming.)
 
     // Move temp file to final path. Use rename first (fast, atomic on same
     // filesystem), fall back to copy+delete for cross-device moves.
@@ -558,4 +621,55 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_base_name_strips_directories() {
+        assert_eq!(safe_base_name("file.txt").as_deref(), Some("file.txt"));
+        assert_eq!(
+            safe_base_name("../../etc/passwd").as_deref(),
+            Some("passwd")
+        );
+        assert_eq!(safe_base_name("/abs/path/x").as_deref(), Some("x"));
+        assert_eq!(
+            safe_base_name("..\\..\\win.exe").as_deref(),
+            Some("win.exe")
+        );
+    }
+
+    #[test]
+    fn safe_base_name_rejects_unsafe() {
+        assert_eq!(safe_base_name(""), None);
+        assert_eq!(safe_base_name("."), None);
+        assert_eq!(safe_base_name(".."), None);
+        assert_eq!(safe_base_name("../.."), None); // final component is ".."
+        assert_eq!(safe_base_name("dir/"), None); // trailing separator => empty base
+    }
+
+    #[test]
+    fn resolve_dest_contains_traversal_into_directory() {
+        // A directory destination + a malicious peer file_name must stay inside
+        // the directory (F6): the "../.." escape is stripped to a base name.
+        let got = resolve_dest_path("/downloads/", "../../../.ssh/authorized_keys").unwrap();
+        assert_eq!(got, "/downloads/authorized_keys");
+        assert!(!got.contains(".."));
+    }
+
+    #[test]
+    fn resolve_dest_rejects_dotdot_filename() {
+        assert!(resolve_dest_path("/downloads/", "..").is_err());
+    }
+
+    #[test]
+    fn resolve_dest_passes_through_explicit_file() {
+        // A non-directory explicit path chosen by the local app is used as-is.
+        assert_eq!(
+            resolve_dest_path("/tmp/truffle-explicit-file.bin", "ignored").unwrap(),
+            "/tmp/truffle-explicit-file.bin"
+        );
+    }
 }

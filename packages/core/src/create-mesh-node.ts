@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
 import { resolveSidecarPath } from './sidecar.js';
 
@@ -39,7 +39,7 @@ export interface CreateMeshNodeOptions {
   authKey?: string;
   /** Whether this node is ephemeral (removed from tailnet on stop). */
   ephemeral?: boolean;
-  /** WebSocket listener port (0 = auto). */
+  /** WebSocket listener port. Defaults to 9417 when omitted. */
   wsPort?: number;
   /**
    * Auto-open the Tailscale auth URL in the default browser.
@@ -61,17 +61,20 @@ export interface CreateMeshNodeOptions {
  * Open a URL in the system's default browser.
  */
 function defaultOpenUrl(url: string): void {
-  try {
-    if (process.platform === 'darwin') {
-      execSync(`open "${url}"`);
-    } else if (process.platform === 'win32') {
-      execSync(`start "" "${url}"`);
-    } else {
-      execSync(`xdg-open "${url}"`);
-    }
-  } catch {
-    // Silently fail
-  }
+  // Only ever open http(s) URLs, and pass the URL as an argv element (never
+  // through a shell) so it cannot be interpreted as a command. The previous
+  // `execSync(`open "${url}"`)` form let shell metacharacters ($(), backticks)
+  // in the URL execute arbitrary commands.
+  if (!/^https?:\/\//i.test(url)) return;
+  const [cmd, args]: [string, string[]] =
+    process.platform === 'darwin'
+      ? ['open', [url]]
+      : process.platform === 'win32'
+        ? ['explorer', [url]]
+        : ['xdg-open', [url]];
+  execFile(cmd, args, () => {
+    // Best-effort; ignore failures (no browser, headless environment, etc.).
+  });
 }
 
 /**
@@ -109,6 +112,15 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
     wsPort,
   } = options;
 
+  // Validate appId synchronously (mirrors the Rust-side rule) so a bad value
+  // fails here with a clear error instead of asynchronously across the FFI.
+  if (!/^[a-z][a-z0-9-]{1,31}$/.test(appId)) {
+    throw new Error(
+      `[truffle] Invalid appId ${JSON.stringify(appId)}: must match ^[a-z][a-z0-9-]{1,31}$ ` +
+        `(2–32 chars; lowercase letters, digits, hyphens; must start with a letter).`,
+    );
+  }
+
   const resolvedSidecarPath = sidecarPath ?? resolveSidecarPath();
 
   const node = new NapiNode();
@@ -140,7 +152,18 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Na
     wsPort,
   };
 
-  await node.start(config);
+  try {
+    await node.start(config);
+  } catch (err) {
+    // Best-effort cleanup so a failed start doesn't leak the spawned sidecar
+    // process. `stop()` is safe to call even if start() failed early.
+    try {
+      await node.stop();
+    } catch {
+      // ignore — nothing to clean up, or already torn down
+    }
+    throw err;
+  }
 
   // Post-start: forward ongoing peer lifecycle events to the user callback.
   if (onPeerChange) {
