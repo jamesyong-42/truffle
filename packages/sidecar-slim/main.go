@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -393,14 +394,16 @@ type udpRelay struct {
 
 // shim is the main application state.
 type shim struct {
-	// serverMu guards server + dnsName, both written from the dispatch loop
-	// (start/stop) and read from many spawned goroutines.
-	serverMu sync.RWMutex
-	server   *tsnet.Server
-	dnsName  string // set when status becomes "running"
-
+	// serverMu guards server, dnsName, sessionToken, bridgePort, ctx, and
+	// cancel — all written from the dispatch loop (start/stop) and read from
+	// many spawned goroutines.
+	serverMu     sync.RWMutex
+	server       *tsnet.Server
+	dnsName      string // set when status becomes "running"
 	sessionToken []byte // 32 bytes
 	bridgePort   uint16
+	ctx          context.Context
+	cancel       context.CancelFunc
 
 	writeMu sync.Mutex // protects stdout writes
 	writer  *json.Encoder
@@ -423,9 +426,6 @@ type shim struct {
 	// watchCancel stops a running WatchIPNBus goroutine (guarded by watchMu).
 	watchMu     sync.Mutex
 	watchCancel context.CancelFunc
-
-	ctx    context.Context
-	cancel context.CancelFunc
 }
 
 // getServer returns the current tsnet server (nil if not started/stopped).
@@ -439,6 +439,40 @@ func (s *shim) setServer(srv *tsnet.Server) {
 	s.serverMu.Lock()
 	s.server = srv
 	s.serverMu.Unlock()
+}
+
+// lifecycleCtx returns the current lifecycle context. Long-lived goroutines
+// must capture a ctx at spawn (as a parameter) instead of calling this
+// repeatedly, so a restart's re-armed context cannot keep previous-lifecycle
+// goroutines alive.
+func (s *shim) lifecycleCtx() context.Context {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	return s.ctx
+}
+
+// bridgeParams returns the session token and bridge port under lock.
+func (s *shim) bridgeParams() ([]byte, uint16) {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	return s.sessionToken, s.bridgePort
+}
+
+// armLifecycle records the session token + bridge port for a start and returns
+// the lifecycle context long-lived goroutines should capture at spawn. serverMu
+// guards these fields so a restart's writes can't race previous-lifecycle
+// readers.
+func (s *shim) armLifecycle(token []byte, bridgePort uint16) context.Context {
+	s.serverMu.Lock()
+	defer s.serverMu.Unlock()
+	s.sessionToken = token
+	s.bridgePort = bridgePort
+	// F10: re-arm the root context if a previous tsnet:stop cancelled it, so a
+	// restart-in-place doesn't leave every ctx-gated goroutine dead on arrival.
+	if s.ctx.Err() != nil {
+		s.ctx, s.cancel = context.WithCancel(context.Background())
+	}
+	return s.ctx
 }
 
 func (s *shim) getDNSName() string {
@@ -588,14 +622,7 @@ func (s *shim) handleStart(data json.RawMessage) {
 		s.sendError("START_ERROR", "sessionToken must be 64 hex chars (32 bytes)")
 		return
 	}
-	s.sessionToken = token
-	s.bridgePort = d.BridgePort
-
-	// F10: re-arm the root context if a previous tsnet:stop cancelled it, so a
-	// restart-in-place doesn't leave every ctx-gated goroutine dead on arrival.
-	if s.ctx.Err() != nil {
-		s.ctx, s.cancel = context.WithCancel(context.Background())
-	}
+	ctx := s.armLifecycle(token, d.BridgePort)
 
 	s.sendStatus("starting", d.Hostname, "", "", "")
 
@@ -621,10 +648,10 @@ func (s *shim) handleStart(data json.RawMessage) {
 	s.setServer(srv)
 
 	// Wait for running state in background
-	go s.waitForRunning(d.Hostname)
+	go s.waitForRunning(ctx, d.Hostname)
 }
 
-func (s *shim) waitForRunning(hostname string) {
+func (s *shim) waitForRunning(ctx context.Context, hostname string) {
 	defer s.recoverPanic("waitForRunning")
 
 	srv := s.getServer()
@@ -642,14 +669,14 @@ func (s *shim) waitForRunning(hostname string) {
 	needsApprovalSent := false
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			return
 		default:
 		}
 
-		status, err := lc.StatusWithoutPeers(s.ctx)
+		status, err := lc.StatusWithoutPeers(ctx)
 		if err != nil {
-			if s.ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return
 			}
 			log.Printf("status check failed: %v", err)
@@ -694,10 +721,10 @@ func (s *shim) waitForRunning(hostname string) {
 			// NOTE: We do NOT start the TCP listener on :9417 here.
 			// The Rust session layer starts it dynamically via tsnet:listen
 			// to avoid double-bind conflicts with the dynamic listener.
-			go s.listenTLS(lc)
+			go s.listenTLS(ctx, lc)
 
 			// Start background state monitor
-			go s.monitorState(lc)
+			go s.monitorState(ctx, lc)
 			return
 		}
 
@@ -712,7 +739,7 @@ func (s *shim) trackListener(ln net.Listener) {
 	s.listeners = append(s.listeners, ln)
 }
 
-func (s *shim) listenTLS(lc *tailscale.LocalClient) {
+func (s *shim) listenTLS(ctx context.Context, lc *tailscale.LocalClient) {
 	defer s.recoverPanic("listenTLS")
 
 	srv := s.getServer()
@@ -732,7 +759,11 @@ func (s *shim) listenTLS(lc *tailscale.LocalClient) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if s.ctx.Err() != nil {
+			// Deliberate close during stop — exit instead of busy-looping on a
+			// closed listener. The :443 listener lives in s.listeners and is
+			// only ever closed by handleStop, so net.ErrClosed is the analog of
+			// the dynamic loop's stillActive guard.
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			log.Printf("accept :443 error: %v", err)
@@ -748,8 +779,11 @@ func (s *shim) listenTLS(lc *tailscale.LocalClient) {
 }
 
 func (s *shim) handleStop() {
-	if s.cancel != nil {
-		s.cancel()
+	s.serverMu.RLock()
+	cancel := s.cancel
+	s.serverMu.RUnlock()
+	if cancel != nil {
+		cancel()
 	}
 
 	// Stop any running peer watcher (F4).
@@ -851,7 +885,7 @@ func (s *shim) handleGetPeers() {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(s.ctx, statusTimeout)
+		ctx, cancel := context.WithTimeout(s.lifecycleCtx(), statusTimeout)
 		defer cancel()
 		status, err := lc.Status(ctx)
 		if err != nil {
@@ -890,7 +924,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 		}
 
 		// G8: bound the dial so a blackholed peer can't hang this goroutine.
-		dialCtx, cancel := context.WithTimeout(s.ctx, dialTimeout)
+		dialCtx, cancel := context.WithTimeout(s.lifecycleCtx(), dialTimeout)
 		defer cancel()
 
 		// Dial via tsnet
@@ -955,6 +989,8 @@ func (s *shim) handleListen(data json.RawMessage) {
 
 	go func() {
 		defer s.recoverPanic("handleListen")
+
+		ctx := s.lifecycleCtx()
 
 		lc, err := srv.LocalClient()
 		if err != nil {
@@ -1021,7 +1057,7 @@ func (s *shim) handleListen(data json.RawMessage) {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				if s.ctx.Err() != nil {
+				if ctx.Err() != nil {
 					return
 				}
 				// Check if this was a deliberate close (unlisten). Use
@@ -1097,6 +1133,8 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 	go func() {
 		defer s.recoverPanic("handleListenPacket")
 
+		ctx := s.lifecycleCtx()
+
 		// Get the tailscale IP for binding
 		status, err := srv.LocalClient()
 		if err != nil {
@@ -1104,7 +1142,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			return
 		}
 
-		st, err := status.StatusWithoutPeers(s.ctx)
+		st, err := status.StatusWithoutPeers(ctx)
 		if err != nil {
 			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("failed to get status: %v", err))
 			return
@@ -1138,7 +1176,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		localAddr := localPC.LocalAddr().(*net.UDPAddr)
 		localPort := uint16(localAddr.Port)
 
-		relayCtx, relayCancel := context.WithCancel(s.ctx)
+		relayCtx, relayCancel := context.WithCancel(ctx)
 
 		relay := &udpRelay{
 			port:      d.Port,
@@ -1404,7 +1442,7 @@ func (s *shim) handlePing(data json.RawMessage) {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(s.lifecycleCtx(), 10*time.Second)
 		defer cancel()
 
 		result, err := lc.Ping(ctx, addr, pt)
@@ -1442,7 +1480,7 @@ func (s *shim) handleWatchPeers(data json.RawMessage) {
 	}
 
 	// F4: only one watcher at a time — cancel any previous one and start fresh.
-	watchCtx, watchCancel := context.WithCancel(s.ctx)
+	watchCtx, watchCancel := context.WithCancel(s.lifecycleCtx())
 	s.watchMu.Lock()
 	if s.watchCancel != nil {
 		s.watchCancel()
@@ -1679,7 +1717,7 @@ func (s *shim) handlePushFile(data json.RawMessage) {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+		ctx, cancel := context.WithTimeout(s.lifecycleCtx(), 5*time.Minute)
 		defer cancel()
 
 		err = lc.PushFile(ctx, tailcfg.StableNodeID(d.TargetNodeID), fi.Size(), d.FileName, f)
@@ -1713,7 +1751,7 @@ func (s *shim) handleWaitingFiles() {
 			return
 		}
 
-		files, err := lc.WaitingFiles(s.ctx)
+		files, err := lc.WaitingFiles(s.lifecycleCtx())
 		if err != nil {
 			s.sendError("WAITING_FILES_ERROR", fmt.Sprintf("waiting files failed: %v", err))
 			return
@@ -1768,7 +1806,7 @@ func (s *shim) handleGetWaitingFile(data json.RawMessage) {
 		}
 
 		// F7: bound the fetch so a stalled transfer can't hang forever.
-		ctx, cancel := context.WithTimeout(s.ctx, 10*time.Minute)
+		ctx, cancel := context.WithTimeout(s.lifecycleCtx(), 10*time.Minute)
 		defer cancel()
 
 		rc, size, err := lc.GetWaitingFile(ctx, d.FileName)
@@ -1837,7 +1875,7 @@ func (s *shim) handleDeleteWaitingFile(data json.RawMessage) {
 			return
 		}
 
-		err = lc.DeleteWaitingFile(s.ctx, d.FileName)
+		err = lc.DeleteWaitingFile(s.lifecycleCtx(), d.FileName)
 		if err != nil {
 			s.sendEvent("tsnet:deleteWaitingFileResult", deleteWaitingFileResultData{
 				Success:  false,
@@ -1975,7 +2013,7 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 			return
 		}
 
-		ctx, cancel := context.WithCancel(s.ctx)
+		ctx, cancel := context.WithCancel(s.lifecycleCtx())
 		// P4: bound header reads (slow-loris) and idle keep-alives. ReadTimeout
 		// is intentionally unset so long-lived streaming/WebSocket bodies work.
 		httpSrv := &http.Server{
@@ -2141,7 +2179,9 @@ func (s *shim) handleProxyList() {
 func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, requestID, remoteAddr, remoteDNS string) {
 	defer s.recoverPanic("bridgeToRust")
 
-	localConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", s.bridgePort))
+	token, bridgePort := s.bridgeParams()
+
+	localConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", bridgePort))
 	if err != nil {
 		log.Printf("bridge connect failed: %v", err)
 		tsnetConn.Close()
@@ -2157,7 +2197,7 @@ func (s *shim) bridgeToRust(tsnetConn net.Conn, port uint16, direction byte, req
 	}
 
 	// Write binary header
-	if err := writeHeader(localConn, s.sessionToken, direction, port, requestID, remoteAddr, remoteDNS); err != nil {
+	if err := writeHeader(localConn, token, direction, port, requestID, remoteAddr, remoteDNS); err != nil {
 		log.Printf("header write failed: %v", err)
 		localConn.Close()
 		tsnetConn.Close()
@@ -2314,7 +2354,7 @@ func isLoopbackHost(host string) bool {
 // The JSON is placed into the bridge header's remoteDNS field so Rust can
 // extract rich identity info about the connecting peer.
 func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) string {
-	ctx, cancel := context.WithTimeout(s.ctx, whoisTimeout)
+	ctx, cancel := context.WithTimeout(s.lifecycleCtx(), whoisTimeout)
 	defer cancel()
 	whois, err := lc.WhoIs(ctx, remoteAddr)
 	if err != nil {
@@ -2343,7 +2383,7 @@ func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string)
 
 // monitorState polls Tailscale status every 60 seconds and emits events for
 // state changes, upcoming key expiry, and health warnings.
-func (s *shim) monitorState(lc *tailscale.LocalClient) {
+func (s *shim) monitorState(ctx context.Context, lc *tailscale.LocalClient) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
@@ -2351,14 +2391,14 @@ func (s *shim) monitorState(lc *tailscale.LocalClient) {
 
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 
-		status, err := lc.StatusWithoutPeers(s.ctx)
+		status, err := lc.StatusWithoutPeers(ctx)
 		if err != nil {
-			if s.ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return
 			}
 			log.Printf("monitorState: status check failed: %v", err)

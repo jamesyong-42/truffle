@@ -2,8 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net"
+	"sync"
 	"testing"
+	"time"
 )
 
 // testToken returns a deterministic 32-byte token matching Rust's test_token()
@@ -154,4 +160,83 @@ func TestGoldenMinimalHeader(t *testing.T) {
 	if !bytes.Equal(b[44:46], []byte{0, 0}) {
 		t.Errorf("remote_dns_name_len not 0")
 	}
+}
+
+// newTestShim mirrors main()'s shim construction for unit tests: events are
+// discarded, the per-subsystem maps are initialized, and the lifecycle context
+// is armed from a fresh background context.
+func newTestShim() *shim {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &shim{
+		writer:           json.NewEncoder(io.Discard),
+		dynamicListeners: make(map[uint16]net.Listener),
+		udpRelays:        make(map[uint16]*udpRelay),
+		proxies:          make(map[string]*proxyEntry),
+		ctx:              ctx,
+		cancel:           cancel,
+	}
+}
+
+// TestMonitorStateExitsAcrossRestart is the goroutine-leak regression: a
+// long-lived goroutine spawned in one lifecycle must terminate on stop and stay
+// terminated across a restart, rather than being kept alive by the restart's
+// re-armed context. It captures the lifecycle ctx pre-stop (as monitorState
+// does at spawn), stops (cancelling that ctx), then restarts (re-arming a fresh
+// ctx). monitorState run with the captured ctx must observe cancellation and
+// exit. Before the fix — where monitorState re-read s.ctx — the equivalent run
+// would observe the re-armed live context and block on its 60s ticker, timing
+// out here.
+func TestMonitorStateExitsAcrossRestart(t *testing.T) {
+	s := newTestShim()
+
+	// The lifecycle ctx a monitorState goroutine captures at spawn.
+	ctx := s.lifecycleCtx()
+
+	// Stop cancels that lifecycle context.
+	s.handleStop()
+
+	// A restart re-arms a fresh lifecycle context.
+	s.armLifecycle(testToken(), 9999)
+
+	// lc is nil-safe here: monitorState returns via ctx.Done before its first
+	// 60s tick would touch lc.
+	done := make(chan struct{})
+	go func() {
+		s.monitorState(ctx, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("monitorState from previous lifecycle leaked across restart")
+	}
+}
+
+// TestRestartLifecycleFieldsSynchronized is the data-race regression: the
+// ctx/cancel/sessionToken/bridgePort fields are read by spawned goroutines
+// (lifecycleCtx/bridgeParams) while the dispatch loop rewrites them on
+// stop/start (handleStop/armLifecycle). All access must go through serverMu.
+// Under `go test -race`, the pre-fix raw field reads/writes report a data race;
+// after the fix this is clean.
+func TestRestartLifecycleFieldsSynchronized(t *testing.T) {
+	s := newTestShim()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_ = s.lifecycleCtx().Err()
+			tok, port := s.bridgeParams()
+			_ = tok
+			_ = port
+		}
+	}()
+
+	for i := 0; i < 1000; i++ {
+		s.handleStop()
+		_ = s.armLifecycle(testToken(), 9000)
+	}
+	wg.Wait()
 }
