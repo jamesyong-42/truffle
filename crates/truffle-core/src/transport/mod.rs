@@ -399,6 +399,17 @@ pub enum TransportError {
         remote: String,
     },
 
+    /// The hello envelope's claimed `tailscale_id` did not match the
+    /// Tailscale-authenticated identity of the connection (RFC 017 §8,
+    /// close code 4003).
+    #[error("identity mismatch: hello claimed tailscale_id={claimed}, authenticated nodeId={authenticated}")]
+    IdentityMismatch {
+        /// The `tailscale_id` the hello envelope claimed.
+        claimed: String,
+        /// The Tailscale-authenticated node ID (WhoIs) of the connection.
+        authenticated: String,
+    },
+
     /// The connection was closed unexpectedly.
     #[error("connection closed: {0}")]
     ConnectionClosed(String),

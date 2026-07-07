@@ -28,6 +28,10 @@ struct MockNetworkProvider {
     identity: NodeIdentity,
     local_addr: PeerAddr,
     peer_event_tx: broadcast::Sender<NetworkPeerEvent>,
+    /// WhoIs identity JSON to attach to every `IncomingConnection` this mock
+    /// yields. Empty by default so existing tests take the warn-and-allow
+    /// path in `verify_authenticated_identity`.
+    incoming_remote_identity: String,
 }
 
 impl MockNetworkProvider {
@@ -51,7 +55,16 @@ impl MockNetworkProvider {
                 dns_name: None,
             },
             peer_event_tx,
+            incoming_remote_identity: String::new(),
         }
+    }
+
+    /// Attach a fixed WhoIs identity JSON to every incoming connection, so
+    /// the server-side hello exchange can verify a claimed `tailscale_id`
+    /// against it. Used only by the identity-verification tests.
+    fn with_incoming_identity(mut self, json: &str) -> Self {
+        self.incoming_remote_identity = json.to_string();
+        self
     }
 }
 
@@ -95,6 +108,8 @@ impl NetworkProvider for MockNetworkProvider {
         let actual_port = listener.local_addr().unwrap().port();
         let (tx, rx) = mpsc::channel::<IncomingConnection>(64);
 
+        let remote_identity = self.incoming_remote_identity.clone();
+
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
@@ -102,7 +117,7 @@ impl NetworkProvider for MockNetworkProvider {
                         let conn = IncomingConnection {
                             stream,
                             remote_addr: addr.to_string(),
-                            remote_identity: String::new(),
+                            remote_identity: remote_identity.clone(),
                             port: actual_port,
                         };
                         if tx.send(conn).await.is_err() {
@@ -323,6 +338,106 @@ async fn ws_connect_and_exchange_messages() {
     assert_eq!(received, reply);
 
     // Clean close
+    client_stream.close().await.unwrap();
+    server_stream.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ws_rejects_hello_with_mismatched_authenticated_identity() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    // The server's bridge reports a WhoIs-authenticated nodeId of
+    // "real-node-id" for the incoming connection, but the client's hello
+    // will claim tailscale_id "client" — an impersonation attempt.
+    let server_provider = Arc::new(
+        MockNetworkProvider::new("server")
+            .with_incoming_identity(r#"{"dnsName":"mallory.ts.net","nodeId":"real-node-id"}"#),
+    );
+    let client_provider = Arc::new(MockNetworkProvider::new("client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    // The server must close with code 4003 before replying, so the client's
+    // hello exchange errors and the listener never yields a stream.
+    let (client_result, server_accept) = tokio::join!(
+        client_ws.connect(&peer_addr),
+        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+    );
+
+    assert!(
+        client_result.is_err(),
+        "impersonating client must not complete the hello exchange"
+    );
+    assert!(
+        server_accept.is_err() || server_accept.unwrap().is_none(),
+        "server must not yield a stream for a mismatched identity"
+    );
+}
+
+#[tokio::test]
+async fn ws_accepts_hello_with_matching_authenticated_identity() {
+    use crate::transport::websocket::WebSocketTransport;
+
+    // The bridge-authenticated nodeId matches the tailscale_id the client
+    // advertises in its hello ("client"), so verification passes and the
+    // honest peer connects and routes by its real peer id.
+    let server_provider = Arc::new(
+        MockNetworkProvider::new("server")
+            .with_incoming_identity(r#"{"dnsName":"client.ts.net","nodeId":"client"}"#),
+    );
+    let client_provider = Arc::new(MockNetworkProvider::new("client"));
+
+    let port = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let config = WsConfig {
+        port,
+        ping_interval: Duration::from_secs(60),
+        pong_timeout: Duration::from_secs(60),
+        ..Default::default()
+    };
+
+    let server_ws = WebSocketTransport::new(server_provider, config.clone());
+    let mut listener = server_ws.listen().await.unwrap();
+
+    let client_ws = WebSocketTransport::new(client_provider, config);
+    let peer_addr = PeerAddr {
+        ip: Some("127.0.0.1".parse().unwrap()),
+        hostname: "localhost".to_string(),
+        dns_name: None,
+    };
+
+    let (client_result, server_stream) = tokio::join!(client_ws.connect(&peer_addr), async {
+        listener.accept().await
+    });
+
+    let mut client_stream = client_result.expect("honest client connect should succeed");
+    let mut server_stream = server_stream.expect("server should accept the matching connection");
+
+    assert_eq!(server_stream.remote_peer_id(), "client");
+
     client_stream.close().await.unwrap();
     server_stream.close().await.unwrap();
 }
