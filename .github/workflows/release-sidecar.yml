@@ -140,3 +140,67 @@ jobs:
             cd ../..
             echo "Published @vibecook/$PKG_NAME@$VERSION"
           done
+
+  # Regenerate the committed sidecar SHA-256 checksums from the freshly built
+  # release assets and commit them back to the default branch. These files are
+  # the trust anchor for the postinstall download fallback (packages/core) and
+  # the build.rs from-source download (crates/truffle-sidecar): each must be
+  # regenerated every release, or a fresh tag falls back to "integrity NOT
+  # verified" on those unverified-download paths.
+  #
+  # CAVEAT (ordering): publish-crates.yml and release-npm.yml are dispatched in
+  # parallel with this workflow by release-please.yml, so THIS release's crate
+  # and npm artifacts are published from the tag before this commit lands and
+  # therefore ship without their own checksums. The committed checksums protect
+  # every from-source build and postinstall fallback from this commit forward.
+  # To make a release fully self-verifying, serialize the publishers to run
+  # after this job instead of dispatching them in parallel.
+  #
+  # CAVEAT (branch protection): this pushes to the default branch. If that branch
+  # rejects direct pushes, supply a PAT / GitHub App token below or convert the
+  # final step to open a pull request.
+  checksums:
+    name: Pin sidecar checksums
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Resolve version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME##*v}" >> "$GITHUB_ENV"
+
+      - name: Download built sidecar release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/sidecar-assets
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'tsnet-sidecar-*' \
+            --dir /tmp/sidecar-assets
+
+      - name: Regenerate checksum files
+        run: node scripts/update-sidecar-checksums.mjs "${VERSION}" /tmp/sidecar-assets
+
+      - name: Commit checksums if changed
+        run: |
+          if git diff --quiet -- packages/core/sidecar-checksums.json crates/truffle-sidecar/sidecar-checksums.json; then
+            echo "Checksums already current for ${VERSION}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/core/sidecar-checksums.json crates/truffle-sidecar/sidecar-checksums.json
+          git commit -m "chore(release): pin sidecar checksums for ${GITHUB_REF_NAME}"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
