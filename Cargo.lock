@@ -6584,6 +6584,7 @@ version = "0.4.8"
 dependencies = [
  "flate2",
  "tar",
+ "tempfile",
  "ureq",
  "zip",
 ]
