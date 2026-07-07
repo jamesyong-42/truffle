@@ -8,6 +8,10 @@ export {
   NapiCrdtDoc,
   NapiTcpSocket,
   NapiTcpListener,
+  NapiUdpSocket,
+  NapiQuicConnection,
+  NapiQuicListener,
+  NapiQuicStream,
 } from '@vibecook/truffle-native';
 
 // Re-export interfaces/types from the native Rust addon
@@ -29,6 +33,7 @@ export type {
   NapiProxyInfo,
   NapiProxyEvent,
   NapiCrdtDocEvent,
+  NapiDatagram,
 } from '@vibecook/truffle-native';
 
 // Sidecar binary resolution
@@ -46,6 +51,23 @@ export {
 
 // node:http interop over the mesh (RFC 021)
 export { MeshAgent, createHttpNamespace, type TruffleHttp } from './http.js';
+
+// QUIC over the mesh (RFC 021)
+export {
+  TruffleQuicStream,
+  TruffleQuicConnection,
+  TruffleQuicServer,
+  createQuicNamespace,
+  type TruffleQuic,
+} from './quic.js';
+
+// node:dgram-shaped raw UDP API over the mesh (RFC 021)
+export {
+  TruffleDgramSocket,
+  createDgramNamespace,
+  type TruffleDgram,
+  type TruffleRemoteInfo,
+} from './dgram.js';
 
 // High-level API
 export { createMeshNode, type CreateMeshNodeOptions, type MeshNode } from './create-mesh-node.js';

@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
 import { createNetNamespace, type TruffleNet } from './net.js';
 import { createHttpNamespace, type TruffleHttp } from './http.js';
+import { createQuicNamespace, type TruffleQuic } from './quic.js';
+import { createDgramNamespace, type TruffleDgram } from './dgram.js';
 import { resolveSidecarPath } from './sidecar.js';
 
 /**
@@ -20,6 +22,16 @@ export type MeshNode = NapiNode & {
    * `httpServer.emit('connection', socket)`.
    */
   http: TruffleHttp;
+  /**
+   * QUIC over the mesh (RFC 021): multiplexed bidirectional byte streams
+   * with no head-of-line blocking, async-iterable connections/streams.
+   */
+  quic: TruffleQuic;
+  /**
+   * node:dgram-shaped raw UDP API over the mesh (RFC 021): datagram sockets
+   * with `'message'` events and preserved datagram boundaries.
+   */
+  dgram: TruffleDgram;
   /** The underlying native handle (escape hatch; the same object). */
   native: NapiNode;
 };
@@ -201,6 +213,8 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
   const mesh = node as MeshNode;
   mesh.net = createNetNamespace(node);
   mesh.http = createHttpNamespace(mesh.net);
+  mesh.quic = createQuicNamespace(node);
+  mesh.dgram = createDgramNamespace(node);
   mesh.native = node;
 
   return mesh;

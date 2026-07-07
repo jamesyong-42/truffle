@@ -6572,6 +6572,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "quinn",
  "serde_json",
  "tokio",
  "tracing",

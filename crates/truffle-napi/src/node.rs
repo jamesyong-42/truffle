@@ -14,12 +14,14 @@ use truffle_core::Node;
 use crate::crdt_doc::NapiCrdtDoc;
 use crate::file_transfer::NapiFileTransfer;
 use crate::proxy::NapiProxy;
+use crate::quic::{NapiQuicConnection, NapiQuicListener};
 use crate::raw_socket::{NapiTcpListener, NapiTcpSocket};
 use crate::synced_store::NapiSyncedStore;
 use crate::types::{
     NapiHealthInfo, NapiNamespacedMessage, NapiNodeConfig, NapiNodeIdentity, NapiPeer,
     NapiPeerEvent, NapiPingResult,
 };
+use crate::udp_socket::NapiUdpSocket;
 
 /// Helper: convert a truffle-core `Peer` to a `NapiPeer`.
 ///
@@ -283,6 +285,52 @@ impl NapiNode {
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(NapiTcpListener::new(listener, node))
+    }
+
+    /// Bind a UDP datagram socket on a port (RFC 021).
+    ///
+    /// Datagram boundaries are preserved; keep payloads ≤ ~1,200 bytes
+    /// (tailnet MTU). Port 0 binds an ephemeral relay port — suitable for
+    /// client-style sockets that send first.
+    #[napi]
+    pub async fn bind_udp(&self, port: u16) -> Result<NapiUdpSocket> {
+        let node = self.require_node()?;
+        let socket = node
+            .bind_udp(port)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiUdpSocket::new(socket, node, port))
+    }
+
+    /// Open a raw QUIC connection to a peer on the given port (RFC 021).
+    ///
+    /// The connection carries multiple concurrent bidirectional byte
+    /// streams with no head-of-line blocking. Only same-app peers can
+    /// complete the handshake (ALPN scoping). `host` accepts the same
+    /// identifier forms as `openTcp`.
+    #[napi]
+    pub async fn connect_quic(&self, host: String, port: u16) -> Result<NapiQuicConnection> {
+        let node = self.require_node()?;
+        let peer_id = node.resolve_peer_id(&host).await.ok();
+        let conn = node
+            .connect_quic(&host, port)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiQuicConnection::new(conn, peer_id))
+    }
+
+    /// Listen for raw QUIC connections on a port (RFC 021).
+    ///
+    /// Ports 443 and 9417 are reserved; port 0 is not supported over the
+    /// tsnet relay — choose an explicit port.
+    #[napi]
+    pub async fn listen_quic(&self, port: u16) -> Result<NapiQuicListener> {
+        let node = self.require_node()?;
+        let listener = node
+            .listen_quic(port)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(NapiQuicListener::new(listener, node))
     }
 
     /// Subscribe to peer change events.

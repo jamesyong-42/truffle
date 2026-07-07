@@ -189,6 +189,30 @@ export declare class NapiNode {
    */
   listenTcp(port: number): Promise<NapiTcpListener>
   /**
+   * Bind a UDP datagram socket on a port (RFC 021).
+   *
+   * Datagram boundaries are preserved; keep payloads ≤ ~1,200 bytes
+   * (tailnet MTU). Port 0 binds an ephemeral relay port — suitable for
+   * client-style sockets that send first.
+   */
+  bindUdp(port: number): Promise<NapiUdpSocket>
+  /**
+   * Open a raw QUIC connection to a peer on the given port (RFC 021).
+   *
+   * The connection carries multiple concurrent bidirectional byte
+   * streams with no head-of-line blocking. Only same-app peers can
+   * complete the handshake (ALPN scoping). `host` accepts the same
+   * identifier forms as `openTcp`.
+   */
+  connectQuic(host: string, port: number): Promise<NapiQuicConnection>
+  /**
+   * Listen for raw QUIC connections on a port (RFC 021).
+   *
+   * Ports 443 and 9417 are reserved; port 0 is not supported over the
+   * tsnet relay — choose an explicit port.
+   */
+  listenQuic(port: number): Promise<NapiQuicListener>
+  /**
    * Subscribe to peer change events.
    *
    * The callback receives `NapiPeerEvent` objects whenever peers
@@ -262,6 +286,78 @@ export declare class NapiProxy {
    * starts, stops, or encounters an error.
    */
   onEvent(callback: (event: NapiProxyEvent) => void): void
+}
+
+/**
+ * A raw QUIC connection to a peer over the mesh.
+ *
+ * Open streams with `openStream()`; accept peer-opened streams with
+ * `acceptStream()` (resolves `null` once the connection closes). Streams
+ * are lazy — the peer's accept does not fire until the opener writes.
+ */
+export declare class NapiQuicConnection {
+  /** Open a new bidirectional byte stream on this connection. */
+  openStream(): Promise<NapiQuicStream>
+  /**
+   * Accept the next stream the peer opens.
+   *
+   * Resolves `null` once the connection has closed (either side).
+   */
+  acceptStream(): Promise<NapiQuicStream | null>
+  /** The peer's tailnet address (`100.x.x.x:port` over the relay). */
+  remoteAddress(): string
+  /**
+   * The peer's stable device id when known. `null` means "anonymous but
+   * tailnet-authenticated".
+   */
+  remotePeerId(): string | null
+  /** Close the connection and all its streams. Idempotent. */
+  close(): void
+}
+
+/** A listener for raw QUIC connections on a mesh port. */
+export declare class NapiQuicListener {
+  /**
+   * Accept the next incoming connection.
+   *
+   * Resolves `null` once the listener has been closed. Cross-app
+   * connection attempts fail the TLS handshake (ALPN scoping) and are
+   * skipped, never surfaced.
+   */
+  accept(): Promise<NapiQuicConnection | null>
+  /** The port this listener is bound to. */
+  port(): number
+  /**
+   * Close the listener and connections accepted from it. Pending
+   * `accept()` calls resolve with `null`. Idempotent.
+   */
+  close(): void
+}
+
+/**
+ * A bidirectional byte stream on a QUIC connection.
+ *
+ * Behaves like an independent TCP connection (ordered, reliable,
+ * flow-controlled) without head-of-line blocking against sibling streams.
+ * Pull-model reads, like `NapiTcpSocket`.
+ */
+export declare class NapiQuicStream {
+  /**
+   * Read up to `maxBytes` (default 64 KiB) from the stream.
+   *
+   * Resolves with the next chunk, or `null` on clean EOF (the peer
+   * finished the stream) and after `close()`.
+   */
+  read(maxBytes?: number | undefined | null): Promise<Buffer | null>
+  /** Write all of `data` to the stream (respects QUIC flow control). */
+  write(data: Buffer): Promise<void>
+  /**
+   * Half-close: finish the write side, signalling clean EOF to the
+   * peer. Reading remains possible. Idempotent.
+   */
+  finish(): Promise<void>
+  /** Fully close the stream (finish writes, stop reads). Idempotent. */
+  close(): Promise<void>
 }
 
 /**
@@ -362,12 +458,57 @@ export declare class NapiTcpSocket {
   remotePeerName(): string | null
 }
 
+/**
+ * A UDP socket on the mesh.
+ *
+ * Datagram boundaries are preserved end-to-end. Keep payloads ≤ ~1,200
+ * bytes to stay under the tailnet MTU (larger datagrams fragment in the
+ * userspace netstack and become loss-prone). IPv4 (`100.x`) peers only.
+ */
+export declare class NapiUdpSocket {
+  /**
+   * Send a datagram to `host:port`.
+   *
+   * `host` accepts a peer's device id (or unique ≥4-char prefix),
+   * device name, Tailscale hostname, or Tailscale IP. Resolves with
+   * the number of payload bytes sent.
+   */
+  send(data: Buffer, host: string, port: number): Promise<number>
+  /**
+   * Receive the next datagram.
+   *
+   * Resolves `null` once the socket has been closed. Note UDP is
+   * unreliable: datagrams may be dropped or reordered.
+   */
+  recv(): Promise<NapiDatagram | null>
+  /**
+   * The mesh port this socket is bound to (the tsnet port over the
+   * relay; 0 for ephemeral client-style sockets whose tsnet port is
+   * unknown — see RFC 021).
+   */
+  port(): number
+  /**
+   * Close the socket. Any in-flight `recv()` resolves with `null`.
+   * Idempotent.
+   */
+  close(): void
+}
+
 /** A CRDT document change event delivered to JS. */
 export interface NapiCrdtDocEvent {
   /** Event type: "local_change", "remote_change", "peer_synced", "peer_left". */
   eventType: string
   /** Peer identifier (present for remote_change, peer_synced, peer_left events). */
   peerId?: string
+}
+
+/** A datagram received from the mesh. */
+export interface NapiDatagram {
+  data: Buffer
+  /** Sender's tailnet IP (`100.x.x.x`) — WireGuard-authenticated. */
+  address: string
+  /** Sender's source port. */
+  port: number
 }
 
 /** An incoming file offer from a remote peer. */

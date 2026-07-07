@@ -585,6 +585,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
         Err(NodeError::PeerNotFound(peer_ref.to_string()))
     }
 
+    /// Resolve a peer identifier to the peer's Tailscale IP address.
+    ///
+    /// Accepts the same identifier forms as
+    /// [`resolve_peer_id`](Self::resolve_peer_id). Used by the FFI layers
+    /// to address datagram sends by peer name.
+    pub async fn resolve_peer_ip(&self, peer_ref: &str) -> Result<IpAddr, NodeError> {
+        Ok(self.resolve_peer(peer_ref).await?.ip)
+    }
+
     /// Resolve a peer identifier to the canonical per-device ULID
     /// (`device_id`) from the RFC 017 hello envelope.
     ///

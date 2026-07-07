@@ -10,6 +10,8 @@ pub mod crdt_doc;
 pub mod file_transfer;
 pub mod node;
 pub mod proxy;
+pub mod quic;
 pub mod raw_socket;
 pub mod synced_store;
 pub mod types;
+pub mod udp_socket;

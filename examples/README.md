@@ -63,6 +63,19 @@ pnpm --filter @vibecook/example-netcat exec tsx src/main.ts connect <device-name
 
 See `examples/netcat/README.md` for all commands (`listen`, `connect`, `peers`).
 
+### QUIC streams (multiplexing)
+
+Echo server + bench client over `mesh.quic` (RFC 021) — N concurrent
+streams on one connection, timed individually to show there's no
+head-of-line blocking:
+
+```bash
+# device A
+pnpm --filter @vibecook/example-quic-streams exec tsx src/main.ts serve 9420
+# device B
+pnpm --filter @vibecook/example-quic-streams exec tsx src/main.ts bench <device-name> 9420 8
+```
+
 ### Express over the mesh (HTTP interop)
 
 A stock Express app served over the tailnet via `mesh.net`, queried with
