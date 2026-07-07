@@ -50,7 +50,6 @@ const (
 	dirIncoming = 0x01
 	dirOutgoing = 0x02
 
-	writeDeadline = 60 * time.Second
 	// idleDeadline reaps bridged/relayed connections that go idle in BOTH
 	// directions, so a peer that opens a connection and stops talking cannot
 	// pin a goroutine + fds forever.

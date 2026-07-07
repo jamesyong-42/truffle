@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -318,5 +319,18 @@ func TestMarshalPeerIdentitySmallIdentityUnchanged(t *testing.T) {
 	}
 	if got != identity {
 		t.Errorf("identity round-trip mismatch: got %+v, want %+v", got, identity)
+	}
+}
+
+// TestModulePath guards the go.mod module path against the stale
+// claude-code-on-the-go name reappearing.
+func TestModulePath(t *testing.T) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Skip("no build info embedded in test binary")
+	}
+	const want = "github.com/jamesyong-42/truffle/packages/sidecar-slim"
+	if bi.Main.Path != want {
+		t.Errorf("module path = %q, want %q", bi.Main.Path, want)
 	}
 }
