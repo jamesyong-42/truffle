@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.9](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.8...truffle-v0.4.9) (2026-07-08)
+
+
+### Features
+
+* raw transport surface for the JS API (RFC 021) ([#134](https://github.com/jamesyong-42/truffle/issues/134)) ([eddaaf7](https://github.com/jamesyong-42/truffle/commit/eddaaf7db832d9d02d59f0ba634ef6e641b8d625))
+
 ## [0.4.8](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.7...truffle-v0.4.8) (2026-07-07)
 
 
