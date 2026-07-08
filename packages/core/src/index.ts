@@ -5,7 +5,6 @@ export {
   NapiOfferResponder,
   NapiSyncedStore,
   NapiProxy,
-  NapiCrdtDoc,
   NapiTcpSocket,
   NapiTcpListener,
   NapiUdpSocket,
@@ -32,7 +31,6 @@ export type {
   NapiProxyConfig,
   NapiProxyInfo,
   NapiProxyEvent,
-  NapiCrdtDocEvent,
   NapiDatagram,
 } from '@vibecook/truffle-native';
 

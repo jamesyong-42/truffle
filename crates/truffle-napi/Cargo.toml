@@ -15,7 +15,6 @@ workspace = true
 
 [dependencies]
 truffle-core = { path = "../truffle-core" }
-loro.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
 # For the QUIC stream halves surfaced by truffle-core's raw QUIC API.

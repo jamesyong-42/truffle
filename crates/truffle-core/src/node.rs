@@ -257,8 +257,8 @@ pub struct Node<N: NetworkProvider + 'static> {
     namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     /// File transfer subsystem state.
     pub(crate) file_transfer_state: FileTransferState,
-    /// State directory for persistence (e.g., CRDT backends). Empty path
-    /// when constructed via `from_parts` (tests); set by the builder.
+    /// State directory for persistence (e.g., synced store backends). Empty
+    /// path when constructed via `from_parts` (tests); set by the builder.
     state_dir: PathBuf,
     /// The session WebSocket listen port (reserved against raw listeners).
     /// Defaults to 9417 in `from_parts`; set by the builder.
@@ -444,32 +444,6 @@ impl<N: NetworkProvider + 'static> Node<N> {
         T: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     {
         crate::synced_store::SyncedStore::new_with_backend(self.clone(), store_id, backend)
-    }
-
-    // ── CRDT Documents ───────────────────────────────���───────────────────
-
-    /// Create a CRDT document synchronized across the mesh.
-    ///
-    /// Returns an `Arc<CrdtDoc>` that syncs on namespace `"crdt:{doc_id}"`.
-    /// Uses the default [`MemoryCrdtBackend`](crate::crdt_doc::MemoryCrdtBackend)
-    /// (no persistence).
-    pub async fn crdt_doc(
-        self: &Arc<Self>,
-        doc_id: &str,
-    ) -> Result<Arc<crate::crdt_doc::CrdtDoc>, crate::crdt_doc::CrdtDocError> {
-        crate::crdt_doc::CrdtDoc::new(self.clone(), doc_id).await
-    }
-
-    /// Create a CRDT document with a custom persistence backend.
-    ///
-    /// Same as [`crdt_doc`](Self::crdt_doc) but restores persisted data on
-    /// startup and writes through to the backend on every change.
-    pub async fn crdt_doc_with_backend(
-        self: &Arc<Self>,
-        doc_id: &str,
-        backend: Arc<dyn crate::crdt_doc::CrdtBackend>,
-    ) -> Result<Arc<crate::crdt_doc::CrdtDoc>, crate::crdt_doc::CrdtDocError> {
-        crate::crdt_doc::CrdtDoc::new_with_backend(self.clone(), doc_id, backend).await
     }
 
     // ── State directory ───────────────────��────────────────────────────��

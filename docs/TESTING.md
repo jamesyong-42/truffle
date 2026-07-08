@@ -178,7 +178,6 @@ cargo bench -p truffle-core --bench envelope
 
 Files:
 - `benches/envelope.rs` — JSON codec encode/decode throughput
-- `benches/crdt_merge.rs` — Loro CRDT merge at 100 / 1k / 10k ops
 - `benches/chunk_hash.rs` — sha2-256 throughput (full buffer + streamed)
 
 Output lands in `target/criterion/`. Each bench run prints percentile

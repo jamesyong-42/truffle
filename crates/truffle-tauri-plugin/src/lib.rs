@@ -34,16 +34,6 @@
 //! - `pull_roots()` — List registered pull roots
 //! - `clear_pull_roots()` — Clear all registered pull roots
 //!
-//! # CRDT Document Commands
-//!
-//! - `crdt_doc_create(doc_id)` — Create a CRDT document
-//! - `crdt_doc_destroy(doc_id)` — Stop and remove a CRDT document
-//! - `crdt_doc_get_value(doc_id)` — Get the document's deep JSON value
-//! - `crdt_doc_map_insert(doc_id, container, key, value)` — Insert into a map
-//! - `crdt_doc_list_push(doc_id, container, value)` — Push to a list
-//! - `crdt_doc_text_insert(doc_id, container, pos, text)` — Insert text
-//! - `crdt_doc_counter_increment(doc_id, container, value)` — Increment a counter
-//!
 //! # Raw Transport Commands (RFC 021 §7)
 //!
 //! Id-keyed parity with the NAPI raw surface — see [`raw_transport`]. Handles
@@ -63,7 +53,6 @@
 //! - `truffle://file-transfer-event` — File transfer progress/completion
 //! - `truffle://file-offer` — Incoming file offers
 //! - `truffle://auth-required` — Authentication URL when login is needed
-//! - `truffle://crdt-change` — CRDT document change events
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,9 +61,8 @@ use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime};
 use tokio::sync::{Mutex, RwLock};
 
-use tokio::task::JoinHandle;
 use truffle_core::network::tailscale::TailscaleProvider;
-use truffle_core::{CrdtDoc, Node, OfferResponder};
+use truffle_core::{Node, OfferResponder};
 
 pub mod commands;
 pub mod events;
@@ -96,10 +84,6 @@ pub struct TruffleState {
     /// Pending file offer responders, keyed by transfer token.
     /// Removed on accept or reject.
     pub pending_offers: Arc<RwLock<HashMap<String, OfferResponder>>>,
-    /// Active CRDT documents, keyed by document ID.
-    /// Each entry stores the doc and the handle to its event-forwarding task
-    /// so that the task can be aborted when the doc is destroyed.
-    pub crdt_docs: Arc<RwLock<HashMap<String, (Arc<CrdtDoc>, JoinHandle<()>)>>>,
 
     // ── Raw transport registries (RFC 021 §7, Phase 4) ───────────────────
     // Live socket/stream/listener handles cannot cross Tauri IPC, so each is
@@ -147,13 +131,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::add_pull_root,
             commands::pull_roots,
             commands::clear_pull_roots,
-            commands::crdt_doc_create,
-            commands::crdt_doc_destroy,
-            commands::crdt_doc_get_value,
-            commands::crdt_doc_map_insert,
-            commands::crdt_doc_list_push,
-            commands::crdt_doc_text_insert,
-            commands::crdt_doc_counter_increment,
             commands::proxy_add,
             commands::proxy_remove,
             commands::proxy_list,
@@ -186,7 +163,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             app.manage(TruffleState {
                 node: RwLock::new(None),
                 pending_offers: Arc::new(RwLock::new(HashMap::new())),
-                crdt_docs: Arc::new(RwLock::new(HashMap::new())),
                 tcp_sockets: Mutex::new(HashMap::new()),
                 tcp_listeners: Mutex::new(HashMap::new()),
                 udp_sockets: Mutex::new(HashMap::new()),

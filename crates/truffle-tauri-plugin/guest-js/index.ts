@@ -144,13 +144,6 @@ export type FileTransferEvent =
       reason: string;
     };
 
-/** CRDT document event. Mirrors `CrdtDocEventJs` (serde tag = "type"). */
-export type CrdtDocEvent =
-  | { type: 'localChange'; docId: string }
-  | { type: 'remoteChange'; docId: string; from: string }
-  | { type: 'peerSynced'; docId: string; peerId: string }
-  | { type: 'peerLeft'; docId: string; peerId: string };
-
 /** Reverse-proxy config. Mirrors `ProxyConfigJs`. */
 export interface ProxyConfig {
   id: string;
@@ -288,70 +281,6 @@ export async function pullRoots(): Promise<string[]> {
 
 export async function clearPullRoots(): Promise<void> {
   return invoke('plugin:truffle|clear_pull_roots');
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CRDT documents
-// ═══════════════════════════════════════════════════════════════════════════
-
-export async function crdtDocCreate(docId: string): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_create', { docId });
-}
-
-export async function crdtDocDestroy(docId: string): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_destroy', { docId });
-}
-
-export async function crdtDocGetValue(docId: string): Promise<unknown> {
-  return invoke('plugin:truffle|crdt_doc_get_value', { docId });
-}
-
-export async function crdtDocMapInsert(
-  docId: string,
-  container: string,
-  key: string,
-  value: unknown,
-): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_map_insert', {
-    docId,
-    container,
-    key,
-    value,
-  });
-}
-
-export async function crdtDocListPush(
-  docId: string,
-  container: string,
-  value: unknown,
-): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_list_push', { docId, container, value });
-}
-
-export async function crdtDocTextInsert(
-  docId: string,
-  container: string,
-  pos: number,
-  text: string,
-): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_text_insert', {
-    docId,
-    container,
-    pos,
-    text,
-  });
-}
-
-export async function crdtDocCounterIncrement(
-  docId: string,
-  container: string,
-  value: number,
-): Promise<void> {
-  return invoke('plugin:truffle|crdt_doc_counter_increment', {
-    docId,
-    container,
-    value,
-  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -674,12 +603,6 @@ export async function onAuthRequired(
   callback: (url: string) => void,
 ): Promise<UnlistenFn> {
   return listen<string>('truffle://auth-required', (e) => callback(e.payload));
-}
-
-export async function onCrdtChange(
-  callback: (event: CrdtDocEvent) => void,
-): Promise<UnlistenFn> {
-  return listen<CrdtDocEvent>('truffle://crdt-change', (e) => callback(e.payload));
 }
 
 export async function onProxyEvent(
