@@ -18,7 +18,7 @@
   "packageManager": "pnpm@10.20.0",
   "type": "module",
   "scripts": {
-    "build": "pnpm -r --filter '!@vibecook/truffle-docs' run build",
+    "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "test:rust": "cargo test --workspace",
     "test:real": "cargo test -p truffle-core --tests -- --nocapture",
@@ -41,8 +41,6 @@
     "lint:fix": "eslint 'packages/*/src/**/*.ts' --fix",
     "format": "prettier --write 'packages/*/src/**/*.ts'",
     "format:check": "prettier --check 'packages/*/src/**/*.ts'",
-    "docs:dev": "pnpm --filter @vibecook/truffle-docs dev",
-    "docs:build": "pnpm --filter @vibecook/truffle-docs build",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm run build && changeset publish"

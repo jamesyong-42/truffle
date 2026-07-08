@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Truffle Docs</title>
+    <meta
+      name="description"
+      content="Truffle provides simple TCP, HTTP, UDP, WebSocket, QUIC, messaging, file transfer, and state sync APIs over Tailscale tsnet."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1d2528;
+        --muted: #5d686d;
+        --soft: #eef4f0;
+        --line: #d8e1dc;
+        --panel: #ffffff;
+        --code: #101819;
+        --code-line: #223033;
+        --accent: #0f766e;
+        --accent-2: #b45309;
+        --accent-3: #2f5d8f;
+        --shadow: 0 18px 50px rgb(22 36 33 / 10%);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(180deg, #f8fbf9 0, #ffffff 380px),
+          #ffffff;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.55;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      code,
+      pre {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 16px clamp(20px, 5vw, 72px);
+        border-bottom: 1px solid rgb(216 225 220 / 70%);
+        background: rgb(248 251 249 / 92%);
+        backdrop-filter: blur(12px);
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--ink);
+        font-weight: 750;
+        letter-spacing: 0;
+      }
+
+      .mark {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 1px solid #9ac7bd;
+        border-radius: 7px;
+        background: #d8f3ec;
+        color: #075e54;
+        font-size: 14px;
+      }
+
+      .topnav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        font-size: 14px;
+      }
+
+      .topnav a {
+        color: #2e3b3f;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.02fr) minmax(360px, 0.78fr);
+        gap: clamp(32px, 5vw, 72px);
+        align-items: center;
+        padding: 76px clamp(20px, 5vw, 72px) 56px;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 760;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 930px;
+        font-size: clamp(42px, 8vw, 82px);
+      }
+
+      h2 {
+        font-size: clamp(30px, 4vw, 44px);
+      }
+
+      h3 {
+        font-size: 20px;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .lede {
+        max-width: 780px;
+        margin-top: 22px;
+        color: var(--muted);
+        font-size: clamp(18px, 2.2vw, 22px);
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 28px;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 44px;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 16px;
+        color: var(--ink);
+        background: #ffffff;
+        font-weight: 680;
+        box-shadow: 0 8px 24px rgb(22 36 33 / 6%);
+      }
+
+      .button.primary {
+        border-color: #0f766e;
+        color: #ffffff;
+        background: #0f766e;
+      }
+
+      .terminal {
+        overflow: hidden;
+        border: 1px solid #1d3637;
+        border-radius: 8px;
+        background: var(--code);
+        color: #d8f3ec;
+        box-shadow: var(--shadow);
+      }
+
+      .terminal-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 38px;
+        padding: 0 14px;
+        border-bottom: 1px solid #223033;
+        color: #93a7a7;
+        font-size: 13px;
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #d86152;
+      }
+
+      .dot:nth-child(2) {
+        background: #d6a642;
+      }
+
+      .dot:nth-child(3) {
+        background: #4aa875;
+      }
+
+      pre {
+        margin: 0;
+        overflow: auto;
+        padding: 20px;
+        font-size: 13.5px;
+        line-height: 1.55;
+        tab-size: 2;
+      }
+
+      .shell {
+        color: #d6f3ee;
+      }
+
+      .section {
+        padding: 62px clamp(20px, 5vw, 72px);
+      }
+
+      .section.alt {
+        border-block: 1px solid var(--line);
+        background: #f5f8f6;
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 0.7fr) minmax(280px, 0.3fr);
+        gap: 24px;
+        align-items: end;
+        margin-bottom: 28px;
+      }
+
+      .section-head p {
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 20px;
+        background: var(--panel);
+      }
+
+      .card p {
+        margin-top: 10px;
+        color: var(--muted);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 26px;
+        border: 1px solid #a7cec5;
+        border-radius: 999px;
+        padding: 0 10px;
+        color: #0b655b;
+        background: #e5f6f2;
+        font-size: 12px;
+        font-weight: 720;
+      }
+
+      .recipe {
+        display: grid;
+        grid-template-columns: minmax(230px, 0.34fr) minmax(0, 0.66fr);
+        gap: 18px;
+        align-items: stretch;
+        margin-top: 18px;
+      }
+
+      .recipe-copy {
+        border-left: 4px solid var(--accent);
+        padding: 4px 4px 4px 18px;
+      }
+
+      .recipe-copy h3 {
+        margin-bottom: 8px;
+      }
+
+      .recipe-copy p {
+        color: var(--muted);
+      }
+
+      .recipe-copy code,
+      .inline-code {
+        border: 1px solid #d7e4de;
+        border-radius: 5px;
+        padding: 1px 5px;
+        background: #f7faf8;
+        color: #254348;
+        font-size: 0.92em;
+      }
+
+      .note {
+        margin-top: 18px;
+        border: 1px solid #e4d2ae;
+        border-radius: 8px;
+        padding: 16px 18px;
+        background: #fff9ed;
+        color: #6f4a0f;
+      }
+
+      .callout {
+        border: 1px solid #bad4e8;
+        border-radius: 8px;
+        padding: 18px;
+        background: #f0f7fc;
+      }
+
+      .callout p {
+        margin-top: 8px;
+        color: #3d5668;
+      }
+
+      .footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 32px clamp(20px, 5vw, 72px);
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 980px) {
+        .hero,
+        .section-head,
+        .recipe {
+          grid-template-columns: 1fr;
+        }
+
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .topnav {
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .hero {
+          padding-top: 42px;
+        }
+
+        h1 {
+          font-size: 40px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        pre {
+          padding: 16px;
+          font-size: 12.5px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./index.html" aria-label="Truffle home">
+        <span class="mark">tr</span>
+        <span>Truffle</span>
+      </a>
+      <nav class="topnav" aria-label="Primary navigation">
+        <a href="#quick-start">Quick start</a>
+        <a href="#transport-recipes">Transport recipes</a>
+        <a href="#higher-level">Higher-level APIs</a>
+        <a href="./api.html">API reference</a>
+        <a href="https://github.com/jamesyong-42/truffle">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Network programming over Tailscale tsnet</p>
+          <h1>Simple TCP, HTTP, UDP, WebSocket, and QUIC APIs for your private mesh.</h1>
+          <p class="lede">
+            Truffle gives Node.js apps a small set of familiar networking APIs that run across
+            devices on the same Tailscale tailnet. Start one mesh node, then open sockets, serve
+            HTTP, send datagrams, stream QUIC, exchange messages, sync state, or transfer files
+            without building a coordinator service.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#quick-start">Start with the API</a>
+            <a class="button" href="./api.html">Read the reference</a>
+          </div>
+        </div>
+
+        <div class="terminal" aria-label="Truffle quick start example">
+          <div class="terminal-header">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span>mesh.ts</span>
+          </div>
+          <pre><code>import { createMeshNode } from '@vibecook/truffle';
+
+const mesh = await createMeshNode({
+  appId: 'field-tools',
+  deviceName: 'alice-laptop',
+  onAuthRequired: (url) =&gt; {
+    console.log('Open this Tailscale auth URL:', url);
+  },
+});
+
+const server = mesh.net.createServer((socket) =&gt; {
+  socket.write('hello from ' + mesh.getLocalInfo().deviceName + '\n');
+  socket.pipe(socket);
+});
+
+server.listen(7000);
+
+const client = mesh.net.connect({ host: 'bob-laptop', port: 7000 });
+client.on('data', (chunk) =&gt; console.log(chunk.toString()));
+client.write('ping\n');</code></pre>
+        </div>
+      </section>
+
+      <section class="section alt" id="quick-start">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Quick start</p>
+            <h2>Create one mesh node, then use the protocol you already know.</h2>
+          </div>
+          <p>
+            The JavaScript package resolves the native addon and sidecar for you. On first run,
+            Truffle opens or reports a Tailscale auth URL, then keeps a tsnet-backed node running
+            inside your process.
+          </p>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">1. Install</span>
+            <h3>Add the package</h3>
+            <p>
+              Use Node.js 18 or newer. Add <code>@vibecook/truffle</code>. Add
+              <code>ws</code> only if you use the WebSocket namespace.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code class="shell">pnpm add @vibecook/truffle
+pnpm add ws # optional, only for mesh.ws</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">2. Start</span>
+            <h3>Join an app-scoped mesh</h3>
+            <p>
+              The <code>appId</code> is the isolation boundary. Devices with different app IDs do
+              not see each other as Truffle peers, even on the same tailnet.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>const mesh = await createMeshNode({
+  appId: 'notes',
+  deviceName: 'alice-laptop',
+  autoAuth: true,
+});
+
+console.log(mesh.getLocalInfo());
+console.table(await mesh.getPeers());</code></pre>
+          </div>
+        </div>
+
+        <div class="note">
+          Peer references can be stable device IDs, unique device ID prefixes, device names,
+          Tailscale hostnames, or Tailscale IPs. Names are convenient for examples; use device IDs
+          when your app needs stable identity.
+        </div>
+      </section>
+
+      <section class="section" id="transport-recipes">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Transport recipes</p>
+            <h2>The core value: familiar network APIs on top of tsnet.</h2>
+          </div>
+          <p>
+            These examples are intentionally small. Run the server side on one device and the client
+            side on another device using the same <code class="inline-code">appId</code>.
+          </p>
+        </div>
+
+        <div class="recipe" id="tcp">
+          <div class="recipe-copy">
+            <span class="badge">TCP</span>
+            <h3>Raw streams with a Node-style server and socket</h3>
+            <p>
+              <code>mesh.net</code> mirrors the useful parts of <code>node:net</code>. Sockets are
+              standard <code>stream.Duplex</code> objects, so existing stream code usually ports by
+              replacing the dial/listen layer.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>// Bob: listen on the mesh
+const server = mesh.net.createServer((socket) =&gt; {
+  socket.on('data', (chunk) =&gt; {
+    socket.write(Buffer.from('echo: ' + chunk.toString()));
+  });
+});
+server.listen(7000);
+
+// Alice: connect to Bob by device name, ID, hostname, or IP
+const socket = mesh.net.connect({ host: 'bob-laptop', port: 7000 });
+socket.on('data', (chunk) =&gt; console.log(chunk.toString()));
+socket.write('hello over private TCP');</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe" id="http">
+          <div class="recipe-copy">
+            <span class="badge">HTTP</span>
+            <h3>Serve ordinary node:http traffic over the mesh</h3>
+            <p>
+              Inbound HTTP is a stock <code>http.Server</code> fed by mesh TCP sockets. Outbound
+              HTTP uses <code>mesh.http.agent</code> or <code>fetchText()</code>.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>import http from 'node:http';
+
+// Bob: serve HTTP on mesh port 8080
+const app = http.createServer((req, res) =&gt; {
+  res.end(JSON.stringify({ ok: true, path: req.url }));
+});
+mesh.net
+  .createServer((socket) =&gt; app.emit('connection', socket))
+  .listen(8080);
+
+// Alice: request Bob over mesh TCP
+const res = await mesh.http.fetchText('bob-laptop', 8080, '/status');
+console.log(res.status, res.body);</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe" id="udp">
+          <div class="recipe-copy">
+            <span class="badge">UDP</span>
+            <h3>Datagrams for telemetry, presence, and lightweight signals</h3>
+            <p>
+              <code>mesh.dgram</code> keeps datagram boundaries and emits Node-style
+              <code>message</code> events. Keep payloads small; about 1,200 bytes is the practical
+              target for tailnet MTU.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>// Bob: receive datagrams
+const udp = mesh.dgram.createSocket();
+udp.on('message', (msg, rinfo) =&gt; {
+  console.log('from', rinfo.peerName ?? rinfo.address, msg.toString());
+});
+await udp.bind(9999);
+
+// Alice: send a datagram
+const sender = mesh.dgram.createSocket();
+await sender.bind();
+sender.send(Buffer.from('temperature=21.7'), 9999, 'bob-laptop');</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe" id="websocket">
+          <div class="recipe-copy">
+            <span class="badge">WebSocket</span>
+            <h3>Use the ws package across the private mesh</h3>
+            <p>
+              <code>mesh.ws</code> runs the standard <code>ws</code> package over Truffle TCP. It
+              is an optional peer dependency, so install <code>ws</code> in apps that use it.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>// Bob: WebSocket server
+const wss = await mesh.ws.createServer({ port: 7788, path: '/chat' });
+wss.on('connection', (ws) =&gt; {
+  ws.on('message', (data) =&gt; ws.send('echo: ' + data.toString()));
+});
+
+// Alice: WebSocket client
+const ws = await mesh.ws.connect('bob-laptop', 7788, '/chat');
+ws.once('open', () =&gt; ws.send('hello websocket'));
+ws.on('message', (data) =&gt; console.log(data.toString()));</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe" id="quic">
+          <div class="recipe-copy">
+            <span class="badge">QUIC</span>
+            <h3>Multiplexed streams without head-of-line blocking</h3>
+            <p>
+              <code>mesh.quic</code> is useful when one peer needs many concurrent reliable streams
+              over a single connection. Connections and incoming streams are async iterable.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>// Bob: echo every stream on every connection
+const quicServer = await mesh.quic.listen(9420);
+(async () =&gt; {
+  for await (const conn of quicServer) {
+    (async () =&gt; {
+      for await (const stream of conn.streams()) {
+        stream.pipe(stream);
+      }
+    })();
+  }
+})();
+
+// Alice: open a connection and one stream
+const conn = await mesh.quic.connect('bob-laptop', 9420);
+const stream = await conn.openStream();
+stream.on('data', (chunk) =&gt; console.log(chunk.toString()));
+stream.write('hello over quic');
+stream.end();</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section alt" id="higher-level">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Higher-level APIs</p>
+            <h2>Messaging, files, and state sync are built on the same mesh node.</h2>
+          </div>
+          <p>
+            Use raw transports when you want protocol control. Use these higher-level helpers when
+            you want common local-first app workflows with less protocol code.
+          </p>
+        </div>
+
+        <div class="grid">
+          <article class="card">
+            <span class="badge">Messages</span>
+            <h3>Namespaced app messages</h3>
+            <p>
+              Route JSON or byte payloads by namespace and subscribe with
+              <code>onMessage(namespace, callback)</code>.
+            </p>
+          </article>
+          <article class="card">
+            <span class="badge">Files</span>
+            <h3>Verified file transfer</h3>
+            <p>
+              Send, pull, accept, reject, and track progress. Transfers include SHA-256 verification.
+            </p>
+          </article>
+          <article class="card">
+            <span class="badge">State</span>
+            <h3>Device-owned synced stores</h3>
+            <p>
+              Each device publishes its own versioned JSON slice. Read local and remote slices by
+              device ID.
+            </p>
+          </article>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <h3>Messages</h3>
+            <p>
+              The payload is app-defined. If you pass JSON bytes, Truffle delivers a structured
+              JSON value to receivers.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>mesh.onMessage('chat', (msg) =&gt; {
+  console.log(msg.from, msg.payload.text);
+});
+
+const peer = (await mesh.getPeers())[0];
+await mesh.send(
+  peer.deviceId,
+  'chat',
+  Buffer.from(JSON.stringify({ text: 'hello' })),
+);</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <h3>File transfer</h3>
+            <p>
+              For push transfers, the receiver can manually accept offers or use
+              <code>autoAccept()</code>. Pull transfers are deny-by-default until roots are added.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>const files = mesh.fileTransfer();
+files.onEvent((event) =&gt; console.log(event.eventType, event.progress));
+files.onOffer((offer, responder) =&gt; {
+  responder.accept('/tmp/' + offer.fileName);
+});
+
+await files.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <h3>Synced store</h3>
+            <p>
+              Stores are scoped by ID. Each device owns one slice per store and can observe changes
+              from peers.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>const presence = mesh.syncedStore('presence');
+presence.onChange((event) =&gt; console.log(event));
+
+await presence.set({ status: 'editing', file: 'notes.md' });
+const allPresence = await presence.all();
+console.table(allPresence);</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Companion tools</p>
+            <h2>The CLI is useful, but the API is the product surface.</h2>
+          </div>
+          <p>
+            The <code>truffle</code> command can bring up a node, inspect peers, copy files, stream
+            events, and debug connectivity. It is helpful for development and operations; apps
+            should build directly on the API.
+          </p>
+        </div>
+
+        <div class="terminal">
+          <pre><code class="shell">truffle up --device-name alice-laptop
+truffle ls --long
+truffle ping bob-laptop
+truffle cp ./report.pdf bob-laptop:/tmp/
+truffle watch --json</code></pre>
+        </div>
+
+        <div class="callout" style="margin-top: 22px">
+          <h3>Next: reference details</h3>
+          <p>
+            See <a href="./api.html">API reference</a> for option shapes, method signatures,
+            transport caveats, native classes, React hooks, and lower-level handles.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Released under the MIT License.</span>
+      <span><a href="https://github.com/jamesyong-42/truffle">GitHub</a></span>
+    </footer>
+  </body>
+</html>

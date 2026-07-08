@@ -91,10 +91,8 @@ On first run, Truffle guides you through device naming and Tailscale auth, then 
 
 ## Learn more
 
-- [Getting Started](docs/guide/getting-started.md)
-- [CLI Reference](docs/guide/cli.md)
-- [Architecture](docs/guide/architecture.md)
-- [API docs](docs/api/index.md)
+- [API-first guide](docs/index.html)
+- [API reference](docs/api.html)
 - [RFCs](docs/rfcs/)
 
 ## Development

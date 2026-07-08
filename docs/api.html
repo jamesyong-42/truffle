@@ -1,0 +1,1157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Truffle API Reference</title>
+    <meta
+      name="description"
+      content="Reference for the @vibecook/truffle JavaScript API: createMeshNode, TCP, HTTP, UDP, WebSocket, QUIC, messaging, files, synced stores, proxy, and React hooks."
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #1d2528;
+        --muted: #5f6a70;
+        --line: #d8e1dc;
+        --panel: #ffffff;
+        --soft: #f4f8f6;
+        --code: #101819;
+        --accent: #0f766e;
+        --accent-2: #2f5d8f;
+        --warn: #9a5b13;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: #ffffff;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.55;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      code,
+      pre {
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 16px clamp(20px, 5vw, 64px);
+        border-bottom: 1px solid rgb(216 225 220 / 76%);
+        background: rgb(255 255 255 / 94%);
+        backdrop-filter: blur(12px);
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--ink);
+        font-weight: 750;
+      }
+
+      .mark {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        place-items: center;
+        border: 1px solid #9ac7bd;
+        border-radius: 7px;
+        background: #d8f3ec;
+        color: #075e54;
+        font-size: 14px;
+      }
+
+      .topnav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        font-size: 14px;
+      }
+
+      .topnav a {
+        color: #2e3b3f;
+      }
+
+      .hero {
+        padding: 56px clamp(20px, 5vw, 64px) 34px;
+        border-bottom: 1px solid var(--line);
+        background:
+          linear-gradient(180deg, #f7fbf9 0, #ffffff 100%),
+          #ffffff;
+      }
+
+      .eyebrow {
+        margin: 0 0 12px;
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 760;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4 {
+        margin: 0;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        max-width: 960px;
+        font-size: clamp(40px, 7vw, 72px);
+      }
+
+      h2 {
+        padding-top: 6px;
+        font-size: clamp(28px, 4vw, 40px);
+      }
+
+      h3 {
+        margin-top: 34px;
+        font-size: 23px;
+      }
+
+      h4 {
+        margin-top: 22px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0;
+      }
+
+      .lede {
+        max-width: 850px;
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: clamp(17px, 2vw, 21px);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        gap: 38px;
+        align-items: start;
+        padding: 34px clamp(20px, 5vw, 64px) 68px;
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 78px;
+        max-height: calc(100vh - 98px);
+        overflow: auto;
+        border-right: 1px solid var(--line);
+        padding-right: 22px;
+        font-size: 14px;
+      }
+
+      .sidebar strong {
+        display: block;
+        margin: 18px 0 8px;
+        color: #253438;
+      }
+
+      .sidebar a {
+        display: block;
+        padding: 5px 0;
+        color: #4b5a60;
+      }
+
+      .content {
+        min-width: 0;
+        max-width: 1020px;
+      }
+
+      section {
+        padding: 34px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      section:first-child {
+        padding-top: 0;
+      }
+
+      section:last-child {
+        border-bottom: 0;
+      }
+
+      .summary {
+        margin-top: 14px;
+        color: var(--muted);
+        font-size: 17px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 18px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 18px;
+        background: var(--panel);
+      }
+
+      .card h3 {
+        margin-top: 0;
+        font-size: 18px;
+      }
+
+      .card p {
+        margin-top: 8px;
+        color: var(--muted);
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border: 1px solid #a7cec5;
+        border-radius: 999px;
+        padding: 0 9px;
+        color: #0b655b;
+        background: #e5f6f2;
+        font-size: 12px;
+        font-weight: 720;
+      }
+
+      pre {
+        margin: 16px 0 0;
+        overflow: auto;
+        border-radius: 8px;
+        padding: 18px;
+        background: var(--code);
+        color: #d8f3ec;
+        font-size: 13.5px;
+        line-height: 1.55;
+      }
+
+      p code,
+      li code,
+      td code {
+        border: 1px solid #d7e4de;
+        border-radius: 5px;
+        padding: 1px 5px;
+        background: #f7faf8;
+        color: #254348;
+        font-size: 0.92em;
+      }
+
+      table {
+        width: 100%;
+        margin-top: 18px;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px 12px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: #2d3a3f;
+        background: var(--soft);
+        font-weight: 720;
+      }
+
+      ul {
+        margin: 12px 0 0;
+        padding-left: 20px;
+      }
+
+      li + li {
+        margin-top: 6px;
+      }
+
+      .note,
+      .warning {
+        margin-top: 16px;
+        border-radius: 8px;
+        padding: 14px 16px;
+      }
+
+      .note {
+        border: 1px solid #bad4e8;
+        background: #f0f7fc;
+        color: #3d5668;
+      }
+
+      .warning {
+        border: 1px solid #e4d2ae;
+        background: #fff9ed;
+        color: #6f4a0f;
+      }
+
+      .method {
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 18px;
+        background: #ffffff;
+      }
+
+      .method h4 {
+        margin-top: 0;
+      }
+
+      .method p {
+        margin-top: 8px;
+        color: var(--muted);
+      }
+
+      .footer {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 32px clamp(20px, 5vw, 64px);
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 980px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          position: static;
+          max-height: none;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          padding: 0 0 20px;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        pre {
+          padding: 16px;
+          font-size: 12.5px;
+        }
+
+        th,
+        td {
+          padding: 9px 8px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./index.html" aria-label="Truffle home">
+        <span class="mark">tr</span>
+        <span>Truffle</span>
+      </a>
+      <nav class="topnav" aria-label="Primary navigation">
+        <a href="./index.html">Guide</a>
+        <a href="#mesh-node">Mesh node</a>
+        <a href="#tcp">TCP</a>
+        <a href="#udp">UDP</a>
+        <a href="#websocket">WebSocket</a>
+        <a href="#quic">QUIC</a>
+      </nav>
+    </header>
+
+    <header class="hero">
+      <p class="eyebrow">API reference</p>
+      <h1>@vibecook/truffle</h1>
+      <p class="lede">
+        The JavaScript API starts a Tailscale tsnet-backed mesh node and exposes familiar
+        network-programming namespaces for TCP, HTTP, UDP, WebSocket, and QUIC, plus higher-level
+        messaging, file transfer, synced stores, and diagnostics.
+      </p>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar" aria-label="API sections">
+        <strong>Start</strong>
+        <a href="#install">Install</a>
+        <a href="#mesh-node">createMeshNode</a>
+        <a href="#identity">Identity and peers</a>
+        <strong>Transports</strong>
+        <a href="#tcp">TCP</a>
+        <a href="#http">HTTP</a>
+        <a href="#udp">UDP</a>
+        <a href="#websocket">WebSocket</a>
+        <a href="#quic">QUIC</a>
+        <strong>App APIs</strong>
+        <a href="#messaging">Messaging</a>
+        <a href="#files">File transfer</a>
+        <a href="#stores">Synced stores</a>
+        <a href="#proxy">Reverse proxy</a>
+        <strong>Other</strong>
+        <a href="#react">React hooks</a>
+        <a href="#native">Native classes</a>
+        <a href="#cli">CLI companion</a>
+      </aside>
+
+      <div class="content">
+        <section id="install">
+          <p class="eyebrow">Install and import</p>
+          <h2>Install</h2>
+          <p class="summary">
+            The main package is <code>@vibecook/truffle</code>. WebSocket support is implemented
+            through the standard <code>ws</code> package and is optional.
+          </p>
+          <pre><code>pnpm add @vibecook/truffle
+pnpm add ws # optional, only for mesh.ws</code></pre>
+          <pre><code>import {
+  createMeshNode,
+  resolveSidecarPath,
+  NapiNode,
+} from '@vibecook/truffle';</code></pre>
+          <div class="note">
+            Requires Node.js 18 or newer and a Tailscale tailnet. First run authenticates through a
+            Tailscale URL unless you provide an auth key.
+          </div>
+        </section>
+
+        <section id="mesh-node">
+          <p class="eyebrow">Mesh node</p>
+          <h2>createMeshNode(options)</h2>
+          <p class="summary">
+            Creates and starts a Truffle node, resolves the sidecar binary, wires the Tailscale auth
+            callback before startup, and attaches transport namespaces.
+          </p>
+          <pre><code>const mesh = await createMeshNode({
+  appId: 'my-app',
+  deviceName: 'alice-laptop',
+  onAuthRequired: (url) =&gt; console.log(url),
+});</code></pre>
+
+          <h3>CreateMeshNodeOptions</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Option</th>
+                <th>Type</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>appId</code></td>
+                <td><code>string</code></td>
+                <td>
+                  Required app namespace. Must match <code>^[a-z][a-z0-9-]{1,31}$</code>.
+                  Peers only see nodes with the same app ID.
+                </td>
+              </tr>
+              <tr>
+                <td><code>deviceName</code></td>
+                <td><code>string</code></td>
+                <td>Human-readable device name. Defaults to the OS hostname.</td>
+              </tr>
+              <tr>
+                <td><code>deviceId</code></td>
+                <td><code>string</code></td>
+                <td>Stable per-device ULID override. Generated and persisted when omitted.</td>
+              </tr>
+              <tr>
+                <td><code>sidecarPath</code></td>
+                <td><code>string</code></td>
+                <td>Override sidecar path. Defaults to <code>resolveSidecarPath()</code>.</td>
+              </tr>
+              <tr>
+                <td><code>stateDir</code></td>
+                <td><code>string</code></td>
+                <td>Tailscale state directory. Defaults under user data for the app/device.</td>
+              </tr>
+              <tr>
+                <td><code>authKey</code></td>
+                <td><code>string</code></td>
+                <td>Tailscale auth key for headless or CI startup.</td>
+              </tr>
+              <tr>
+                <td><code>ephemeral</code></td>
+                <td><code>boolean</code></td>
+                <td>Whether the node is removed from the tailnet on shutdown.</td>
+              </tr>
+              <tr>
+                <td><code>wsPort</code></td>
+                <td><code>number</code></td>
+                <td>Internal WebSocket listener port. Defaults to 9417.</td>
+              </tr>
+              <tr>
+                <td><code>autoAuth</code></td>
+                <td><code>boolean</code></td>
+                <td>Auto-open the Tailscale auth URL. Defaults to true.</td>
+              </tr>
+              <tr>
+                <td><code>openUrl</code></td>
+                <td><code>(url) =&gt; void</code></td>
+                <td>Custom URL opener, useful in Electron or other desktop shells.</td>
+              </tr>
+              <tr>
+                <td><code>onAuthRequired</code></td>
+                <td><code>(url) =&gt; void</code></td>
+                <td>Called when Tailscale auth is required.</td>
+              </tr>
+              <tr>
+                <td><code>onPeerChange</code></td>
+                <td><code>(event) =&gt; void</code></td>
+                <td>Called for peer lifecycle events after startup.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>MeshNode shape</h3>
+          <pre><code>type MeshNode = NapiNode &amp; {
+  net: TruffleNet;
+  http: TruffleHttp;
+  quic: TruffleQuic;
+  dgram: TruffleDgram;
+  ws: TruffleWs;
+  native: NapiNode;
+};</code></pre>
+        </section>
+
+        <section id="identity">
+          <p class="eyebrow">Identity and discovery</p>
+          <h2>Peers are app-scoped devices</h2>
+          <p class="summary">
+            Use stable <code>deviceId</code> values for identity and authorization. Names are
+            convenient for examples and user-facing selection.
+          </p>
+
+          <div class="method">
+            <h4>mesh.getLocalInfo(): NapiNodeIdentity</h4>
+            <p>Returns local <code>appId</code>, <code>deviceId</code>, <code>deviceName</code>,
+              Tailscale hostname, Tailscale ID, DNS name, and IP when available.</p>
+          </div>
+
+          <div class="method">
+            <h4>await mesh.getPeers(): NapiPeer[]</h4>
+            <p>
+              Returns known peers with <code>deviceId</code>, <code>deviceName</code>,
+              <code>ip</code>, <code>online</code>, <code>wsConnected</code>,
+              <code>connectionType</code>, optional OS and last-seen data.
+            </p>
+          </div>
+
+          <div class="method">
+            <h4>await mesh.resolvePeerId(peerRef): string</h4>
+            <p>
+              Resolves a peer reference to a canonical device ID. Peer references can be device IDs,
+              unique prefixes of at least four characters, device names, Tailscale hostnames, or
+              Tailscale IPs.
+            </p>
+          </div>
+
+          <div class="method">
+            <h4>await mesh.ping(peerRef): NapiPingResult</h4>
+            <p>Returns latency in milliseconds, connection type, and peer endpoint when known.</p>
+          </div>
+
+          <div class="method">
+            <h4>await mesh.health(): NapiHealthInfo</h4>
+            <p>Returns Tailscale backend state, health warnings, key expiry, and a healthy flag.</p>
+          </div>
+        </section>
+
+        <section id="tcp">
+          <p class="eyebrow">Transport</p>
+          <h2>mesh.net: TCP streams</h2>
+          <p class="summary">
+            Node-style TCP over the mesh. <code>TruffleSocket</code> is a
+            <code>stream.Duplex</code>; <code>TruffleServer</code> emits
+            <code>listening</code>, <code>connection</code>, <code>close</code>, and
+            <code>error</code>.
+          </p>
+          <pre><code>const server = mesh.net.createServer((socket) =&gt; {
+  socket.pipe(socket);
+});
+server.listen(7000);
+
+const socket = mesh.net.connect({ host: 'bob-laptop', port: 7000 });
+socket.on('connect', () =&gt; socket.write('ping'));
+socket.on('data', (chunk) =&gt; console.log(chunk.toString()));</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>mesh.net.connect(options)</code></td>
+                <td>Open a TCP stream to <code>{ host, port }</code>. Returns immediately.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.net.connect(port, host)</code></td>
+                <td>Node-compatible overload.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.net.createConnection(...)</code></td>
+                <td>Alias of <code>connect</code>.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.net.createServer(listener)</code></td>
+                <td>Create a mesh TCP server. Call <code>listen(port)</code> to bind.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="http">
+          <p class="eyebrow">Transport</p>
+          <h2>mesh.http: HTTP over mesh TCP</h2>
+          <p class="summary">
+            Outbound HTTP is a <code>node:http</code> agent that dials peers through
+            <code>mesh.net</code>. Inbound HTTP uses an ordinary <code>http.Server</code>.
+          </p>
+          <pre><code>import http from 'node:http';
+
+const app = http.createServer((req, res) =&gt; res.end('ok'));
+mesh.net
+  .createServer((socket) =&gt; app.emit('connection', socket))
+  .listen(8080);
+
+const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Member</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>mesh.http.agent</code></td>
+                <td>Shared <code>MeshAgent</code> instance for <code>http.request</code>.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.http.Agent</code></td>
+                <td>Class for constructing a custom agent, for example with keep-alive options.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.http.request(...)</code></td>
+                <td><code>http.request</code> with the mesh agent injected by default.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.http.get(...)</code></td>
+                <td><code>http.get</code> with the mesh agent injected by default.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.http.fetchText(peer, port, path)</code></td>
+                <td>GET helper that buffers the response body as UTF-8 text.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="udp">
+          <p class="eyebrow">Transport</p>
+          <h2>mesh.dgram: UDP datagrams</h2>
+          <p class="summary">
+            A Node-style datagram API over the mesh. Datagrams preserve message boundaries and emit
+            <code>message</code>, <code>listening</code>, <code>error</code>, and
+            <code>close</code>.
+          </p>
+          <pre><code>const sock = mesh.dgram.createSocket();
+sock.on('message', (msg, rinfo) =&gt; {
+  console.log(rinfo.peerName ?? rinfo.address, msg.toString());
+});
+await sock.bind(9999);
+
+sock.send(Buffer.from('ping'), 9999, 'bob-laptop');</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>mesh.dgram.createSocket()</code></td>
+                <td>Create an unbound UDP socket.</td>
+              </tr>
+              <tr>
+                <td><code>await socket.bind(port = 0)</code></td>
+                <td>Bind to a mesh port and start the receive pump.</td>
+              </tr>
+              <tr>
+                <td><code>socket.send(msg, port, address, callback?)</code></td>
+                <td>Send to a peer reference and port. Call <code>bind()</code> first.</td>
+              </tr>
+              <tr>
+                <td><code>socket.close(callback?)</code></td>
+                <td>Close the socket and emit <code>close</code> once.</td>
+              </tr>
+              <tr>
+                <td><code>socket.address()</code></td>
+                <td>Returns an object with the bound port. Mesh sockets have no local IP.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="warning">
+            UDP is unreliable and unordered. Keep payloads around 1,200 bytes or smaller to avoid
+            tailnet MTU fragmentation problems.
+          </div>
+        </section>
+
+        <section id="websocket">
+          <p class="eyebrow">Transport</p>
+          <h2>mesh.ws: WebSocket over mesh TCP</h2>
+          <p class="summary">
+            Thin wrappers over the standard <code>ws</code> package. The package is optional and
+            loaded lazily, so install it only in apps that use this namespace.
+          </p>
+          <pre><code>const wss = await mesh.ws.createServer({ port: 7788, path: '/chat' });
+wss.on('connection', (ws, req) =&gt; {
+  ws.on('message', (data) =&gt; ws.send('echo: ' + data.toString()));
+});
+
+const ws = await mesh.ws.connect('bob-laptop', 7788, '/chat');
+ws.once('open', () =&gt; ws.send('hello'));</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>await mesh.ws.connect(host, port, path?, options?)</code></td>
+                <td>Return a connecting <code>ws</code> client. Wait for its <code>open</code> event.</td>
+              </tr>
+              <tr>
+                <td><code>await mesh.ws.createServer({ port, path? })</code></td>
+                <td>Start a WebSocket server on a mesh port. Returns a <code>ws</code> server with a <code>port</code> property.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="quic">
+          <p class="eyebrow">Transport</p>
+          <h2>mesh.quic: multiplexed streams</h2>
+          <p class="summary">
+            QUIC connections carry many concurrent bidirectional byte streams. Streams are
+            <code>stream.Duplex</code> instances; connections and servers are async iterable.
+          </p>
+          <pre><code>const server = await mesh.quic.listen(9420);
+(async () =&gt; {
+  for await (const conn of server.connections()) {
+    (async () =&gt; {
+      for await (const stream of conn.streams()) {
+        stream.pipe(stream);
+      }
+    })();
+  }
+})();
+
+const conn = await mesh.quic.connect('bob-laptop', 9420);
+const stream = await conn.openStream();
+stream.write('hello');
+stream.end();</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method or class</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>await mesh.quic.connect(host, port)</code></td>
+                <td>Open a QUIC connection to a peer.</td>
+              </tr>
+              <tr>
+                <td><code>await mesh.quic.listen(port)</code></td>
+                <td>Listen for QUIC connections. Use an explicit port.</td>
+              </tr>
+              <tr>
+                <td><code>conn.openStream()</code></td>
+                <td>Open a bidirectional stream.</td>
+              </tr>
+              <tr>
+                <td><code>conn.acceptStream()</code></td>
+                <td>Accept the next peer-opened stream, or <code>null</code> after close.</td>
+              </tr>
+              <tr>
+                <td><code>conn.streams()</code></td>
+                <td>Async iterator over peer-opened streams.</td>
+              </tr>
+              <tr>
+                <td><code>server.connections()</code></td>
+                <td>Async iterator over incoming connections.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="warning">
+            Ports 443 and 9417 are reserved. QUIC port 0 is not supported over the tsnet relay.
+          </div>
+        </section>
+
+        <section id="messaging">
+          <p class="eyebrow">Application API</p>
+          <h2>Namespaced messaging</h2>
+          <p class="summary">
+            Messages are routed by namespace and sent over Truffle's internal session transport.
+            JSON bytes are delivered as structured JSON payloads; other bytes are delivered as byte
+            arrays.
+          </p>
+          <pre><code>mesh.onMessage('chat', (msg) =&gt; {
+  console.log(msg.from, msg.msgType, msg.payload);
+});
+
+await mesh.send(
+  peer.deviceId,
+  'chat',
+  Buffer.from(JSON.stringify({ text: 'hello' })),
+);
+
+await mesh.broadcast(
+  'chat',
+  Buffer.from(JSON.stringify({ text: 'hello everyone' })),
+);</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>await mesh.send(peerId, namespace, data)</code></td>
+                <td>Send to one peer. Lazily establishes a session connection if needed.</td>
+              </tr>
+              <tr>
+                <td><code>await mesh.broadcast(namespace, data)</code></td>
+                <td>Broadcast to currently connected peers. It does not lazy-connect peers.</td>
+              </tr>
+              <tr>
+                <td><code>mesh.onMessage(namespace, callback)</code></td>
+                <td>Subscribe to messages in one namespace.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="files">
+          <p class="eyebrow">Application API</p>
+          <h2>File transfer</h2>
+          <p class="summary">
+            <code>mesh.fileTransfer()</code> returns a file-transfer handle for push, pull, offers,
+            progress events, max-size policy, and pull-root policy.
+          </p>
+          <pre><code>const ft = mesh.fileTransfer();
+
+ft.onOffer((offer, responder) =&gt; {
+  responder.accept('/tmp/' + offer.fileName);
+});
+
+ft.onEvent((event) =&gt; console.log(event.eventType, event.progress));
+
+await ft.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>sendFile(peerId, localPath, remotePath)</code></td>
+                <td>Push a local file to a peer. Resolves with bytes, SHA-256, and elapsed time.</td>
+              </tr>
+              <tr>
+                <td><code>pullFile(peerId, remotePath, localPath)</code></td>
+                <td>Pull a file from a peer into a local path.</td>
+              </tr>
+              <tr>
+                <td><code>autoAccept(outputDir)</code></td>
+                <td>Accept every incoming offer into a directory.</td>
+              </tr>
+              <tr>
+                <td><code>autoReject()</code></td>
+                <td>Reject every incoming offer.</td>
+              </tr>
+              <tr>
+                <td><code>onOffer((offer, responder) =&gt; ...)</code></td>
+                <td>Manually accept or reject incoming offers.</td>
+              </tr>
+              <tr>
+                <td><code>onEvent(callback)</code></td>
+                <td>Subscribe to transfer lifecycle and progress events.</td>
+              </tr>
+              <tr>
+                <td><code>setMaxTransferSize(bytes)</code></td>
+                <td>Set a maximum allowed transfer size.</td>
+              </tr>
+              <tr>
+                <td><code>addPullRoot(root)</code></td>
+                <td>Allow files under a canonicalized directory to be served to pull requests.</td>
+              </tr>
+              <tr>
+                <td><code>pullRoots()</code>, <code>clearPullRoots()</code></td>
+                <td>Inspect or clear the pull-serving allowlist.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="stores">
+          <p class="eyebrow">Application API</p>
+          <h2>Synced stores</h2>
+          <p class="summary">
+            A synced store holds device-owned JSON slices. Each device updates its own slice and
+            observes slices from peers.
+          </p>
+          <pre><code>const store = mesh.syncedStore('presence');
+
+store.onChange((event) =&gt; console.log(event));
+await store.set({ status: 'online', file: 'notes.md' });
+
+console.log(await store.local());
+console.table(await store.all());</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>set(data)</code></td>
+                <td>Update this device's JSON slice and broadcast it.</td>
+              </tr>
+              <tr>
+                <td><code>local()</code></td>
+                <td>Return this device's slice data or <code>null</code>.</td>
+              </tr>
+              <tr>
+                <td><code>get(deviceId)</code></td>
+                <td>Return one peer slice or <code>null</code>.</td>
+              </tr>
+              <tr>
+                <td><code>all()</code></td>
+                <td>Return all known local and remote slices.</td>
+              </tr>
+              <tr>
+                <td><code>deviceIds()</code></td>
+                <td>Return device IDs that currently have data in the store.</td>
+              </tr>
+              <tr>
+                <td><code>version()</code></td>
+                <td>Return the current local version number.</td>
+              </tr>
+              <tr>
+                <td><code>onChange(callback)</code></td>
+                <td>Subscribe to local and peer slice events.</td>
+              </tr>
+              <tr>
+                <td><code>stop()</code></td>
+                <td>Stop the store and cancel event-forwarding tasks.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="proxy">
+          <p class="eyebrow">Application API</p>
+          <h2>Reverse proxy</h2>
+          <p class="summary">
+            <code>mesh.proxy()</code> exposes local services on mesh ports and can announce them for
+            discovery.
+          </p>
+          <pre><code>const proxy = mesh.proxy();
+const info = await proxy.add({
+  id: 'local-api',
+  name: 'Local API',
+  listenPort: 8443,
+  targetHost: 'localhost',
+  targetPort: 3000,
+  targetScheme: 'http',
+  announce: true,
+});</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>add(config)</code></td>
+                <td>Add a reverse proxy and return its URL and status.</td>
+              </tr>
+              <tr>
+                <td><code>remove(id)</code></td>
+                <td>Remove a proxy by ID.</td>
+              </tr>
+              <tr>
+                <td><code>list()</code></td>
+                <td>List active proxies.</td>
+              </tr>
+              <tr>
+                <td><code>onEvent(callback)</code></td>
+                <td>Subscribe to proxy started, stopped, and error events.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="react">
+          <p class="eyebrow">React</p>
+          <h2>@vibecook/truffle-react</h2>
+          <p class="summary">
+            React hooks are thin helpers around an already-started <code>NapiNode</code> or
+            <code>MeshNode</code>.
+          </p>
+          <pre><code>import { useMesh, useAuth, useSyncedStore } from '@vibecook/truffle-react';
+
+function Peers({ node }) {
+  const { peers, send, broadcast } = useMesh(node);
+  const auth = useAuth(node);
+  const presence = useSyncedStore(node, 'presence');
+}</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Hook</th>
+                <th>Returns</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>useMesh(node)</code></td>
+                <td>Peers, local info, started flag, JSON send helper, JSON broadcast helper.</td>
+              </tr>
+              <tr>
+                <td><code>useAuth(node)</code></td>
+                <td>Auth status, auth URL, and boolean convenience flags.</td>
+              </tr>
+              <tr>
+                <td><code>useSyncedStore&lt;T&gt;(node, storeId)</code></td>
+                <td>Local data, all slices, device IDs, version, and a setter.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="native">
+          <p class="eyebrow">Lower-level handles</p>
+          <h2>Native classes</h2>
+          <p class="summary">
+            The package re-exports classes and types from <code>@vibecook/truffle-native</code> for
+            apps that need the lower-level pull-model handles directly.
+          </p>
+          <div class="grid">
+            <div class="card">
+              <span class="tag">Node</span>
+              <h3>NapiNode</h3>
+              <p>Manual lifecycle, discovery, messaging, raw TCP/UDP/QUIC, file transfer, proxy, and synced stores.</p>
+            </div>
+            <div class="card">
+              <span class="tag">TCP</span>
+              <h3>NapiTcpSocket, NapiTcpListener</h3>
+              <p>Pull-model raw TCP handles. The high-level package wraps these as streams.</p>
+            </div>
+            <div class="card">
+              <span class="tag">UDP</span>
+              <h3>NapiUdpSocket</h3>
+              <p>Raw datagram send and receive handle.</p>
+            </div>
+            <div class="card">
+              <span class="tag">QUIC</span>
+              <h3>NapiQuicConnection, NapiQuicListener, NapiQuicStream</h3>
+              <p>Raw QUIC connection, listener, and stream handles.</p>
+            </div>
+          </div>
+          <div class="note">
+            Most application code should start with <code>createMeshNode()</code> and the
+            <code>mesh.net</code>, <code>mesh.http</code>, <code>mesh.dgram</code>,
+            <code>mesh.ws</code>, and <code>mesh.quic</code> namespaces.
+          </div>
+        </section>
+
+        <section id="cli">
+          <p class="eyebrow">Companion</p>
+          <h2>CLI commands</h2>
+          <p class="summary">
+            The CLI is useful for manual operations and debugging, but it is not the main
+            integration surface for apps.
+          </p>
+          <pre><code>truffle
+truffle up --device-name alice-laptop
+truffle down
+truffle status --json
+truffle ls --long
+truffle ping bob-laptop -c 4
+truffle tcp bob-laptop:7000
+truffle send bob-laptop "hello"
+truffle cp ./report.pdf bob-laptop:/tmp/
+truffle watch --json
+truffle wait bob-laptop --timeout 30
+truffle recv --from bob-laptop --timeout 30
+truffle proxy add --name api --target-port 3000 --listen-port 8443
+truffle proxy list
+truffle doctor
+truffle update</code></pre>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span>Released under the MIT License.</span>
+      <span><a href="https://github.com/jamesyong-42/truffle">GitHub</a></span>
+    </footer>
+  </body>
+</html>
