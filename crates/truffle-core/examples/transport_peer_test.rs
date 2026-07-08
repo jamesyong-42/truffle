@@ -110,6 +110,7 @@ async fn create_provider(role: &str) -> TailscaleProvider {
         auth_key: std::env::var("TS_AUTHKEY").ok(),
         ephemeral: None,
         tags: None,
+        idle_timeout_secs: None,
     };
 
     let mut provider = TailscaleProvider::new(config);

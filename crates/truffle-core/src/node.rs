@@ -55,10 +55,11 @@ use crate::envelope::{Envelope, EnvelopeError};
 use crate::file_transfer::{self, FileTransferState};
 use crate::identity::{self, AppId, DeviceId, DeviceName};
 use crate::network::tailscale::{TailscaleConfig, TailscaleProvider};
-use crate::network::{HealthInfo, NetworkProvider, NetworkUdpSocket, NodeIdentity, PingResult};
+use crate::network::{DialOpts, HealthInfo, NetworkProvider, NodeIdentity, PingResult};
 use crate::session::{PeerEvent, PeerRegistry, PeerState};
+use crate::transport::quic::{QuicConnection, QuicListener};
 use crate::transport::websocket::WebSocketTransport;
-use crate::transport::{RawListener, WsConfig};
+use crate::transport::{DatagramSocket, RawListener, WsConfig};
 
 // ---------------------------------------------------------------------------
 // NamespacedMessage — public message type for subscribers
@@ -203,6 +204,10 @@ pub enum NodeError {
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
+    /// The port is reserved by truffle's own listeners.
+    #[error("port {0} is reserved by truffle (443 = sidecar TLS, or the session WebSocket port)")]
+    ReservedPort(u16),
+
     /// The node has been stopped.
     #[error("node stopped")]
     Stopped,
@@ -255,6 +260,9 @@ pub struct Node<N: NetworkProvider + 'static> {
     /// State directory for persistence (e.g., CRDT backends). Empty path
     /// when constructed via `from_parts` (tests); set by the builder.
     state_dir: PathBuf,
+    /// The session WebSocket listen port (reserved against raw listeners).
+    /// Defaults to 9417 in `from_parts`; set by the builder.
+    ws_port: u16,
     /// Reverse proxy subsystem state.
     pub(crate) proxy_state: crate::proxy::ProxyState,
     /// Set once [`stop`](Self::stop) has completed teardown. Makes further
@@ -287,6 +295,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             namespace_filters: namespace_filters.clone(),
             file_transfer_state: FileTransferState::new(),
             state_dir: PathBuf::new(),
+            ws_port: 9417,
             proxy_state: crate::proxy::ProxyState::new(),
             stopped: std::sync::atomic::AtomicBool::new(false),
         };
@@ -471,6 +480,13 @@ impl<N: NetworkProvider + 'static> Node<N> {
         self
     }
 
+    /// Record the session WebSocket port (called by the builder) so the
+    /// reserved-port guard tracks a customized `ws_port`.
+    pub(crate) fn with_ws_port(mut self, port: u16) -> Self {
+        self.ws_port = port;
+        self
+    }
+
     /// The state directory for persistence backends.
     ///
     /// Returns an empty path for test nodes created via `from_parts`.
@@ -523,17 +539,99 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Includes peers that are online but not yet connected (no active WS).
     /// This information comes from Layer 3 peer discovery.
     pub async fn peers(&self) -> Vec<Peer> {
+        let app_id = self.network.local_identity().app_id;
         self.session
             .peers()
             .await
             .into_iter()
-            .map(Peer::from)
+            .map(|s| {
+                // Before any hello, `device_name` falls back to the full
+                // Layer 3 hostname; strip it to the bare device-name slug so
+                // raw-transport-only peers read like `getLocalInfo()` names
+                // (asymmetry found by the RFC 021 cross-machine smoke test).
+                let bare = s
+                    .identity
+                    .is_none()
+                    .then(|| hostname_slug(&s.name, &app_id).map(str::to_string))
+                    .flatten();
+                let mut peer = Peer::from(s);
+                if let Some(bare) = bare {
+                    peer.device_name = bare;
+                }
+                peer
+            })
             .collect()
     }
 
     /// Subscribe to peer change events (joined, left, connected, etc.).
     pub fn on_peer_change(&self) -> broadcast::Receiver<PeerEvent> {
         self.session.on_peer_change()
+    }
+
+    /// Resolve any accepted peer identifier form to the peer's current
+    /// session state.
+    ///
+    /// The single resolution path shared by
+    /// [`resolve_peer_id`](Self::resolve_peer_id), [`ping`](Self::ping),
+    /// and the raw transport methods. Accepts the identifier forms
+    /// documented on `resolve_peer_id`, plus the peer's Tailscale IP.
+    pub(crate) async fn resolve_peer(&self, peer_ref: &str) -> Result<PeerState, NodeError> {
+        let peers = self.session.peers().await;
+
+        // Direct matches first — device_id, device_name, hostname,
+        // tailscale_id, IP — so deterministic inputs always take the
+        // fast path.
+        for p in &peers {
+            if let Some(identity) = p.identity.as_ref() {
+                if identity.device_id == peer_ref || identity.device_name == peer_ref {
+                    return Ok(p.clone());
+                }
+            }
+            if p.id == peer_ref || p.name == peer_ref || p.ip.to_string() == peer_ref {
+                return Ok(p.clone());
+            }
+        }
+
+        // Second pass: bare device name for peers that have not completed a
+        // hello yet (raw-transport-only contact — no WS envelope traffic).
+        // Layer 3 hostnames follow `truffle-{app_id}-{slug(device_name)}`
+        // (RFC 017), so match the slugged input against the hostname's slug
+        // part; slugging the input makes "EC2 Smoke" match "ec2-smoke".
+        let app_id = self.network.local_identity().app_id;
+        let ref_slug = identity::slug(peer_ref, 255);
+        if !ref_slug.is_empty() {
+            for p in &peers {
+                if hostname_slug(&p.name, &app_id) == Some(ref_slug.as_str()) {
+                    return Ok(p.clone());
+                }
+            }
+        }
+
+        // Prefix match on device_id (require at least 4 chars and a single
+        // unambiguous hit). This matches the CLI affordance of typing just
+        // the first few characters of a ULID.
+        if peer_ref.len() >= 4 {
+            let mut hits = peers.iter().filter(|p| {
+                p.identity
+                    .as_ref()
+                    .map(|i| i.device_id.starts_with(peer_ref))
+                    .unwrap_or(false)
+            });
+            if let (Some(hit), None) = (hits.next(), hits.next()) {
+                return Ok(hit.clone());
+            }
+        }
+
+        Err(NodeError::PeerNotFound(peer_ref.to_string()))
+    }
+
+    /// Resolve a peer identifier to the peer's Tailscale IP address.
+    ///
+    /// Accepts the same identifier forms as
+    /// [`resolve_peer_id`](Self::resolve_peer_id). Used by the FFI layers
+    /// to address datagram sends by peer name.
+    pub async fn resolve_peer_ip(&self, peer_ref: &str) -> Result<IpAddr, NodeError> {
+        Ok(self.resolve_peer(peer_ref).await?.ip)
     }
 
     /// Resolve a peer identifier to the canonical per-device ULID
@@ -544,56 +642,22 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// - a unique prefix of the `device_id` (at least 4 characters; must
     ///   match exactly one known peer)
     /// - the human-readable `device_name` from the hello
+    /// - the bare device name of a peer that has not helloed yet (matched
+    ///   via the `truffle-{app_id}-{slug}` hostname convention)
     /// - the Layer 3 Tailscale hostname (the sanitised slug) — legacy
     /// - the Tailscale stable ID — escape hatch for diagnostics
+    /// - the Tailscale IP address (e.g. `100.x.x.x`)
     ///
-    /// The returned string is always a `device_id`, so it is safe to feed
-    /// back into `Node::send` or any other method that takes a peer
+    /// The returned string is always a `device_id` (or the Tailscale
+    /// stable ID when no hello identity is known yet), so it is safe to
+    /// feed back into `Node::send` or any other method that takes a peer
     /// identifier.
     pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
-        let peers = self.session.peers().await;
-
-        // Direct matches first — device_id, device_name, hostname,
-        // tailscale_id — so deterministic inputs always take the fast path.
-        for p in &peers {
-            if let Some(identity) = p.identity.as_ref() {
-                if identity.device_id == peer_id || identity.device_name == peer_id {
-                    return Ok(identity.device_id.clone());
-                }
-            }
-            if p.id == peer_id || p.name == peer_id {
-                // `p.id` is the tailscale_id. If we have a richer identity,
-                // return its device_id; otherwise fall back to the routing
-                // key so the caller still has something usable.
-                return Ok(p
-                    .identity
-                    .as_ref()
-                    .map(|i| i.device_id.clone())
-                    .unwrap_or_else(|| p.id.clone()));
-            }
-        }
-
-        // Prefix match on device_id (require at least 4 chars and a single
-        // unambiguous hit). This matches the CLI affordance of typing just
-        // the first few characters of a ULID.
-        if peer_id.len() >= 4 {
-            let prefix_hits: Vec<&PeerState> = peers
-                .iter()
-                .filter(|p| {
-                    p.identity
-                        .as_ref()
-                        .map(|i| i.device_id.starts_with(peer_id))
-                        .unwrap_or(false)
-                })
-                .collect();
-            if prefix_hits.len() == 1 {
-                if let Some(identity) = prefix_hits[0].identity.as_ref() {
-                    return Ok(identity.device_id.clone());
-                }
-            }
-        }
-
-        Err(NodeError::PeerNotFound(peer_id.to_string()))
+        let p = self.resolve_peer(peer_id).await?;
+        Ok(p.identity
+            .as_ref()
+            .map(|i| i.device_id.clone())
+            .unwrap_or_else(|| p.id.clone()))
     }
 
     // ── Diagnostics ──────────────────────────────────────────────────────
@@ -603,19 +667,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Resolves the peer ID to an IP address and pings via Layer 3. Accepts
     /// the same identifier forms as [`resolve_peer_id`](Self::resolve_peer_id).
     pub async fn ping(&self, peer_id: &str) -> Result<PingResult, NodeError> {
-        let peers = self.session.peers().await;
-        let peer = peers
-            .iter()
-            .find(|p| {
-                p.id == peer_id
-                    || p.name == peer_id
-                    || p.identity
-                        .as_ref()
-                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
-                        .unwrap_or(false)
-            })
-            .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
-
+        let peer = self.resolve_peer(peer_id).await?;
         let addr = peer.ip.to_string();
         self.network.ping(&addr).await.map_err(NodeError::Network)
     }
@@ -773,23 +825,14 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// then dials via the network layer. Accepts the same identifier
     /// forms as [`resolve_peer_id`](Self::resolve_peer_id). Returns a
     /// plain `TcpStream` for byte-oriented I/O.
+    ///
+    /// The stream is raw even on port 443 — the sidecar's legacy auto-TLS
+    /// wrap for 443 dials is disabled on this path.
     pub async fn open_tcp(&self, peer_id: &str, port: u16) -> Result<TcpStream, NodeError> {
-        let peers = self.session.peers().await;
-        let peer = peers
-            .iter()
-            .find(|p| {
-                p.id == peer_id
-                    || p.name == peer_id
-                    || p.identity
-                        .as_ref()
-                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
-                        .unwrap_or(false)
-            })
-            .ok_or_else(|| NodeError::PeerNotFound(peer_id.to_string()))?;
-
+        let peer = self.resolve_peer(peer_id).await?;
         let addr = peer.ip.to_string();
         self.network
-            .dial_tcp(&addr, port)
+            .dial_tcp_opts(&addr, port, DialOpts { tls: Some(false) })
             .await
             .map_err(|e| NodeError::ConnectionFailed(e.to_string()))
     }
@@ -797,31 +840,105 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Listen for incoming TCP connections on a port.
     ///
     /// Returns a [`RawListener`] that yields raw `TcpStream`s. The caller
-    /// is responsible for accepting connections in a loop.
+    /// is responsible for accepting connections in a loop. Port 0 binds an
+    /// ephemeral port (advertise the resolved `RawListener::port` in-band,
+    /// like the file transfer subsystem does). Ports 443 and 9417 are
+    /// reserved by truffle's own listeners.
     pub async fn listen_tcp(&self, port: u16) -> Result<RawListener, NodeError> {
         use crate::transport::tcp::TcpTransport;
         use crate::transport::RawTransport;
 
+        ensure_port_unreserved(port, self.ws_port)?;
         let tcp = TcpTransport::new(self.network.clone());
         tcp.listen(port).await.map_err(NodeError::Transport)
     }
 
-    /// Open a QUIC connection to a peer.
+    /// Stop listening on a previously opened TCP port.
     ///
-    /// **Stub** — returns `NotImplemented` until Phase 8.
-    pub async fn open_quic(&self, _peer_id: &str) -> Result<(), NodeError> {
-        Err(NodeError::NotImplemented(
-            "QUIC connections are not yet implemented".to_string(),
-        ))
+    /// Dropping the [`RawListener`] alone stops local delivery but leaves
+    /// the tsnet port bound in the sidecar; this releases it.
+    pub async fn unlisten_tcp(&self, port: u16) -> Result<(), NodeError> {
+        self.network
+            .unlisten_tcp(port)
+            .await
+            .map_err(NodeError::Network)
     }
 
-    /// Open a UDP datagram socket to a peer.
+    /// Open a raw QUIC connection to a peer on the given port.
     ///
-    /// **Stub** — returns `NotImplemented` until Phase 8.
-    pub async fn open_udp(&self, _peer_id: &str) -> Result<NetworkUdpSocket, NodeError> {
-        Err(NodeError::NotImplemented(
-            "UDP sockets are not yet implemented".to_string(),
-        ))
+    /// The connection carries multiple concurrent bidirectional byte
+    /// streams ([`QuicConnection::open_stream`]) with no head-of-line
+    /// blocking between them. App scoping is enforced at the TLS layer via
+    /// ALPN (`truffle-raw.{app_id}`) — peers from a different app fail the
+    /// handshake. Accepts the same identifier forms as
+    /// [`resolve_peer_id`](Self::resolve_peer_id).
+    pub async fn connect_quic(
+        &self,
+        peer_id: &str,
+        port: u16,
+    ) -> Result<QuicConnection, NodeError> {
+        let peer = self.resolve_peer(peer_id).await?;
+        let alpn = crate::transport::quic::raw_alpn(&self.network.local_identity().app_id);
+        crate::transport::quic::connect_raw(&self.network, &peer.ip.to_string(), port, &alpn)
+            .await
+            .map_err(NodeError::Transport)
+    }
+
+    /// Listen for raw QUIC connections on a port.
+    ///
+    /// Returns a [`QuicListener`] that yields [`QuicConnection`]s. Only
+    /// same-app peers can complete the handshake (ALPN scoping). Ports 443
+    /// and 9417 are reserved, and port 0 is not yet supported over the
+    /// tsnet relay (the relay cannot report the actual ephemeral port
+    /// back).
+    pub async fn listen_quic(&self, port: u16) -> Result<QuicListener, NodeError> {
+        ensure_port_unreserved(port, self.ws_port)?;
+        if port == 0 {
+            return Err(NodeError::NotImplemented(
+                "ephemeral (port 0) QUIC listeners are not supported over the tsnet relay yet — choose an explicit port"
+                    .to_string(),
+            ));
+        }
+        let alpn = crate::transport::quic::raw_alpn(&self.network.local_identity().app_id);
+        crate::transport::quic::listen_raw(&self.network, port, &alpn)
+            .await
+            .map_err(NodeError::Transport)
+    }
+
+    /// Bind a UDP datagram socket on a port.
+    ///
+    /// Datagrams are relayed through the network provider (tsnet) with
+    /// boundaries preserved; the transport falls back to a direct host
+    /// socket only when the provider has no UDP support (tests). Returns a
+    /// [`DatagramSocket`] supporting `send_to` / `recv_from` with tailnet
+    /// addresses. IPv4 (`100.x`) peers only; keep payloads ≤ ~1200 bytes
+    /// to stay under the tailnet MTU. Port 0 binds an ephemeral relay
+    /// port — suitable for client-style sockets that send first.
+    pub async fn bind_udp(&self, port: u16) -> Result<DatagramSocket, NodeError> {
+        use crate::transport::udp::{UdpConfig, UdpTransport};
+        use crate::transport::DatagramTransport;
+
+        let udp = UdpTransport::new(self.network.clone(), UdpConfig::default());
+        udp.bind(port).await.map_err(NodeError::Transport)
+    }
+}
+
+/// The bare device-name slug from a Layer 3 hostname, when it follows this
+/// app's `truffle-{app_id}-{slug}` convention (RFC 017). `None` otherwise.
+fn hostname_slug<'a>(hostname: &'a str, app_id: &str) -> Option<&'a str> {
+    hostname
+        .strip_prefix("truffle-")?
+        .strip_prefix(app_id)?
+        .strip_prefix('-')
+}
+
+/// Reject ports reserved by truffle's own listeners: 443 (sidecar TLS) and
+/// the node's configured session WebSocket port (default 9417).
+fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
+    if port == 443 || port == ws_port {
+        Err(NodeError::ReservedPort(port))
+    } else {
+        Ok(())
     }
 }
 
@@ -855,6 +972,7 @@ pub struct NodeBuilder {
     auth_key: Option<String>,
     ephemeral: bool,
     ws_port: u16,
+    idle_timeout_secs: Option<u64>,
 }
 
 /// Atomically write a string to `path` by writing to a sibling `.tmp`
@@ -900,6 +1018,7 @@ impl Default for NodeBuilder {
             auth_key: None,
             ephemeral: false,
             ws_port: 9417,
+            idle_timeout_secs: None,
         }
     }
 }
@@ -966,6 +1085,16 @@ impl NodeBuilder {
     /// Set the WebSocket listen port.
     pub fn ws_port(mut self, port: u16) -> Self {
         self.ws_port = port;
+        self
+    }
+
+    /// Set the idle timeout (in seconds) for bridged raw TCP connections.
+    ///
+    /// The sidecar reaps quiet bridged connections after this long
+    /// (default: 600 s). Apps holding long-lived quiet sockets should
+    /// raise this or send application-level keepalives.
+    pub fn idle_timeout_secs(mut self, secs: u64) -> Self {
+        self.idle_timeout_secs = Some(secs);
         self
     }
 
@@ -1064,6 +1193,7 @@ impl NodeBuilder {
             auth_key: self.auth_key.clone(),
             ephemeral: if self.ephemeral { Some(true) } else { None },
             tags: None,
+            idle_timeout_secs: self.idle_timeout_secs,
         })
     }
 
@@ -1100,7 +1230,9 @@ impl NodeBuilder {
 
         // 4. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
+        let node = Node::from_parts(network, session, codec)
+            .with_state_dir(state_dir)
+            .with_ws_port(ws_port);
 
         tracing::info!("node: started successfully");
         Ok(node)
@@ -1168,7 +1300,9 @@ impl NodeBuilder {
 
         // 8. Create the node with the envelope router.
         let codec: Arc<dyn EnvelopeCodec> = Arc::new(JsonCodec);
-        let node = Node::from_parts(network, session, codec).with_state_dir(state_dir);
+        let node = Node::from_parts(network, session, codec)
+            .with_state_dir(state_dir)
+            .with_ws_port(ws_port);
 
         tracing::info!("node: started successfully (with auth handler)");
         Ok(node)
@@ -1547,21 +1681,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_node_open_quic_not_implemented() {
+    async fn test_node_connect_quic_unknown_peer_errors() {
         let ws_port = random_port().await;
         let (node, _event_tx, _network) = make_test_node("node-1", ws_port).await;
 
-        let result = node.open_quic("peer").await;
-        assert!(matches!(result, Err(NodeError::NotImplemented(_))));
-    }
-
-    #[tokio::test]
-    async fn test_node_open_udp_not_implemented() {
-        let ws_port = random_port().await;
-        let (node, _event_tx, _network) = make_test_node("node-1", ws_port).await;
-
-        let result = node.open_udp("peer").await;
-        assert!(matches!(result, Err(NodeError::NotImplemented(_))));
+        let result = node.connect_quic("peer", 4433).await;
+        assert!(matches!(result, Err(NodeError::PeerNotFound(_))));
     }
 
     #[tokio::test]
@@ -1899,5 +2024,191 @@ mod tests {
         let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
         let result = node.resolve_peer_id("nope").await;
         assert!(matches!(result, Err(NodeError::PeerNotFound(_))));
+    }
+
+    // ── RFC 021: raw transport surface ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_peer_by_bare_name_before_hello() {
+        // Raw-transport-only peers have no hello identity; the bare device
+        // name must still resolve via the hostname slug (RFC 021 smoke-test
+        // finding: only the full `truffle-{app}-{slug}` hostname matched).
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let mut peer = make_loopback_peer("nodeid-9");
+        peer.hostname = "truffle-test-ec2-smoke".to_string();
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Bare slug, and an unslugged variant that normalizes to it.
+        assert_eq!(node.resolve_peer("ec2-smoke").await.unwrap().id, "nodeid-9");
+        assert_eq!(node.resolve_peer("EC2 Smoke").await.unwrap().id, "nodeid-9");
+        // Unknown bare names still miss.
+        assert!(node.resolve_peer("other-box").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_peers_device_name_strips_hostname_before_hello() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let mut peer = make_loopback_peer("nodeid-9");
+        peer.hostname = "truffle-test-ec2-smoke".to_string();
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let peers = node.peers().await;
+        assert_eq!(peers.len(), 1);
+        // device_name reads like getLocalInfo() names, not the raw hostname.
+        assert_eq!(peers[0].device_name, "ec2-smoke");
+        assert_eq!(peers[0].name, "truffle-test-ec2-smoke");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_accepts_ip() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-a")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let resolved = node.resolve_peer("127.0.0.1").await.unwrap();
+        assert_eq!(resolved.id, "peer-a");
+        // resolve_peer_id falls back to the tailscale id when no hello
+        // identity is populated yet.
+        assert_eq!(node.resolve_peer_id("127.0.0.1").await.unwrap(), "peer-a");
+    }
+
+    #[tokio::test]
+    async fn test_listen_tcp_rejects_reserved_ports() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        for port in [443u16, 9417] {
+            let err = node.listen_tcp(port).await.unwrap_err();
+            assert!(
+                matches!(err, NodeError::ReservedPort(p) if p == port),
+                "expected ReservedPort({port}), got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_listen_quic_rejects_reserved_and_ephemeral_ports() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let err = node.listen_quic(443).await.unwrap_err();
+        assert!(matches!(err, NodeError::ReservedPort(443)));
+
+        let err = node.listen_quic(0).await.unwrap_err();
+        assert!(matches!(err, NodeError::NotImplemented(_)));
+    }
+
+    #[tokio::test]
+    async fn test_bind_udp_falls_back_to_direct_socket() {
+        // The mock provider has no UDP support, so bind_udp exercises the
+        // direct-socket fallback and must return a usable socket.
+        let ws_port = random_port().await;
+        let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let socket = node.bind_udp(0).await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        assert_ne!(addr.port(), 0);
+    }
+
+    #[test]
+    fn test_raw_alpn_scoping() {
+        assert_eq!(
+            crate::transport::quic::raw_alpn("demo"),
+            b"truffle-raw.demo".to_vec()
+        );
+        assert_eq!(
+            crate::transport::quic::raw_alpn(""),
+            b"truffle-raw".to_vec()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_connect_quic_roundtrip_via_raw_listener() {
+        let ws_port = random_port().await;
+        let (client_node, event_tx, _net) = make_test_node("cli", ws_port).await;
+
+        // Raw listener on port 0 (direct-socket fallback path) with the
+        // ALPN that connect_quic derives from the mock app_id ("test").
+        let server_network = Arc::new(MockNetworkProvider::new("srv"));
+        let alpn = crate::transport::quic::raw_alpn("test");
+        let listener = crate::transport::quic::listen_raw(&server_network, 0, &alpn)
+            .await
+            .unwrap();
+        let port = listener.port();
+        assert_ne!(port, 0);
+
+        let echo_task = tokio::spawn(async move {
+            let conn = listener.accept().await.expect("no incoming connection");
+            let mut stream = conn
+                .accept_stream()
+                .await
+                .unwrap()
+                .expect("connection closed before stream");
+            let mut received = Vec::new();
+            while let Some(chunk) = stream.read(1024).await.unwrap() {
+                received.extend_from_slice(&chunk);
+            }
+            stream.write(&received).await.unwrap();
+            stream.finish();
+            // Keep the connection alive until the peer has read the echo —
+            // closing immediately could drop in-flight stream data.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            conn.close();
+        });
+
+        // Register the "server" as a peer at 127.0.0.1 and connect by name.
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("srv-peer")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let conn = client_node.connect_quic("srv-peer", port).await.unwrap();
+        let mut stream = conn.open_stream().await.unwrap();
+        stream.write(b"hello quic").await.unwrap();
+        stream.finish();
+
+        let mut echoed = Vec::new();
+        while let Some(chunk) = stream.read(1024).await.unwrap() {
+            echoed.extend_from_slice(&chunk);
+        }
+        assert_eq!(echoed, b"hello quic");
+
+        echo_task.await.unwrap();
+        conn.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_quic_raw_alpn_mismatch_rejected() {
+        // Cross-app connections must fail the TLS handshake outright —
+        // ALPN is the QUIC analog of the WS hello's app_id check.
+        let server_network = Arc::new(MockNetworkProvider::new("srv"));
+        let listener = crate::transport::quic::listen_raw(
+            &server_network,
+            0,
+            &crate::transport::quic::raw_alpn("app-a"),
+        )
+        .await
+        .unwrap();
+        let port = listener.port();
+
+        let client_network = Arc::new(MockNetworkProvider::new("cli"));
+        let result = crate::transport::quic::connect_raw(
+            &client_network,
+            "127.0.0.1",
+            port,
+            &crate::transport::quic::raw_alpn("app-b"),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "cross-app QUIC connect must fail (ALPN mismatch)"
+        );
     }
 }

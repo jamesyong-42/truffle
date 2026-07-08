@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-quic-accept"
+description = "Enables the quic_accept command without any pre-configured scope."
+commands.allow = ["quic_accept"]
+
+[[permission]]
+identifier = "deny-quic-accept"
+description = "Denies the quic_accept command without any pre-configured scope."
+commands.deny = ["quic_accept"]

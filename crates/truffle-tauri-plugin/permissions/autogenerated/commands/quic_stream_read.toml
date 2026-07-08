@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-quic-stream-read"
+description = "Enables the quic_stream_read command without any pre-configured scope."
+commands.allow = ["quic_stream_read"]
+
+[[permission]]
+identifier = "deny-quic-stream-read"
+description = "Denies the quic_stream_read command without any pre-configured scope."
+commands.deny = ["quic_stream_read"]

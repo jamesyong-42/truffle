@@ -13,6 +13,32 @@ const COMMANDS: &[&str] = &[
     "auto_reject",
     "accept_offer",
     "reject_offer",
+    // Raw transport (RFC 021 §7, Phase 4) — id-keyed NAPI parity. These
+    // generate ACL permission files; raw network access is deny-by-default,
+    // so consumers must opt in via their capabilities (not `default.toml`).
+    "tcp_open",
+    "tcp_read",
+    "tcp_write",
+    "tcp_end",
+    "tcp_close",
+    "tcp_listen",
+    "tcp_accept",
+    "tcp_unlisten",
+    "udp_bind",
+    "udp_send",
+    "udp_recv",
+    "udp_close",
+    "quic_connect",
+    "quic_open_stream",
+    "quic_accept_stream",
+    "quic_stream_read",
+    "quic_stream_write",
+    "quic_stream_finish",
+    "quic_stream_close",
+    "quic_close",
+    "quic_listen",
+    "quic_accept",
+    "quic_listener_close",
 ];
 
 fn main() {

@@ -53,6 +53,14 @@
   "dependencies": {
     "@vibecook/truffle-native": "workspace:*"
   },
+  "peerDependencies": {
+    "ws": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
   "optionalDependencies": {
     "@vibecook/truffle-sidecar-darwin-arm64": "^0.4.6",
     "@vibecook/truffle-sidecar-darwin-x64": "^0.4.6",
@@ -61,6 +69,8 @@
     "@vibecook/truffle-sidecar-win32-x64": "^0.4.5"
   },
   "devDependencies": {
-    "typescript": "^5.7.0"
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.7.0",
+    "ws": "^8.18.0"
   }
 }

@@ -60,11 +60,22 @@ Four transport implementations behind a common trait interface:
 | Transport | Port | Use Case |
 |-----------|------|----------|
 | **WebSocket** | 443 (TLS) | Primary message transport, namespace routing |
-| **TCP** | 9417 | Raw byte streams (like netcat), file transfer |
+| **TCP** | dynamic (caller-chosen) | Raw byte streams (like netcat), file transfer |
 | **UDP** | dynamic | Low-latency datagrams via tsnet relay |
 | **QUIC** | dynamic | Multiplexed streams over UDP (via quinn) |
 
 All four transports verified working cross-machine over real Tailscale (macOS <-> EC2 Linux).
+
+As of RFC 021, all four are reachable directly from TypeScript, not just internally by Rust — the `MeshNode` returned by `createMeshNode()` exposes them as protocol namespaces:
+
+| Transport | JS namespace | Shape |
+|-----------|--------------|-------|
+| TCP | `mesh.net` | `node:net`-style: real `stream.Duplex` sockets |
+| HTTP (over TCP) | `mesh.http` | `node:http` Agent + `fetchText` sugar |
+| UDP | `mesh.dgram` | `node:dgram`-style datagram sockets |
+| QUIC | `mesh.quic` | async-iterable connections/streams (iroh-shaped) |
+
+WebSocket stays internal — it's the envelope transport behind `send()`/`broadcast()`, not a namespace of its own. See [Raw Transports](/guide/raw-transports) for the full JS API.
 
 ### Layer 5: Session (`PeerRegistry`)
 
@@ -94,6 +105,9 @@ node.broadcast(namespace, data)       // Fan-out to all peers
 node.subscribe(namespace)             // Receive messages on a namespace
 node.open_tcp(peer_id, port)          // Raw TCP stream
 node.listen_tcp(port)                 // Accept TCP connections
+node.bind_udp(port)                   // Raw UDP datagram socket
+node.connect_quic(peer_id, port)      // Raw QUIC connection (multiplexed streams)
+node.listen_quic(port)                // Accept QUIC connections
 node.ping(peer_id)                    // Tailscale-level ping
 node.health()                         // Diagnostics
 node.local_info()                     // Node identity
@@ -133,6 +147,8 @@ This is the simplest possible topology because Tailscale already provides full-m
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
-| 443  | TLS/WS   | Incoming WebSocket connections (tsnet HTTPS listener) |
-| 9417 | TCP       | Direct TCP mesh connections |
-| dynamic | UDP   | UDP relay via tsnet ListenPacket |
+| 443  | TLS/WS   | Incoming WebSocket connections (tsnet HTTPS listener); reserved against raw TCP/QUIC listeners |
+| 9417 | WS       | Default WebSocket session port (`wsPort`/`ws_port` config); reserved against raw TCP/QUIC listeners |
+| dynamic | TCP   | Raw TCP listeners (`listen_tcp` / `mesh.net`), caller-chosen port |
+| dynamic | UDP   | UDP relay via tsnet ListenPacket (`bind_udp` / `mesh.dgram`) |
+| dynamic | QUIC  | QUIC listeners over the UDP relay (`listen_quic` / `mesh.quic`) |

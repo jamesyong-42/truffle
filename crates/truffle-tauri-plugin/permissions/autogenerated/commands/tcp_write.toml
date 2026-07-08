@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-tcp-write"
+description = "Enables the tcp_write command without any pre-configured scope."
+commands.allow = ["tcp_write"]
+
+[[permission]]
+identifier = "deny-tcp-write"
+description = "Denies the tcp_write command without any pre-configured scope."
+commands.deny = ["tcp_write"]

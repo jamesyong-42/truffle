@@ -25,6 +25,7 @@ async fn main() {
         auth_key: std::env::var("TS_AUTHKEY").ok(),
         ephemeral: None,
         tags: None,
+        idle_timeout_secs: None,
     };
     let mut provider = TailscaleProvider::new(config);
 

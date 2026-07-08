@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-quic-stream-close"
+description = "Enables the quic_stream_close command without any pre-configured scope."
+commands.allow = ["quic_stream_close"]
+
+[[permission]]
+identifier = "deny-quic-stream-close"
+description = "Denies the quic_stream_close command without any pre-configured scope."
+commands.deny = ["quic_stream_close"]
