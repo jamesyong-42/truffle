@@ -14,7 +14,7 @@
 //!
 //! Live socket/stream/listener handles cannot cross the Tauri IPC boundary, so
 //! each is parked in an id-keyed registry in [`crate::TruffleState`] (the same
-//! pattern as `crdt_docs` / `pending_offers`) and every command takes/returns a
+//! pattern as `pending_offers`) and every command takes/returns a
 //! short string id (`uuid` v4 with a kind prefix, matching the file-transfer
 //! token scheme).
 //!

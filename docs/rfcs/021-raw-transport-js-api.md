@@ -6,6 +6,10 @@
 **Depends on**: RFC 012 (layered architecture), RFC 015 (bindings rewrite), RFC 017 (identity & namespacing)
 **Reverses**: RFC 015's decision to exclude raw TCP/UDP from the JS surface ("too low-level")
 
+> **Stale note (2026-07-07):** One incidental reference below to `NapiCrdtDoc`
+> is stale — the CrdtDoc / Loro feature (RFC 018) was removed. The rest of this
+> RFC is current.
+
 ---
 
 ## 1. Problem Statement

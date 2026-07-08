@@ -30,9 +30,6 @@ quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 sha2.workspace = true
-# RFC 018: CRDT documents
-loro.workspace = true
-base64.workspace = true
 # RFC 017: identity and namespacing
 ulid.workspace = true
 dirs.workspace = true
@@ -50,10 +47,6 @@ criterion.workspace = true
 
 [[bench]]
 name = "envelope"
-harness = false
-
-[[bench]]
-name = "crdt_merge"
 harness = false
 
 [[bench]]

@@ -10,11 +10,7 @@ exclude = ["truffle-tauri-plugin", "truffle-napi"]
 # Advisories — all advisories are denied by default in modern cargo-deny.
 # Use `ignore` to suppress specific advisories with justification.
 [advisories]
-ignore = [
-    # atomic-polyfill is a transitive dep via heapless → postcard → loro-internal.
-    # No safe upgrade available; awaiting upstream fix.
-    { id = "RUSTSEC-2023-0089", reason = "transitive dep via loro; no upgrade path yet" },
-]
+ignore = []
 
 # Licenses — only explicitly allowed licenses pass; everything else is denied.
 [licenses]

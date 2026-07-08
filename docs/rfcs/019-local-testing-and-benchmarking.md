@@ -1,8 +1,14 @@
-# RFC 019: Local Testing and Benchmarking Harness
+# RFC 019: Local Testing and Benchmarking Harness — ⚠️ Partially Stale
 
-**Status:** Draft
+**Status:** Draft (partially superseded)
 **Author:** James + Claude
 **Date:** 2026-04-21
+
+> **Stale note (2026-07-07):** The CrdtDoc / Loro feature (RFC 018) was removed.
+> References below to `src/crdt_doc/tests.rs`, `benches/crdt_merge.rs`, and "CRDT
+> merge/convergence" no longer apply. SyncedStore (RFC 016) remains, and the
+> SyncedStore testing/benchmarking sections are still current — it uses
+> last-write-wins device slices, not a CRDT.
 
 ---
 

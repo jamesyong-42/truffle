@@ -17,7 +17,6 @@ workspace = true
 
 [dependencies]
 truffle-core = { path = "../truffle-core" }
-loro.workspace = true
 tauri.workspace = true
 tauri-plugin.workspace = true
 serde.workspace = true
