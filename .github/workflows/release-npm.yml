@@ -29,6 +29,30 @@ jobs:
         run: |
           echo "npm version: $(npm --version)"
 
+      - name: Wait for sidecar packages
+        run: |
+          VERSION=$(node -p "require('./packages/core/package.json').version")
+          packages=(
+            "@vibecook/truffle-sidecar-darwin-arm64"
+            "@vibecook/truffle-sidecar-darwin-x64"
+            "@vibecook/truffle-sidecar-linux-arm64"
+            "@vibecook/truffle-sidecar-linux-x64"
+            "@vibecook/truffle-sidecar-win32-x64"
+          )
+          for pkg in "${packages[@]}"; do
+            echo "Waiting for ${pkg}@${VERSION} on npm..."
+            for i in $(seq 1 30); do
+              if npm view "${pkg}@${VERSION}" version 2>/dev/null; then
+                echo "Found ${pkg}@${VERSION}"
+                continue 2
+              fi
+              echo "Attempt $i/30 - not yet available, waiting 30s..."
+              sleep 30
+            done
+            echo "::error::${pkg}@${VERSION} not found after 15 min."
+            exit 1
+          done
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
