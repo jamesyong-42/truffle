@@ -539,11 +539,27 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Includes peers that are online but not yet connected (no active WS).
     /// This information comes from Layer 3 peer discovery.
     pub async fn peers(&self) -> Vec<Peer> {
+        let app_id = self.network.local_identity().app_id;
         self.session
             .peers()
             .await
             .into_iter()
-            .map(Peer::from)
+            .map(|s| {
+                // Before any hello, `device_name` falls back to the full
+                // Layer 3 hostname; strip it to the bare device-name slug so
+                // raw-transport-only peers read like `getLocalInfo()` names
+                // (asymmetry found by the RFC 021 cross-machine smoke test).
+                let bare = s
+                    .identity
+                    .is_none()
+                    .then(|| hostname_slug(&s.name, &app_id).map(str::to_string))
+                    .flatten();
+                let mut peer = Peer::from(s);
+                if let Some(bare) = bare {
+                    peer.device_name = bare;
+                }
+                peer
+            })
             .collect()
     }
 
@@ -573,6 +589,21 @@ impl<N: NetworkProvider + 'static> Node<N> {
             }
             if p.id == peer_ref || p.name == peer_ref || p.ip.to_string() == peer_ref {
                 return Ok(p.clone());
+            }
+        }
+
+        // Second pass: bare device name for peers that have not completed a
+        // hello yet (raw-transport-only contact — no WS envelope traffic).
+        // Layer 3 hostnames follow `truffle-{app_id}-{slug(device_name)}`
+        // (RFC 017), so match the slugged input against the hostname's slug
+        // part; slugging the input makes "EC2 Smoke" match "ec2-smoke".
+        let app_id = self.network.local_identity().app_id;
+        let ref_slug = identity::slug(peer_ref, 255);
+        if !ref_slug.is_empty() {
+            for p in &peers {
+                if hostname_slug(&p.name, &app_id) == Some(ref_slug.as_str()) {
+                    return Ok(p.clone());
+                }
             }
         }
 
@@ -611,6 +642,8 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// - a unique prefix of the `device_id` (at least 4 characters; must
     ///   match exactly one known peer)
     /// - the human-readable `device_name` from the hello
+    /// - the bare device name of a peer that has not helloed yet (matched
+    ///   via the `truffle-{app_id}-{slug}` hostname convention)
     /// - the Layer 3 Tailscale hostname (the sanitised slug) — legacy
     /// - the Tailscale stable ID — escape hatch for diagnostics
     /// - the Tailscale IP address (e.g. `100.x.x.x`)
@@ -888,6 +921,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
         let udp = UdpTransport::new(self.network.clone(), UdpConfig::default());
         udp.bind(port).await.map_err(NodeError::Transport)
     }
+}
+
+/// The bare device-name slug from a Layer 3 hostname, when it follows this
+/// app's `truffle-{app_id}-{slug}` convention (RFC 017). `None` otherwise.
+fn hostname_slug<'a>(hostname: &'a str, app_id: &str) -> Option<&'a str> {
+    hostname
+        .strip_prefix("truffle-")?
+        .strip_prefix(app_id)?
+        .strip_prefix('-')
 }
 
 /// Reject ports reserved by truffle's own listeners: 443 (sidecar TLS) and
@@ -1985,6 +2027,43 @@ mod tests {
     }
 
     // ── RFC 021: raw transport surface ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_peer_by_bare_name_before_hello() {
+        // Raw-transport-only peers have no hello identity; the bare device
+        // name must still resolve via the hostname slug (RFC 021 smoke-test
+        // finding: only the full `truffle-{app}-{slug}` hostname matched).
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let mut peer = make_loopback_peer("nodeid-9");
+        peer.hostname = "truffle-test-ec2-smoke".to_string();
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Bare slug, and an unslugged variant that normalizes to it.
+        assert_eq!(node.resolve_peer("ec2-smoke").await.unwrap().id, "nodeid-9");
+        assert_eq!(node.resolve_peer("EC2 Smoke").await.unwrap().id, "nodeid-9");
+        // Unknown bare names still miss.
+        assert!(node.resolve_peer("other-box").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_peers_device_name_strips_hostname_before_hello() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let mut peer = make_loopback_peer("nodeid-9");
+        peer.hostname = "truffle-test-ec2-smoke".to_string();
+        let _ = event_tx.send(NetworkPeerEvent::Joined(peer));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let peers = node.peers().await;
+        assert_eq!(peers.len(), 1);
+        // device_name reads like getLocalInfo() names, not the raw hostname.
+        assert_eq!(peers[0].device_name, "ec2-smoke");
+        assert_eq!(peers[0].name, "truffle-test-ec2-smoke");
+    }
 
     #[tokio::test]
     async fn test_resolve_peer_accepts_ip() {
