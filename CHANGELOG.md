@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.9...truffle-v0.5.0) (2026-07-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* removes Node::crdt_doc / crdt_doc_with_backend, NapiNode.crdtDoc, the @vibecook/truffle NapiCrdtDoc/NapiCrdtDocEvent exports, @vibecook/truffle-react useCrdtDoc, and the Tauri crdt_doc_* commands + truffle://crdt-change event.
+
+### Features
+
+* remove CrdtDoc / Loro feature (RFC 018) ([#136](https://github.com/jamesyong-42/truffle/issues/136)) ([c29d2d8](https://github.com/jamesyong-42/truffle/commit/c29d2d8d7c6966d432bef3b3ffcf517d10b7709e))
+
 ## [0.4.9](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.8...truffle-v0.4.9) (2026-07-08)
 
 
