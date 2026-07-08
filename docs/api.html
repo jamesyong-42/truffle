@@ -1129,6 +1129,34 @@ function Peers({ node }) {
             The CLI is useful for manual operations and debugging, but it is not the main
             integration surface for apps.
           </p>
+
+          <h3>Install</h3>
+          <pre><code># macOS / Linux
+curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
+
+# Windows
+iwr -useb https://jamesyong-42.github.io/truffle/install.ps1 | iex
+
+# Homebrew
+brew install jamesyong-42/tap/truffle</code></pre>
+
+          <h3>Quick start</h3>
+          <pre><code># Start your node and join the mesh
+truffle up
+
+# See all nodes on your network
+truffle ls
+
+# Send a message to another node
+truffle send laptop "deploy is done"
+
+# Copy a file to another node
+truffle cp ./report.pdf server:/tmp/
+
+# Check connectivity
+truffle ping laptop</code></pre>
+
+          <h3>Additional commands</h3>
           <pre><code>truffle
 truffle up --device-name alice-laptop
 truffle down

@@ -761,12 +761,61 @@ console.table(allPresence);</code></pre>
           </p>
         </div>
 
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">Install</span>
+            <h3>Install the CLI</h3>
+            <p>
+              The CLI is useful for bringing up a node, checking peers, sending quick messages,
+              copying files, and debugging connectivity while you build against the API.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code class="shell"># macOS / Linux
+curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
+
+# Windows
+iwr -useb https://jamesyong-42.github.io/truffle/install.ps1 | iex
+
+# Homebrew
+brew install jamesyong-42/tap/truffle</code></pre>
+          </div>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">Quick start</span>
+            <h3>Run common mesh tasks</h3>
+            <p>
+              These commands use the same mesh concepts as the API: start a node, discover peers,
+              send messages, copy files, and check connectivity.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code class="shell"># Start your node and join the mesh
+truffle up
+
+# See all nodes on your network
+truffle ls
+
+# Send a message to another node
+truffle send laptop "deploy is done"
+
+# Copy a file to another node
+truffle cp ./report.pdf server:/tmp/
+
+# Check connectivity
+truffle ping laptop</code></pre>
+          </div>
+        </div>
+
         <div class="terminal">
-          <pre><code class="shell">truffle up --device-name alice-laptop
-truffle ls --long
-truffle ping bob-laptop
-truffle cp ./report.pdf bob-laptop:/tmp/
-truffle watch --json</code></pre>
+          <pre><code class="shell"># Extra commands for development and automation
+truffle status --json
+truffle watch --json
+truffle wait laptop --timeout 30
+truffle recv --from laptop --timeout 30
+truffle doctor</code></pre>
         </div>
 
         <div class="callout" style="margin-top: 22px">
