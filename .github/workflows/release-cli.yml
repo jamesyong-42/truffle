@@ -159,7 +159,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${RELEASE_TAG}" "${{ matrix.archive }}" --clobber
+          gh release upload "${{ env.RELEASE_TAG }}" "${{ matrix.archive }}" --clobber
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v5
