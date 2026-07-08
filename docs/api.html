@@ -8,18 +8,37 @@
       name="description"
       content="Reference for the @vibecook/truffle JavaScript API: createMeshNode, TCP, HTTP, UDP, WebSocket, QUIC, messaging, files, synced stores, proxy, and React hooks."
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&amp;display=swap"
+      rel="stylesheet"
+    />
     <style>
       :root {
         color-scheme: light;
-        --ink: #1d2528;
-        --muted: #5f6a70;
-        --line: #d8e1dc;
-        --panel: #ffffff;
-        --soft: #f4f8f6;
-        --code: #101819;
+        --bg: #fbfbf9;
+        --ink: #16181d;
+        --muted: #5c6470;
+        --faint: #8b93a0;
+        --line: #e3e5e1;
+        --line-soft: #edeeea;
+        --panel: #f3f3ef;
+        --panel-2: #ecece7;
+        --soft: #eef1fd;
+        --code: #0f1216;
+        --code-chip: #1b2027;
+        --code-ink: #cfd3da;
         --accent: #0f766e;
-        --accent-2: #2f5d8f;
+        --accent-2: #3b5bdb;
         --warn: #9a5b13;
+        --c-com: #8a9a86;
+        --c-str: #d4c08f;
+        --c-kw: #8fa6e6;
+        --c-typ: #b4a3f0;
+        --c-fn: #e3c489;
+        --c-num: #d9998c;
+        --shadow: 0 1px 0 rgba(22, 24, 29, 0.12), 0 16px 34px -24px rgba(15, 18, 22, 0.6);
       }
 
       * {
@@ -33,11 +52,13 @@
       body {
         margin: 0;
         color: var(--ink);
-        background: #ffffff;
-        font-family:
-          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-          sans-serif;
-        line-height: 1.55;
+        background: var(--bg);
+        font-family: "Source Serif 4", Georgia, serif;
+        font-size: 16.5px;
+        line-height: 1.7;
+        overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
       }
 
       a {
@@ -51,8 +72,7 @@
 
       code,
       pre {
-        font-family:
-          "SFMono-Regular", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
       }
 
       .topbar {
@@ -63,9 +83,9 @@
         align-items: center;
         justify-content: space-between;
         gap: 24px;
-        padding: 16px clamp(20px, 5vw, 64px);
-        border-bottom: 1px solid rgb(216 225 220 / 76%);
-        background: rgb(255 255 255 / 94%);
+        padding: 14px clamp(20px, 5vw, 64px);
+        border-bottom: 1px solid rgb(227 229 225 / 84%);
+        background: rgb(251 251 249 / 92%);
         backdrop-filter: blur(12px);
       }
 
@@ -74,6 +94,7 @@
         align-items: center;
         gap: 10px;
         color: var(--ink);
+        font-family: "Archivo", sans-serif;
         font-weight: 750;
       }
 
@@ -93,24 +114,25 @@
         display: flex;
         flex-wrap: wrap;
         gap: 16px;
+        min-width: 0;
+        font-family: "Archivo", sans-serif;
         font-size: 14px;
       }
 
       .topnav a {
-        color: #2e3b3f;
+        color: var(--muted);
       }
 
       .hero {
         padding: 56px clamp(20px, 5vw, 64px) 34px;
         border-bottom: 1px solid var(--line);
-        background:
-          linear-gradient(180deg, #f7fbf9 0, #ffffff 100%),
-          #ffffff;
+        background: var(--bg);
       }
 
       .eyebrow {
         margin: 0 0 12px;
         color: var(--accent);
+        font-family: "JetBrains Mono", monospace;
         font-size: 13px;
         font-weight: 760;
         letter-spacing: 0.08em;
@@ -122,13 +144,14 @@
       h3,
       h4 {
         margin: 0;
+        font-family: "Archivo", sans-serif;
         line-height: 1.12;
         letter-spacing: 0;
       }
 
       h1 {
         max-width: 960px;
-        font-size: clamp(40px, 7vw, 72px);
+        font-size: clamp(34px, 5.2vw, 56px);
       }
 
       h2 {
@@ -157,12 +180,45 @@
         font-size: clamp(17px, 2vw, 21px);
       }
 
+      .hero-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 24px;
+      }
+
+      .hero-links a {
+        display: inline-flex;
+        min-height: 36px;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0 13px;
+        background: var(--panel);
+        color: #314044;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 14px;
+        font-weight: 680;
+        box-shadow: 0 8px 24px rgb(22 36 33 / 5%);
+      }
+
+      .hero-links a:hover {
+        border-color: #9ac7bd;
+        color: #0f766e;
+        text-decoration: none;
+      }
+
       .layout {
         display: grid;
-        grid-template-columns: 260px minmax(0, 1fr);
+        grid-template-columns: 242px minmax(0, 1fr);
         gap: 38px;
         align-items: start;
         padding: 34px clamp(20px, 5vw, 64px) 68px;
+      }
+
+      .layout > *,
+      .grid > * {
+        min-width: 0;
       }
 
       .sidebar {
@@ -170,21 +226,40 @@
         top: 78px;
         max-height: calc(100vh - 98px);
         overflow: auto;
-        border-right: 1px solid var(--line);
-        padding-right: 22px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: var(--bg);
         font-size: 14px;
       }
 
       .sidebar strong {
         display: block;
-        margin: 18px 0 8px;
-        color: #253438;
+        margin: 16px 8px 8px;
+        color: var(--faint);
+        font-family: "JetBrains Mono", monospace;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .sidebar strong:first-child {
+        margin-top: 0;
       }
 
       .sidebar a {
         display: block;
-        padding: 5px 0;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-family: "Archivo", sans-serif;
         color: #4b5a60;
+      }
+
+      .sidebar a:hover {
+        background: #edf5f2;
+        color: #0f766e;
+        text-decoration: none;
       }
 
       .content {
@@ -193,7 +268,7 @@
       }
 
       section {
-        padding: 34px 0;
+        padding: 42px 0;
         border-bottom: 1px solid var(--line);
       }
 
@@ -222,7 +297,7 @@
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 18px;
-        background: var(--panel);
+        background: var(--bg);
       }
 
       .card h3 {
@@ -249,14 +324,102 @@
       }
 
       pre {
+        position: relative;
+        max-width: 100%;
         margin: 16px 0 0;
         overflow: auto;
-        border-radius: 8px;
+        border-radius: 9px;
         padding: 18px;
         background: var(--code);
-        color: #d8f3ec;
+        color: var(--code-ink);
         font-size: 13.5px;
         line-height: 1.55;
+      }
+
+      pre code {
+        color: var(--code-ink);
+      }
+
+      .code-frame {
+        position: relative;
+        margin: 18px 0 22px;
+        overflow: hidden;
+        border-radius: 9px;
+        background: var(--code);
+        box-shadow: var(--shadow);
+      }
+
+      .code-frame .code-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 12px 8px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .code-frame .code-file {
+        color: #aab3c0;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.02em;
+      }
+
+      .code-frame pre {
+        margin: 0;
+        border-radius: 0;
+        padding: 16px 18px;
+        box-shadow: none;
+      }
+
+      .copy {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 5px;
+        padding: 3px 8px;
+        background: rgba(255, 255, 255, 0.04);
+        color: #7d8794;
+        cursor: pointer;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        transition: color 0.12s, border-color 0.12s;
+      }
+
+      .copy:hover {
+        border-color: rgba(255, 255, 255, 0.28);
+        color: var(--code-ink);
+      }
+
+      .copy.done {
+        border-color: #8fbf9e;
+        color: #8fbf9e;
+      }
+
+      .tok-c {
+        color: var(--c-com);
+        font-style: italic;
+      }
+
+      .tok-s {
+        color: var(--c-str);
+      }
+
+      .tok-k {
+        color: var(--c-kw);
+      }
+
+      .tok-t {
+        color: var(--c-typ);
+      }
+
+      .tok-f {
+        color: var(--c-fn);
+      }
+
+      .tok-n {
+        color: var(--c-num);
       }
 
       p code,
@@ -265,7 +428,7 @@
         border: 1px solid #d7e4de;
         border-radius: 5px;
         padding: 1px 5px;
-        background: #f7faf8;
+        background: var(--bg);
         color: #254348;
         font-size: 0.92em;
       }
@@ -273,7 +436,10 @@
       table {
         width: 100%;
         margin-top: 18px;
-        border-collapse: collapse;
+        border: 1px solid var(--line);
+        border-spacing: 0;
+        border-radius: 8px;
+        overflow: hidden;
         font-size: 14px;
       }
 
@@ -287,8 +453,16 @@
 
       th {
         color: #2d3a3f;
-        background: var(--soft);
+        background: var(--panel);
         font-weight: 720;
+      }
+
+      tbody tr:nth-child(even) {
+        background: #f7f7f3;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: 0;
       }
 
       ul {
@@ -322,9 +496,10 @@
       .method {
         margin-top: 22px;
         border: 1px solid var(--line);
+        border-left: 4px solid var(--accent);
         border-radius: 8px;
         padding: 18px;
-        background: #ffffff;
+        background: var(--panel);
       }
 
       .method h4 {
@@ -355,9 +530,6 @@
         .sidebar {
           position: static;
           max-height: none;
-          border-right: 0;
-          border-bottom: 1px solid var(--line);
-          padding: 0 0 20px;
         }
       }
 
@@ -368,8 +540,38 @@
           gap: 12px;
         }
 
+        .topnav,
+        .hero > *,
+        .layout,
+        .content,
+        .sidebar,
+        section,
+        pre,
+        .code-frame,
+        table,
+        .note,
+        .warning,
+        .method {
+          max-width: calc(100vw - 40px);
+        }
+
+        .hero-links {
+          max-width: calc(100vw - 40px);
+        }
+
+        h1,
+        .lede,
+        .summary {
+          max-width: calc(100vw - 40px);
+          overflow-wrap: break-word;
+        }
+
         .grid {
           grid-template-columns: 1fr;
+        }
+
+        .layout {
+          padding-top: 24px;
         }
 
         pre {
@@ -408,6 +610,15 @@
         network-programming namespaces for TCP, HTTP, UDP, WebSocket, and QUIC, plus higher-level
         messaging, file transfer, synced stores, and diagnostics.
       </p>
+      <nav class="hero-links" aria-label="Reference shortcuts">
+        <a href="#tcp">TCP</a>
+        <a href="#http">HTTP</a>
+        <a href="#udp">UDP</a>
+        <a href="#websocket">WebSocket</a>
+        <a href="#quic">QUIC</a>
+        <a href="#messaging">Messaging</a>
+        <a href="#files">Files</a>
+      </nav>
     </header>
 
     <main class="layout">
@@ -1181,5 +1392,142 @@ truffle update</code></pre>
       <span>Released under the MIT License.</span>
       <span><a href="https://github.com/jamesyong-42/truffle">GitHub</a></span>
     </footer>
+
+    <script>
+      (function () {
+        "use strict";
+
+        var KW =
+          "\\b(?:import|from|export|default|const|let|var|for|of|in|return|if|else|switch|case|break|new|function|type|interface|extends|implements|as|await|async|typeof|instanceof|void|true|false|null|undefined|this|readonly|satisfies|try|catch|throw|while|do|class)\\b";
+        var JS_RE = new RegExp(
+          "(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)" +
+            "|(`(?:\\\\.|[^`\\\\])*`|\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*')" +
+            "|(\\b\\d[\\d_.eExXa-fA-F]*\\b)" +
+            "|(" +
+            KW +
+            ")" +
+            "|(\\b[A-Z][A-Za-z0-9_]*\\b)" +
+            "|([a-z_$][\\w$]*)(?=\\s*\\()",
+          "g",
+        );
+        var SH_RE =
+          /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\b\d[\d_.]*\b)|(\b(?:pnpm|npm|yarn|curl|iwr|brew|truffle|node|npx|sh|iex)\b)/gm;
+        var LT = String.fromCharCode(60);
+        var GT = String.fromCharCode(62);
+
+        function esc(s) {
+          return s.replace(/&/g, "&amp;").split(LT).join("&lt;").split(GT).join("&gt;");
+        }
+
+        function tok(cls, text) {
+          return LT + 'span class="' + cls + '">' + text + LT + "/span" + GT;
+        }
+
+        function highlight(raw, re, shell) {
+          var out = "";
+          var last = 0;
+          var m;
+          re.lastIndex = 0;
+          while ((m = re.exec(raw))) {
+            out += esc(raw.slice(last, m.index));
+            if (m[1]) out += tok("tok-c", esc(m[1]));
+            else if (m[2]) out += tok("tok-s", esc(m[2]));
+            else if (m[3]) out += tok("tok-n", esc(m[3]));
+            else if (m[4]) out += tok(shell ? "tok-f" : "tok-k", esc(m[4]));
+            else if (m[5]) out += tok("tok-t", esc(m[5]));
+            else if (m[6]) out += tok("tok-f", esc(m[6]));
+            last = re.lastIndex;
+          }
+          return out + esc(raw.slice(last));
+        }
+
+        function looksShell(raw, code) {
+          return (
+            code.classList.contains("shell") ||
+            /^\s*(?:#|pnpm\b|npm\b|yarn\b|curl\b|iwr\b|brew\b|truffle\b|node\b|npx\b)/m.test(raw)
+          );
+        }
+
+        function labelFor(raw, shell) {
+          if (shell) return "terminal";
+          if (raw.indexOf("mesh.http") !== -1) return "http.ts";
+          if (raw.indexOf("mesh.dgram") !== -1) return "udp.ts";
+          if (raw.indexOf("mesh.ws") !== -1) return "websocket.ts";
+          if (raw.indexOf("mesh.quic") !== -1) return "quic.ts";
+          if (raw.indexOf("fileTransfer") !== -1) return "files.ts";
+          if (raw.indexOf("syncedStore") !== -1) return "store.ts";
+          if (raw.indexOf("createMeshNode") !== -1 || raw.indexOf("mesh.net") !== -1) return "mesh.ts";
+          return "example.ts";
+        }
+
+        function copyButton(raw) {
+          var btn = document.createElement("button");
+          btn.className = "copy";
+          btn.type = "button";
+          btn.textContent = "copy";
+          btn.addEventListener("click", function () {
+            function done() {
+              btn.textContent = "copied";
+              btn.classList.add("done");
+              setTimeout(function () {
+                btn.textContent = "copy";
+                btn.classList.remove("done");
+              }, 1400);
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(raw).then(done);
+            } else {
+              done();
+            }
+          });
+          return btn;
+        }
+
+        function enhanceTerminal(terminal, pre, raw, fallbackLabel) {
+          var header = terminal.querySelector(".terminal-header");
+          if (!header) {
+            header = document.createElement("div");
+            header.className = "terminal-header";
+            terminal.insertBefore(header, pre);
+          }
+          var label = terminal.getAttribute("data-file") || header.textContent.trim() || fallbackLabel;
+          header.textContent = "";
+          var file = document.createElement("span");
+          file.className = "terminal-file";
+          file.innerHTML = LT + "b" + GT + esc(label) + LT + "/b" + GT;
+          header.appendChild(file);
+          header.appendChild(copyButton(raw));
+        }
+
+        function wrapPre(pre, raw, label) {
+          if (pre.parentElement && pre.parentElement.classList.contains("code-frame")) return;
+          var fig = document.createElement("figure");
+          fig.className = "code-frame";
+          var bar = document.createElement("div");
+          bar.className = "code-bar";
+          var file = document.createElement("span");
+          file.className = "code-file";
+          file.textContent = label;
+          bar.appendChild(file);
+          bar.appendChild(copyButton(raw));
+          pre.parentNode.insertBefore(fig, pre);
+          fig.appendChild(bar);
+          fig.appendChild(pre);
+        }
+
+        document.querySelectorAll("pre code").forEach(function (code) {
+          if (code.dataset.highlighted) return;
+          var pre = code.closest("pre");
+          var raw = code.textContent.replace(/\n$/, "");
+          var shell = looksShell(raw, code);
+          code.innerHTML = highlight(raw, shell ? SH_RE : JS_RE, shell);
+          code.dataset.highlighted = "true";
+          var label = labelFor(raw, shell);
+          var terminal = pre.closest(".terminal");
+          if (terminal) enhanceTerminal(terminal, pre, raw, label);
+          else wrapPre(pre, raw, label);
+        });
+      })();
+    </script>
   </body>
 </html>
