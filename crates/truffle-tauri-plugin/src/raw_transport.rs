@@ -576,7 +576,7 @@ async fn peer_id_for_ip(state: &TruffleState, ip: &str) -> Option<String> {
         .await
         .into_iter()
         .find(|p| p.ip.to_string() == ip)
-        .map(|p| p.device_id)
+        .map(|p| p.device_id.unwrap_or(p.tailscale_id))
 }
 
 /// Open a raw QUIC connection to a peer on the given port (RFC 021).

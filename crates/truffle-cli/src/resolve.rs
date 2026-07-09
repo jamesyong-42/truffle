@@ -90,10 +90,10 @@ impl NameResolver {
         if let Some(target) = self.aliases.get(name) {
             // Alias may resolve to a peer name -- try to find the peer
             for peer in &self.peers {
-                if peer.device_name.to_lowercase() == target.to_lowercase() {
+                if peer_label(peer).eq_ignore_ascii_case(target) {
                     return Ok(ResolvedTarget {
-                        peer_id: peer.device_id.clone(),
-                        display_name: peer.device_name.clone(),
+                        peer_id: peer_route_id(peer),
+                        display_name: peer_label(peer),
                         ip: peer.ip.to_string(),
                         resolved_via: ResolvedVia::Alias,
                     });
@@ -106,24 +106,29 @@ impl NameResolver {
             });
         }
 
-        // 2. Check peer device names (case-insensitive)
+        // 2. Check peer display / device names (case-insensitive)
         for peer in &self.peers {
-            if peer.device_name.to_lowercase() == name_lower {
+            if peer_label(peer).eq_ignore_ascii_case(&name_lower)
+                || peer
+                    .device_name
+                    .as_ref()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(&name_lower))
+            {
                 return Ok(ResolvedTarget {
-                    peer_id: peer.device_id.clone(),
-                    display_name: peer.device_name.clone(),
+                    peer_id: peer_route_id(peer),
+                    display_name: peer_label(peer),
                     ip: peer.ip.to_string(),
                     resolved_via: ResolvedVia::PeerName,
                 });
             }
         }
 
-        // 3. Check peer device IDs (exact match)
+        // 3. Check peer device IDs (exact match) and tailscale ids
         for peer in &self.peers {
-            if peer.device_id == name {
+            if peer.device_id.as_deref() == Some(name) || peer.tailscale_id == name {
                 return Ok(ResolvedTarget {
-                    peer_id: peer.device_id.clone(),
-                    display_name: peer.device_name.clone(),
+                    peer_id: peer_route_id(peer),
+                    display_name: peer_label(peer),
                     ip: peer.ip.to_string(),
                     resolved_via: ResolvedVia::PeerId,
                 });
@@ -135,8 +140,8 @@ impl NameResolver {
             for peer in &self.peers {
                 if peer.ip == addr {
                     return Ok(ResolvedTarget {
-                        peer_id: peer.device_id.clone(),
-                        display_name: peer.device_name.clone(),
+                        peer_id: peer_route_id(peer),
+                        display_name: peer_label(peer),
                         ip: peer.ip.to_string(),
                         resolved_via: ResolvedVia::IpAddress,
                     });
@@ -161,7 +166,7 @@ impl NameResolver {
             candidates.push(alias.clone());
         }
         for peer in &self.peers {
-            candidates.push(peer.device_name.clone());
+            candidates.push(peer_label(peer));
         }
 
         for candidate in &candidates {
@@ -223,6 +228,21 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[m]
 }
 
+/// UI / alias match label (RFC 022).
+fn peer_label(peer: &Peer) -> String {
+    peer.device_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| peer.display_name.clone())
+}
+
+/// String to feed into `Node::send` / dial (prefer published ULID).
+fn peer_route_id(peer: &Peer) -> String {
+    peer.device_id
+        .clone()
+        .unwrap_or_else(|| peer.tailscale_id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,15 +251,13 @@ mod tests {
     fn make_peers() -> Vec<Peer> {
         vec![
             Peer {
-                // Legacy compat fields: hostname slug + tailscale id.
-                id: "laptop-ts-001".to_string(),
-                name: "cli-alice-s-macbook".to_string(),
-                // RFC 017 primary identity fields — distinct from the legacy
-                // compat fields so tests actually prove the resolver reads
-                // `device_id` / `device_name`.
-                device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string(),
-                device_name: "Alice's MacBook".to_string(),
+                device_id: Some("01J4K9M2Z8AB3RNYQPW6H5TC0X".to_string()),
+                device_name: Some("Alice's MacBook".to_string()),
+                display_name: "Alice's MacBook".to_string(),
+                hostname: "truffle-cli-alice-s-macbook".to_string(),
                 tailscale_id: "laptop-ts-001".to_string(),
+                peer_ref: "laptop-ts-001:1".to_string(),
+                generation: 1,
                 ip: "100.64.0.3".parse::<IpAddr>().unwrap(),
                 online: true,
                 ws_connected: false,
@@ -248,11 +266,13 @@ mod tests {
                 last_seen: None,
             },
             Peer {
-                id: "server-ts-002".to_string(),
-                name: "cli-prod-server".to_string(),
-                device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0Y".to_string(),
-                device_name: "Prod Server".to_string(),
+                device_id: Some("01J4K9M2Z8AB3RNYQPW6H5TC0Y".to_string()),
+                device_name: Some("Prod Server".to_string()),
+                display_name: "Prod Server".to_string(),
+                hostname: "truffle-cli-prod-server".to_string(),
                 tailscale_id: "server-ts-002".to_string(),
+                peer_ref: "server-ts-002:1".to_string(),
+                generation: 1,
                 ip: "100.64.0.1".parse::<IpAddr>().unwrap(),
                 online: true,
                 ws_connected: true,
@@ -287,22 +307,19 @@ mod tests {
         assert_eq!(result.resolved_via, ResolvedVia::PeerId);
     }
 
-    /// Regression: the resolver must read `device_id` / `device_name`,
-    /// NOT the legacy compat fields (which are the Tailscale hostname slug).
-    /// Resolving by the legacy hostname must fail, and resolving by the
-    /// legacy tailscale_id must also fail — only `device_*` fields count.
+    /// Hostname slug alone is not a primary label; tailscale id still
+    /// resolves as an advanced routing key (RFC 022).
     #[test]
-    fn test_resolver_ignores_legacy_compat_fields() {
+    fn test_resolver_hostname_slug_not_primary() {
         let resolver = NameResolver::new(HashMap::new(), make_peers());
 
-        // Legacy hostname slug should NOT resolve.
+        // Bare hostname slug (without full truffle- prefix) should NOT resolve.
         let err = resolver.resolve("cli-alice-s-macbook").unwrap_err();
         assert!(matches!(err, ResolveError::NotFound { .. }));
 
-        // Legacy tailscale id should NOT resolve via PeerId (that path
-        // now reads peer.device_id).
-        let err = resolver.resolve("laptop-ts-001").unwrap_err();
-        assert!(matches!(err, ResolveError::NotFound { .. }));
+        // Tailscale id resolves via the peer-id path.
+        let result = resolver.resolve("laptop-ts-001").unwrap();
+        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
     }
 
     #[test]
@@ -338,11 +355,13 @@ mod tests {
         let mut peers = make_peers();
         // Inject a second peer with the same device_name as the first.
         peers.push(Peer {
-            id: "duplicate-ts-003".to_string(),
-            name: "cli-alice-s-macbook-2".to_string(),
-            device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string(),
-            device_name: "Alice's MacBook".to_string(), // <-- intentional collision
+            device_id: Some("01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string()),
+            device_name: Some("Alice's MacBook".to_string()), // intentional collision
+            display_name: "Alice's MacBook".to_string(),
+            hostname: "truffle-cli-alice-s-macbook-2".to_string(),
             tailscale_id: "duplicate-ts-003".to_string(),
+            peer_ref: "duplicate-ts-003:1".to_string(),
+            generation: 1,
             ip: "100.64.0.5".parse::<IpAddr>().unwrap(),
             online: true,
             ws_connected: false,
@@ -363,11 +382,13 @@ mod tests {
         // the device_id directly.
         let mut peers = make_peers();
         peers.push(Peer {
-            id: "duplicate-ts-003".to_string(),
-            name: "cli-alice-s-macbook-2".to_string(),
-            device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string(),
-            device_name: "Alice's MacBook".to_string(),
+            device_id: Some("01J4K9M2Z8AB3RNYQPW6H5TC0Z".to_string()),
+            device_name: Some("Alice's MacBook".to_string()),
+            display_name: "Alice's MacBook".to_string(),
+            hostname: "truffle-cli-alice-s-macbook-2".to_string(),
             tailscale_id: "duplicate-ts-003".to_string(),
+            peer_ref: "duplicate-ts-003:1".to_string(),
+            generation: 1,
             ip: "100.64.0.5".parse::<IpAddr>().unwrap(),
             online: true,
             ws_connected: false,

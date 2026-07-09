@@ -17,6 +17,7 @@ import http from 'node:http';
 import type { Duplex } from 'node:stream';
 import { MeshAgent } from './http.js';
 import type { TruffleNet } from './net.js';
+import { peerLikeToQuery, type PeerLike } from './peer.js';
 // Type-only: erased at compile time, so it never forces `ws` to be installed
 // (safe with an optional dependency as long as @types/ws is a devDependency).
 import type WebSocket from 'ws';
@@ -123,7 +124,12 @@ export interface TruffleWs {
    * constructor (a caller-supplied `agent` is overridden — the mesh agent is
    * how it reaches the peer).
    */
-  connect(host: string, port: number, path?: string, options?: WsClientOptions): Promise<WebSocket>;
+  connect(
+    host: PeerLike,
+    port: number,
+    path?: string,
+    options?: WsClientOptions,
+  ): Promise<WebSocket>;
   /**
    * Start a WebSocket server on the mesh. Resolves once it's listening; the
    * returned server's `'connection'` event delivers `(ws, request)` like any
@@ -156,26 +162,31 @@ export function createWsNamespace(net: TruffleNet, load: WsLoader = importWs): T
   }
 
   async function connect(
-    host: string,
+    host: PeerLike,
     port: number,
     path = '/',
     options: WsClientOptions = {},
   ): Promise<WebSocket> {
+    const hostQuery = peerLikeToQuery(host);
     const { WebSocket: WebSocketImpl } = await loadWs();
     const requestPath = path.startsWith('/') ? path : `/${path}`;
 
     // The URL hostname only sets the HTTP Host header; the agent always dials
-    // the pinned peer. Embed `host` when it round-trips as a URL hostname
+    // the pinned peer. Embed `hostQuery` when it round-trips as a URL hostname
     // unchanged (a plain IP or lowercase device name), so the Host header is
     // natural; otherwise a placeholder (a name with spaces, or a device id
     // whose case a URL would fold — either would dial the wrong peer).
-    const urlHost = urlHostnameFor(host, port) ?? PLACEHOLDER_HOST;
+    const urlHost = urlHostnameFor(hostQuery, port) ?? PLACEHOLDER_HOST;
     const url = `ws://${urlHost}:${port}${requestPath}`;
 
     // `agent` last: the mesh agent is non-negotiable. PIN_KEY is an unknown key
     // ws/http pass through to the agent (see PIN_KEY); cast past the typed
     // ClientOptions to attach it.
-    const wsOptions: Record<string, unknown> = { ...options, agent, [PIN_KEY]: host };
+    const wsOptions: Record<string, unknown> = {
+      ...options,
+      agent,
+      [PIN_KEY]: hostQuery,
+    };
     return new WebSocketImpl(url, wsOptions as WsClientOptions);
   }
 

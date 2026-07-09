@@ -12,13 +12,20 @@
 import { Duplex } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import type { NapiNode, NapiTcpListener, NapiTcpSocket } from '@vibecook/truffle-native';
+import { peerLikeToQuery, type PeerLike } from './peer.js';
 
 export interface NetConnectOptions {
   /**
-   * Peer to connect to: device id (or unique ≥4-char prefix), device
-   * name, Tailscale hostname, or Tailscale IP.
+   * Peer to connect to: {@link PeerLike} handle, or a query string
+   * (device id / prefix, name, hostname, or Tailscale IP).
+   * Prefer a Peer handle from `getPeers()` / events when available.
    */
-  host: string;
+  host?: PeerLike;
+  /**
+   * Alias of `host` for RFC 022 handle-first call sites:
+   * `mesh.net.connect({ peer, port })`.
+   */
+  peer?: PeerLike;
   /** Port on the peer. */
   port: number;
 }
@@ -283,24 +290,30 @@ export class TruffleServer extends EventEmitter {
 export interface TruffleNet {
   /** Open a connection to a peer. Returns the socket immediately; it emits `'connect'`. */
   connect(options: NetConnectOptions): TruffleSocket;
-  connect(port: number, host: string): TruffleSocket;
+  connect(port: number, host: PeerLike): TruffleSocket;
   /** Alias of `connect`, mirroring `net.createConnection`. */
   createConnection(options: NetConnectOptions): TruffleSocket;
-  createConnection(port: number, host: string): TruffleSocket;
+  createConnection(port: number, host: PeerLike): TruffleSocket;
   /** Create a server; call `.listen(port)` to bind, like `net.createServer`. */
   createServer(connectionListener?: ConnectionListener): TruffleServer;
 }
 
+function resolveConnectTarget(options: NetConnectOptions): string {
+  const target = options.peer ?? options.host;
+  if (target === undefined || target === '') {
+    throw new TypeError('connect: peer/host is required');
+  }
+  return peerLikeToQuery(target);
+}
+
 export function createNetNamespace(node: NapiNode): TruffleNet {
   function connect(options: NetConnectOptions): TruffleSocket;
-  function connect(port: number, host: string): TruffleSocket;
-  function connect(optionsOrPort: NetConnectOptions | number, maybeHost?: string): TruffleSocket {
-    const { host, port } =
-      typeof optionsOrPort === 'number'
-        ? { host: maybeHost ?? '', port: optionsOrPort }
-        : optionsOrPort;
-    if (!host) throw new TypeError('connect: host (peer) is required');
-    return new TruffleSocket(node.openTcp(host, port));
+  function connect(port: number, host: PeerLike): TruffleSocket;
+  function connect(optionsOrPort: NetConnectOptions | number, maybeHost?: PeerLike): TruffleSocket {
+    const opts: NetConnectOptions =
+      typeof optionsOrPort === 'number' ? { host: maybeHost, port: optionsOrPort } : optionsOrPort;
+    const host = resolveConnectTarget(opts);
+    return new TruffleSocket(node.openTcp(host, opts.port));
   }
 
   return {

@@ -21,7 +21,8 @@
 //!     .await?;
 //!
 //! let peers = node.peers().await;
-//! node.send(&peers[0].id, "chat", b"hello!").await?;
+//! // Prefer a Peer handle once RFC 022 Phase B lands; string queries still work.
+//! node.send(&peers[0].tailscale_id, "chat", b"hello!").await?;
 //! ```
 //!
 //! ## Layer 3 — Network

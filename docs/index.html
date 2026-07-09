@@ -613,6 +613,7 @@
       </a>
       <nav class="topnav" aria-label="Primary navigation">
         <a href="#quick-start">Quick start</a>
+        <a href="#peers">Peers</a>
         <a href="#transport-recipes">Transport recipes</a>
         <a href="#higher-level">Higher-level APIs</a>
         <a href="./api.html">API reference</a>
@@ -627,9 +628,10 @@
           <h1>Simple TCP, HTTP, UDP, WebSocket, and QUIC APIs for your private mesh.</h1>
           <p class="lede">
             Truffle gives Node.js apps a small set of familiar networking APIs that run across
-            devices on the same Tailscale tailnet. Start one mesh node, then open sockets, serve
-            HTTP, send datagrams, stream QUIC, exchange messages, sync state, or transfer files
-            without building a coordinator service.
+            devices on the same Tailscale tailnet. Start one mesh node, get
+            <strong>Peer</strong> handles, then open sockets, serve HTTP, send datagrams, stream
+            QUIC, exchange messages, sync state, or transfer files — without building a coordinator
+            or picking id strings.
           </p>
           <div class="hero-actions">
             <a class="button primary" href="#quick-start">Start with the API</a>
@@ -676,22 +678,15 @@ const mesh = await createMeshNode({
   },
 });
 
-const server = mesh.net.createServer((socket) =&gt; {
-  const name = mesh.getLocalInfo().deviceName;
-  socket.write('hello from ' + name + '\n');
-  socket.pipe(socket);
+// Peer handles — no id picking for networking
+mesh.onMessage('chat', async (msg) =&gt; {
+  if (typeof msg.from === 'string') return;
+  console.log(msg.from.displayName, msg.payload);
+  await msg.from.send('chat', Buffer.from('ack'));
 });
 
-server.listen(7000);
-
-const client = mesh.net.connect({
-  host: 'bob-laptop',
-  port: 7000,
-});
-client.on('data', (chunk) =&gt; {
-  console.log(chunk.toString());
-});
-client.write('ping\n');</code></pre>
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
         </div>
       </section>
 
@@ -699,12 +694,13 @@ client.write('ping\n');</code></pre>
         <div class="section-head">
           <div>
             <p class="eyebrow">Quick start</p>
-            <h2>Create one mesh node, then use the protocol you already know.</h2>
+            <h2>Create one mesh node. Networking takes Peers.</h2>
           </div>
           <p>
             The JavaScript package resolves the native addon and sidecar for you. On first run,
             Truffle opens or reports a Tailscale auth URL, then keeps a tsnet-backed node running
-            inside your process.
+            inside your process. Discovery and messages yield <code class="inline-code">Peer</code>
+            handles — you do not choose which id string to pass.
           </p>
         </div>
 
@@ -740,21 +736,125 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
 });
 
 console.log(mesh.getLocalInfo());
-console.table(await mesh.getPeers());</code></pre>
+const peers = await mesh.getPeers();
+for (const p of peers) {
+  console.log(p.displayName, p.online);
+}</code></pre>
           </div>
         </div>
 
-        <div class="note">
-          Peer references can be stable device IDs, unique device ID prefixes, device names,
-          Tailscale hostnames, or Tailscale IPs. Names are convenient for examples; use device IDs
-          when your app needs stable identity — but note a peer's <code>deviceId</code> is its ULID
-          only once <code>wsConnected</code> is true, and otherwise falls back to (and can flip from)
-          its <code>tailscaleId</code>. Apps built purely on the raw transports should key identity
-          on <code>tailscaleId</code>.
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">3. Talk</span>
+            <h3>Send with a Peer handle</h3>
+            <p>
+              Prefer handles from <code>getPeers()</code>, events, or
+              <code>mesh.peer(query)</code>. String overloads still work as
+              <em>queries</em> (name, ULID, hostname, IP) — not as a multi-id protocol you must learn.
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
+  if (typeof msg.from === 'string') return; // not yet interned
+  console.log(msg.from.displayName, msg.payload);
+  await msg.from.send('chat', Buffer.from('ack'));
+});
+
+const peer = (await mesh.getPeers())[0];
+if (peer) await peer.send('chat', Buffer.from('hello'));
+// same: await mesh.send(peer, 'chat', Buffer.from('hello'));</code></pre>
+          </div>
         </div>
       </section>
 
-      <section class="section" id="transport-recipes">
+      <section class="section" id="peers">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Peers</p>
+            <h2>One handle. Live fields. Identity stays inside Truffle.</h2>
+          </div>
+          <p>
+            A <code class="inline-code">Peer</code> is a process-local handle to a live registry
+            entry. The same object is returned from <code class="inline-code">getPeers()</code>,
+            peer-change events, and inbound <code class="inline-code">message.from</code> when known
+            — so <code class="inline-code">Map&lt;Peer, T&gt;</code> and <code class="inline-code">===</code>
+            work.
+          </p>
+        </div>
+
+        <div class="grid">
+          <article class="card">
+            <span class="badge">Display</span>
+            <h3>Always safe fields</h3>
+            <p>
+              Use <code>displayName</code>, <code>online</code>, <code>ip</code>,
+              <code>hostname</code>, and <code>os</code> for UI. Do not gate
+              <code>send</code> on <code>wsConnected</code> — that is advanced bus state, not
+              liveness.
+            </p>
+          </article>
+          <article class="card">
+            <span class="badge">Lookup</span>
+            <h3>mesh.peer(query)</h3>
+            <p>
+              Resolve a name, ULID (or unique prefix), hostname, Tailscale id, or IP.
+              <code>waitMs</code> blocks until the peer is resolvable (for example after a restart
+              while durable identity is learned). Ambiguous names throw.
+            </p>
+          </article>
+          <article class="card">
+            <span class="badge">Persistence</span>
+            <h3>deviceId only when non-null</h3>
+            <p>
+              <code>deviceId</code> is a real ULID or <code>null</code> — never a Tailscale id in
+              disguise. Save it across restarts when set; rebind with
+              <code>mesh.peer(savedId, { waitMs })</code>. Do not persist <code>peer.ref</code>.
+            </p>
+          </article>
+        </div>
+
+        <div class="recipe">
+          <div class="recipe-copy">
+            <span class="badge">Collections</span>
+            <h3>Map by Peer, not by string</h3>
+            <p>
+              Interned handles update in place as discovery and identity change. A peer that leaves
+              and rejoins gets a new object generation (<code>equals</code> is false). Compare
+              durable <code>deviceId</code> only when you need “same device across restarts.”
+            </p>
+          </div>
+          <div class="terminal">
+            <pre><code>const sessions = new Map(); // Map&lt;Peer, AppSession&gt;
+
+mesh.onPeerChange((ev) =&gt; {
+  if (ev.type === 'joined' &amp;&amp; ev.peer) {
+    sessions.set(ev.peer, openSession(ev.peer));
+  }
+  if (ev.type === 'left' &amp;&amp; ev.peer) {
+    sessions.delete(ev.peer);
+  }
+});
+
+// Across restarts — only place durable ids appear in app code
+if (peer.deviceId) localStorage.setItem('lastPeer', peer.deviceId);
+const id = localStorage.getItem('lastPeer');
+const again = id ? await mesh.peer(id, { waitMs: 5000 }) : null;
+if (again) await again.send('chat', Buffer.from('welcome back'));</code></pre>
+          </div>
+        </div>
+
+        <div class="callout" style="margin-top: 22px">
+          <h3>What you do not need to learn</h3>
+          <p>
+            Which string <code>send</code> wants before vs after WebSocket hello; dual-key maps to
+            survive disconnect; that raw-transport apps should key on
+            <code>tailscaleId</code>. Routing keys stay inside the library.
+            <code>tailscaleId</code> remains available for diagnostics only.
+          </p>
+        </div>
+      </section>
+
+      <section class="section alt" id="transport-recipes">
         <div class="section-head">
           <div>
             <p class="eyebrow">Transport recipes</p>
@@ -762,7 +862,9 @@ console.table(await mesh.getPeers());</code></pre>
           </div>
           <p>
             These examples are intentionally small. Run the server side on one device and the client
-            side on another device using the same <code class="inline-code">appId</code>.
+            side on another device using the same <code class="inline-code">appId</code>. Prefer a
+            <code class="inline-code">Peer</code> from <code class="inline-code">getPeers()</code> or
+            <code class="inline-code">mesh.peer()</code>; string hosts remain valid as queries.
           </p>
         </div>
 
@@ -773,7 +875,8 @@ console.table(await mesh.getPeers());</code></pre>
             <p>
               <code>mesh.net</code> mirrors the useful parts of <code>node:net</code>. Sockets are
               standard <code>stream.Duplex</code> objects, so existing stream code usually ports by
-              replacing the dial/listen layer.
+              replacing the dial/listen layer. Pass <code>peer</code> (or <code>host</code>) as a
+              handle.
             </p>
           </div>
           <div class="terminal">
@@ -785,8 +888,12 @@ const server = mesh.net.createServer((socket) =&gt; {
 });
 server.listen(7000);
 
-// Alice: connect to Bob by device name, ID, hostname, or IP
-const socket = mesh.net.connect({ host: 'bob-laptop', port: 7000 });
+// Alice: resolve a Peer, then dial
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (!bob) throw new Error('bob not found');
+const socket = mesh.net.connect({ peer: bob, port: 7000 });
+// also: mesh.net.connect({ host: bob, port: 7000 })
+// or query form: mesh.net.connect({ host: 'bob-laptop', port: 7000 })
 socket.on('data', (chunk) =&gt; console.log(chunk.toString()));
 socket.write('hello over private TCP');</code></pre>
           </div>
@@ -798,7 +905,8 @@ socket.write('hello over private TCP');</code></pre>
             <h3>Serve ordinary node:http traffic over the mesh</h3>
             <p>
               Inbound HTTP is a stock <code>http.Server</code> fed by mesh TCP sockets. Outbound
-              HTTP uses <code>mesh.http.agent</code> or <code>fetchText()</code>.
+              HTTP uses <code>mesh.http.agent</code> or <code>fetchText()</code>. Host may be a
+              Peer or a query string.
             </p>
           </div>
           <div class="terminal">
@@ -812,9 +920,13 @@ mesh.net
   .createServer((socket) =&gt; app.emit('connection', socket))
   .listen(8080);
 
-// Alice: request Bob over mesh TCP
+// Alice: request Bob over mesh TCP (query string; MeshAgent dials via mesh.net)
 const res = await mesh.http.fetchText('bob-laptop', 8080, '/status');
-console.log(res.status, res.body);</code></pre>
+console.log(res.status, res.body);
+
+// Prefer a Peer when dialing TCP yourself:
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (bob) mesh.net.connect({ peer: bob, port: 8080 });</code></pre>
           </div>
         </div>
 
@@ -825,7 +937,7 @@ console.log(res.status, res.body);</code></pre>
             <p>
               <code>mesh.dgram</code> keeps datagram boundaries and emits Node-style
               <code>message</code> events. Keep payloads small; about 1,200 bytes is the practical
-              target for tailnet MTU.
+              target for tailnet MTU. The address argument is <code>Peer | string</code>.
             </p>
           </div>
           <div class="terminal">
@@ -836,10 +948,11 @@ udp.on('message', (msg, rinfo) =&gt; {
 });
 await udp.bind(9999);
 
-// Alice: send a datagram
+// Alice: send a datagram to a Peer handle
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
 const sender = mesh.dgram.createSocket();
 await sender.bind();
-sender.send(Buffer.from('temperature=21.7'), 9999, 'bob-laptop');</code></pre>
+sender.send(Buffer.from('temperature=21.7'), 9999, bob ?? 'bob-laptop');</code></pre>
           </div>
         </div>
 
@@ -850,6 +963,7 @@ sender.send(Buffer.from('temperature=21.7'), 9999, 'bob-laptop');</code></pre>
             <p>
               <code>mesh.ws</code> runs the standard <code>ws</code> package over Truffle TCP. It
               is an optional peer dependency, so install <code>ws</code> in apps that use it.
+              Connect with a Peer handle or a query string.
             </p>
           </div>
           <div class="terminal">
@@ -860,7 +974,8 @@ wss.on('connection', (ws) =&gt; {
 });
 
 // Alice: WebSocket client
-const ws = await mesh.ws.connect('bob-laptop', 7788, '/chat');
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+const ws = await mesh.ws.connect(bob ?? 'bob-laptop', 7788, '/chat');
 ws.once('open', () =&gt; ws.send('hello websocket'));
 ws.on('message', (data) =&gt; console.log(data.toString()));</code></pre>
           </div>
@@ -873,6 +988,7 @@ ws.on('message', (data) =&gt; console.log(data.toString()));</code></pre>
             <p>
               <code>mesh.quic</code> is useful when one peer needs many concurrent reliable streams
               over a single connection. Connections and incoming streams are async iterable.
+              <code>connect</code> takes <code>Peer | string</code>.
             </p>
           </div>
           <div class="terminal">
@@ -889,7 +1005,8 @@ const quicServer = await mesh.quic.listen(9420);
 })();
 
 // Alice: open a connection and one stream
-const conn = await mesh.quic.connect('bob-laptop', 9420);
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+const conn = await mesh.quic.connect(bob ?? 'bob-laptop', 9420);
 const stream = await conn.openStream();
 stream.on('data', (chunk) =&gt; console.log(chunk.toString()));
 stream.write('hello over quic');
@@ -898,7 +1015,7 @@ stream.end();</code></pre>
         </div>
       </section>
 
-      <section class="section alt" id="higher-level">
+      <section class="section" id="higher-level">
         <div class="section-head">
           <div>
             <p class="eyebrow">Higher-level APIs</p>
@@ -906,7 +1023,8 @@ stream.end();</code></pre>
           </div>
           <p>
             Use raw transports when you want protocol control. Use these higher-level helpers when
-            you want common local-first app workflows with less protocol code.
+            you want common local-first app workflows with less protocol code. Peer-addressed
+            surfaces take a handle first.
           </p>
         </div>
 
@@ -915,8 +1033,9 @@ stream.end();</code></pre>
             <span class="badge">Messages</span>
             <h3>Namespaced app messages</h3>
             <p>
-              Route JSON or byte payloads by namespace and subscribe with
-              <code>onMessage(namespace, callback)</code>.
+              Route JSON or byte payloads by namespace. Subscribe with
+              <code>onMessage</code>; reply with <code>msg.from.send(...)</code> when
+              <code>from</code> is a Peer.
             </p>
           </article>
           <article class="card">
@@ -924,14 +1043,15 @@ stream.end();</code></pre>
             <h3>Verified file transfer</h3>
             <p>
               Send, pull, accept, reject, and track progress. Transfers include SHA-256 verification.
+              Target peers by handle or query string.
             </p>
           </article>
           <article class="card">
             <span class="badge">State</span>
             <h3>Device-owned synced stores</h3>
             <p>
-              Each device publishes its own versioned JSON slice. Read local and remote slices by
-              device ID.
+              Each device publishes its own versioned JSON slice. Slice keys are durable device
+              ULIDs once identity is known.
             </p>
           </article>
         </div>
@@ -941,20 +1061,27 @@ stream.end();</code></pre>
             <h3>Messages</h3>
             <p>
               The payload is app-defined. If you pass JSON bytes, Truffle delivers a structured
-              JSON value to receivers.
+              JSON value to receivers. Prefer the Peer handle — never dig out
+              <code>deviceId</code> just to call <code>send</code>.
             </p>
           </div>
           <div class="terminal">
-            <pre><code>mesh.onMessage('chat', (msg) =&gt; {
-  console.log(msg.from, msg.payload.text);
+            <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
+  if (typeof msg.from === 'string') {
+    console.log(msg.from, msg.payload); // rare: sender not interned yet
+    return;
+  }
+  console.log(msg.from.displayName, msg.payload);
+  await msg.from.send('chat', Buffer.from(JSON.stringify({ text: 'ack' })));
 });
 
 const peer = (await mesh.getPeers())[0];
-await mesh.send(
-  peer.deviceId,
-  'chat',
-  Buffer.from(JSON.stringify({ text: 'hello' })),
-);</code></pre>
+if (peer) {
+  await peer.send(
+    'chat',
+    Buffer.from(JSON.stringify({ text: 'hello' })),
+  );
+}</code></pre>
           </div>
         </div>
 
@@ -973,7 +1100,11 @@ files.onOffer((offer, responder) =&gt; {
   responder.accept('/tmp/' + offer.fileName);
 });
 
-await files.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre>
+const peer = (await mesh.getPeers())[0];
+if (peer) {
+  // peerId is a query string (name / ULID / hostname). PeerLike on FT is next.
+  await files.sendFile(peer.displayName, './report.pdf', '/tmp/report.pdf');
+}</code></pre>
           </div>
         </div>
 

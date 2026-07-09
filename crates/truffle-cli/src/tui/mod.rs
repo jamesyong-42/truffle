@@ -97,16 +97,22 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                         // Re-emit as a synthetic Joined event so the TUI updates.
                         // Reconstruct a hello-envelope identity from the Peer
                         // so downstream UI sees the user-facing device_name.
-                        let identity = Some(truffle_core::session::PeerIdentity {
-                            app_id: String::new(),
-                            device_id: peer.device_id.clone(),
-                            device_name: peer.device_name.clone(),
-                            os: peer.os.clone().unwrap_or_default(),
-                            tailscale_id: peer.tailscale_id.clone(),
+                        let identity = peer.device_id.as_ref().map(|uid| {
+                            truffle_core::session::PeerIdentity {
+                                app_id: String::new(),
+                                device_id: uid.clone(),
+                                device_name: peer
+                                    .device_name
+                                    .clone()
+                                    .unwrap_or_else(|| peer.display_name.clone()),
+                                os: peer.os.clone().unwrap_or_default(),
+                                tailscale_id: peer.tailscale_id.clone(),
+                            }
                         });
                         let state = truffle_core::session::PeerState {
                             id: peer.tailscale_id.clone(),
-                            name: peer.name.clone(),
+                            generation: peer.generation,
+                            name: peer.hostname.clone(),
                             ip: peer.ip,
                             online: peer.online,
                             ws_connected: peer.ws_connected,
@@ -114,6 +120,7 @@ pub async fn run(config: &TruffleConfig) -> Result<(), String> {
                             os: peer.os.clone(),
                             last_seen: peer.last_seen.clone(),
                             identity,
+                            identity_suppressed: false,
                         };
                         let _ = tx.send(event::AppEvent::PeerEvent(
                             truffle_core::session::PeerEvent::Updated(state),
@@ -592,22 +599,19 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
     use truffle_core::session::PeerEvent;
 
     match event {
-        PeerEvent::Joined(state) => {
-            // Add or update peer in cache. Prefer RFC 017 identity
-            // (device_id / device_name) when the hello envelope has
-            // been processed; fall back to the Layer 3 tailscale_id and
-            // de-slugged hostname otherwise.
-            let name = state
-                .identity
-                .as_ref()
-                .map(|i| i.device_name.clone())
-                .unwrap_or_else(|| state.name.trim_start_matches("truffle-").to_string());
-            let device_id = state
-                .identity
-                .as_ref()
-                .map(|i| i.device_id.clone())
-                .unwrap_or_else(|| state.id.clone());
-            let tailscale_id = state.id.clone();
+        PeerEvent::Joined(state) | PeerEvent::Identity(state) | PeerEvent::Updated(state) => {
+            let peer_view: truffle_core::Peer = state.clone().into();
+            let name = peer_view.display_name.clone();
+            let device_id = peer_view
+                .device_id
+                .clone()
+                .unwrap_or_else(|| peer_view.tailscale_id.clone());
+            let tailscale_id = peer_view.tailscale_id.clone();
+            let was_online = app
+                .peers
+                .iter()
+                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+                .map(|p| p.online);
             if let Some(peer) = app
                 .peers
                 .iter_mut()
@@ -615,25 +619,49 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
             {
                 peer.device_id = device_id.clone();
                 peer.tailscale_id = tailscale_id.clone();
-                peer.online = true;
+                peer.online = state.online;
                 peer.ip = state.ip.to_string();
                 peer.device_name = name.clone();
+                if !state.connection_type.is_empty() {
+                    peer.connection = Some(state.connection_type.clone());
+                }
             } else {
                 app.peers.push(app::PeerInfo {
                     device_id,
                     device_name: name.clone(),
                     tailscale_id,
                     ip: state.ip.to_string(),
-                    online: true,
-                    connection: None,
+                    online: state.online,
+                    connection: if state.connection_type.is_empty() {
+                        None
+                    } else {
+                        Some(state.connection_type.clone())
+                    },
                 });
             }
-            app.push_item(app::DisplayItem::PeerEvent {
-                time: chrono::Local::now(),
-                kind: app::PeerEventKind::Joined,
-                peer_name: name,
-                detail: state.ip.to_string(),
-            });
+            // Feed line only for true joins (new online peer appearance).
+            if was_online.is_none() && state.online {
+                app.push_item(app::DisplayItem::PeerEvent {
+                    time: chrono::Local::now(),
+                    kind: app::PeerEventKind::Joined,
+                    peer_name: name,
+                    detail: state.ip.to_string(),
+                });
+            } else if was_online == Some(true) && !state.online {
+                app.push_item(app::DisplayItem::PeerEvent {
+                    time: chrono::Local::now(),
+                    kind: app::PeerEventKind::Disconnected,
+                    peer_name: name,
+                    detail: String::new(),
+                });
+            } else if was_online == Some(false) && state.online {
+                app.push_item(app::DisplayItem::PeerEvent {
+                    time: chrono::Local::now(),
+                    kind: app::PeerEventKind::Connected,
+                    peer_name: name,
+                    detail: state.ip.to_string(),
+                });
+            }
         }
         PeerEvent::Left(id) => {
             // PeerEvent::Left carries the session-layer Tailscale stable ID.
@@ -683,74 +711,6 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 peer_name: name,
                 detail: String::new(),
             });
-        }
-        PeerEvent::Updated(state) => {
-            // Update peer cache with new state (online/offline, IP, connection type).
-            // Prefer RFC 017 identity from the hello envelope; fall back
-            // to Layer 3 hostname/tailscale_id otherwise.
-            let name = state
-                .identity
-                .as_ref()
-                .map(|i| i.device_name.clone())
-                .unwrap_or_else(|| state.name.trim_start_matches("truffle-").to_string());
-            let device_id = state
-                .identity
-                .as_ref()
-                .map(|i| i.device_id.clone())
-                .unwrap_or_else(|| state.id.clone());
-            let tailscale_id = state.id.clone();
-
-            let was_online = app
-                .peers
-                .iter()
-                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
-                .map(|p| p.online)
-                .unwrap_or(false);
-
-            if let Some(peer) = app
-                .peers
-                .iter_mut()
-                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
-            {
-                peer.device_id = device_id.clone();
-                peer.tailscale_id = tailscale_id.clone();
-                peer.online = state.online;
-                peer.ip = state.ip.to_string();
-                peer.device_name = name.clone();
-                if !state.connection_type.is_empty() {
-                    peer.connection = Some(state.connection_type.clone());
-                }
-            } else {
-                app.peers.push(app::PeerInfo {
-                    device_id,
-                    device_name: name.clone(),
-                    tailscale_id,
-                    ip: state.ip.to_string(),
-                    online: state.online,
-                    connection: if state.connection_type.is_empty() {
-                        None
-                    } else {
-                        Some(state.connection_type.clone())
-                    },
-                });
-            }
-
-            // Show a feed event if online status changed
-            if was_online && !state.online {
-                app.push_item(app::DisplayItem::PeerEvent {
-                    time: chrono::Local::now(),
-                    kind: app::PeerEventKind::Disconnected,
-                    peer_name: name,
-                    detail: String::new(),
-                });
-            } else if !was_online && state.online {
-                app.push_item(app::DisplayItem::PeerEvent {
-                    time: chrono::Local::now(),
-                    kind: app::PeerEventKind::Connected,
-                    peer_name: name,
-                    detail: state.ip.to_string(),
-                });
-            }
         }
         PeerEvent::AuthRequired { url } => {
             // During normal TUI operation, auth shouldn't be needed.
@@ -1107,14 +1067,15 @@ async fn populate_peers(
     let current_peers = node.peers().await;
     for peer in current_peers {
         // RFC 017: prefer device_name / device_id from the hello
-        // envelope (carried on the Peer struct). Peer always has these
-        // fields populated — they fall back to the Layer 3 hostname /
-        // tailscale_id before the hello lands.
-        let name = peer.device_name.clone();
-        let device_id = peer.device_id.clone();
+        // RFC 022: device_id may be None until identity is learned.
+        let name = peer.display_name.clone();
+        let device_id = peer
+            .device_id
+            .clone()
+            .unwrap_or_else(|| peer.tailscale_id.clone());
         let tailscale_id = peer.tailscale_id.clone();
         // Update existing or insert new. Match by tailscale_id or
-        // device_id so pre-hello and post-hello entries reconcile.
+        // device_id so pre-identity and post-identity entries reconcile.
         if let Some(existing) = app
             .peers
             .iter_mut()

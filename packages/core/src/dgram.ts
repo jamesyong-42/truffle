@@ -19,6 +19,7 @@
 
 import { EventEmitter } from 'node:events';
 import type { NapiDatagram, NapiNode, NapiUdpSocket } from '@vibecook/truffle-native';
+import { peerLikeToQuery, type PeerLike } from './peer.js';
 
 /**
  * Minimum spacing between `getPeers()` calls made to enrich datagram
@@ -164,7 +165,7 @@ export class TruffleDgramSocket extends EventEmitter {
   send(
     msg: Buffer | string | Uint8Array,
     port: number,
-    address: string,
+    address: PeerLike,
     callback?: (error: Error | null) => void,
   ): void {
     const native = this.#native;
@@ -173,7 +174,8 @@ export class TruffleDgramSocket extends EventEmitter {
     }
     const data =
       typeof msg === 'string' ? Buffer.from(msg) : Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
-    native.send(data, address, port).then(
+    const dest = peerLikeToQuery(address);
+    native.send(data, dest, port).then(
       () => callback?.(null),
       (err) => this.#failSend(err as Error, callback),
     );
@@ -260,7 +262,13 @@ export class TruffleDgramSocket extends EventEmitter {
       const peers = await this.#node.getPeers();
       const next = new Map<string, { peerId: string; peerName: string }>();
       for (const peer of peers) {
-        if (peer.ip) next.set(peer.ip, { peerId: peer.deviceId, peerName: peer.deviceName });
+        if (peer.ip) {
+          // RFC 022: deviceId may be null until identity; prefer ULID, else TS id.
+          next.set(peer.ip, {
+            peerId: peer.deviceId ?? peer.tailscaleId,
+            peerName: peer.deviceName ?? peer.displayName,
+          });
+        }
       }
       this.#peerCache = next;
     } catch {

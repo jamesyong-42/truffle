@@ -18,21 +18,23 @@
 //! // Discover peers (Layer 3 — no transport needed)
 //! let peers = node.peers().await;
 //!
-//! // Send a namespaced message (Layer 6 envelope over Layer 4 WS)
-//! node.send(&peers[0].id, "chat", b"hello!").await?;
+//! // Send a namespaced message (Layer 6 envelope over Layer 4 WS).
+//! // String args remain queries; RFC 022 Phase B adds Peer handles.
+//! node.send(&peers[0].tailscale_id, "chat", b"hello!").await?;
 //!
 //! // Subscribe to a namespace
 //! let mut rx = node.subscribe("chat");
 //! let msg = rx.recv().await?;
 //!
 //! // Open a raw TCP stream (Layer 4 direct)
-//! let stream = node.open_tcp(&peers[0].id, 8080).await?;
+//! let stream = node.open_tcp(&peers[0].tailscale_id, 8080).await?;
 //! ```
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 // `std::sync::RwLock` is aliased to `StdRwLock` so the namespace_filters
 // lock — which is held only briefly for pure HashMap ops with no `.await`
 // points underneath — can stay sync. Keeping it sync lets
@@ -87,43 +89,35 @@ pub struct NamespacedMessage {
 // Peer — simplified view for application code
 // ---------------------------------------------------------------------------
 
-/// A peer as seen by application code.
+/// A peer as seen by application code (RFC 022 projection).
 ///
 /// This is a simplified projection of the internal [`PeerState`] that hides
-/// session-layer internals. Applications use this to display peer lists and
-/// resolve peer IDs for `send()` / `open_tcp()`.
-///
-/// RFC 017 introduced `device_id` and `device_name` derived from the hello
-/// envelope — these are populated once the WebSocket link comes up. Before
-/// that, they fall back to the legacy Tailscale ID / hostname pair so
-/// application code has something to display even for not-yet-connected
-/// peers.
+/// session-layer internals. Networking still accepts string queries today;
+/// Phase B of RFC 022 will take handle-first parameters. Fields are already
+/// honest: `device_id` is never a Tailscale-id fallback.
 #[derive(Debug, Clone)]
 pub struct Peer {
-    /// Legacy per-peer ID. Kept for back-compat with call sites that
-    /// destructure `peer.id`; new code should prefer [`device_id`](Self::device_id)
-    /// directly. Equal to `device_id` once the hello has landed; equal to
-    /// the Tailscale stable ID beforehand.
-    pub id: String,
-    /// Legacy name (the Layer 3 Tailscale hostname — the *slug*). New code
-    /// should prefer [`device_name`](Self::device_name).
-    pub name: String,
-    /// Stable per-device ULID (RFC 017 §5.4) from the hello envelope.
-    /// Falls back to the Tailscale stable ID until the hello handshake
-    /// completes.
-    pub device_id: String,
-    /// Human-readable device name from the hello envelope (original
-    /// Unicode form, NOT the slug). Falls back to the hostname until the
-    /// hello completes.
-    pub device_name: String,
-    /// Tailscale stable node ID — escape hatch for diagnostics and the
-    /// transport routing key.
+    /// Durable ULID once known and published; `None` until identity is learned
+    /// (or while suppressed under first-wins). Never equals `tailscale_id`.
+    pub device_id: Option<String>,
+    /// Human-readable device name from the hello identity block, if known.
+    pub device_name: Option<String>,
+    /// Best label for UI: identity name → hostname with `truffle-{appId}-`
+    /// stripped when possible → short tailscale id.
+    pub display_name: String,
+    /// Layer 3 Tailscale hostname (`truffle-{appId}-{slug}`).
+    pub hostname: String,
+    /// Tailscale stable node ID — routing key and advanced diagnostics.
     pub tailscale_id: String,
+    /// Process-local ref `{tailscale_id}:{generation}` (RFC 022).
+    pub peer_ref: String,
+    /// Generation of this registry entry (bumped on re-join).
+    pub generation: u64,
     /// Network IP address.
     pub ip: IpAddr,
     /// Whether the peer is online (from Layer 3).
     pub online: bool,
-    /// Whether there is an active WebSocket connection.
+    /// Whether there is an active envelope-bus WebSocket connection.
     pub ws_connected: bool,
     /// Connection type description (e.g., `"direct"` or `"relay:ord"`).
     pub connection_type: String,
@@ -136,25 +130,45 @@ pub struct Peer {
 
 impl From<PeerState> for Peer {
     fn from(s: PeerState) -> Self {
-        let (device_id, device_name, os) = match s.identity.as_ref() {
-            Some(identity) => (
-                identity.device_id.clone(),
-                identity.device_name.clone(),
-                Some(identity.os.clone()),
-            ),
-            None => (s.id.clone(), s.name.clone(), s.os.clone()),
+        let (device_id, device_name, os_from_hello) = if s.identity_suppressed {
+            (None, None, None)
+        } else {
+            match s.identity.as_ref() {
+                Some(identity) => (
+                    Some(identity.device_id.clone()),
+                    Some(identity.device_name.clone()),
+                    Some(identity.os.clone()),
+                ),
+                None => (None, None, None),
+            }
         };
-        let legacy_id = s
-            .identity
-            .as_ref()
-            .map(|i| i.device_id.clone())
-            .unwrap_or_else(|| s.id.clone());
+
+        // Invariant I1: published device_id must never equal the Tailscale id.
+        debug_assert!(
+            device_id
+                .as_ref()
+                .map(|d| d.as_str() != s.id.as_str())
+                .unwrap_or(true),
+            "RFC 022 I1 violated: device_id must not equal tailscale_id"
+        );
+
+        let display_name = device_name
+            .clone()
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| display_name_from_hostname(&s.name, &s.id));
+
+        let peer_ref = s.peer_ref();
+        let generation = s.generation;
+        let os = os_from_hello.or(s.os.clone());
+
         Self {
-            id: legacy_id,
-            name: s.name,
             device_id,
             device_name,
+            display_name,
+            hostname: s.name,
             tailscale_id: s.id,
+            peer_ref,
+            generation,
             ip: s.ip,
             online: s.online,
             ws_connected: s.ws_connected,
@@ -162,6 +176,30 @@ impl From<PeerState> for Peer {
             os,
             last_seen: s.last_seen,
         }
+    }
+}
+
+/// Derive a human-ish display name from a Tailscale hostname when identity
+/// is not yet known: strip a leading `truffle-…-` app prefix when present.
+fn display_name_from_hostname(hostname: &str, tailscale_id: &str) -> String {
+    const PREFIX: &str = "truffle-";
+    if let Some(rest) = hostname.strip_prefix(PREFIX) {
+        // rest = "{appId}-{slug…}"; drop the first label (appId).
+        if let Some((_, slug)) = rest.split_once('-') {
+            if !slug.is_empty() {
+                return slug.to_string();
+            }
+        }
+    }
+    if !hostname.is_empty() {
+        return hostname.to_string();
+    }
+    // Last resort: short tailscale id.
+    let short: String = tailscale_id.chars().take(8).collect();
+    if short.is_empty() {
+        "peer".to_string()
+    } else {
+        short
     }
 }
 
@@ -175,6 +213,19 @@ pub enum NodeError {
     /// The requested peer is not known.
     #[error("peer not found: {0}")]
     PeerNotFound(String),
+
+    /// The query matched more than one peer (RFC 022 `mesh.peer`).
+    #[error("ambiguous peer query '{query}': {} candidates", candidates.len())]
+    AmbiguousPeer {
+        /// Original query string.
+        query: String,
+        /// Candidate display labels / routing keys for the UI.
+        candidates: Vec<String>,
+    },
+
+    /// The peer handle is no longer usable (left the mesh).
+    #[error("peer gone: {0}")]
+    PeerGone(String),
 
     /// Failed to establish a connection.
     #[error("connection failed: {0}")]
@@ -518,28 +569,75 @@ impl<N: NetworkProvider + 'static> Node<N> {
             .peers()
             .await
             .into_iter()
-            .map(|s| {
-                // Before any hello, `device_name` falls back to the full
-                // Layer 3 hostname; strip it to the bare device-name slug so
-                // raw-transport-only peers read like `getLocalInfo()` names
-                // (asymmetry found by the RFC 021 cross-machine smoke test).
-                let bare = s
-                    .identity
-                    .is_none()
-                    .then(|| hostname_slug(&s.name, &app_id).map(str::to_string))
-                    .flatten();
-                let mut peer = Peer::from(s);
-                if let Some(bare) = bare {
-                    peer.device_name = bare;
-                }
-                peer
-            })
+            .map(|s| Self::project_peer(s, &app_id))
             .collect()
+    }
+
+    /// Project a session [`PeerState`] to the public [`Peer`] view.
+    fn project_peer(s: PeerState, app_id: &str) -> Peer {
+        // RFC 022: `device_name` stays None until identity is known.
+        // Prefer a stripped hostname slug for `display_name` when we
+        // have no hello name yet (raw-transport / pre-identity peers).
+        let bare = s
+            .identity
+            .is_none()
+            .then(|| hostname_slug(&s.name, app_id).map(str::to_string))
+            .flatten();
+        let mut peer = Peer::from(s);
+        if let Some(bare) = bare {
+            peer.display_name = bare;
+        }
+        peer
     }
 
     /// Subscribe to peer change events (joined, left, connected, etc.).
     pub fn on_peer_change(&self) -> broadcast::Receiver<PeerEvent> {
         self.session.on_peer_change()
+    }
+
+    /// Resolve a query to a public [`Peer`] handle view (RFC 022).
+    ///
+    /// - Not found → `Ok(None)` after optional wait
+    /// - Ambiguous (multiple name / short-prefix hits) → [`NodeError::AmbiguousPeer`]
+    ///
+    /// `wait_ms`: when set, block until the query becomes resolvable or the
+    /// timeout elapses (then `Ok(None)`). Useful for rehydrating a saved ULID
+    /// whose owner has not completed hello yet.
+    pub async fn peer(&self, query: &str, wait_ms: Option<u64>) -> Result<Option<Peer>, NodeError> {
+        match self.resolve_peer(query).await {
+            Ok(state) => {
+                let app_id = self.network.local_identity().app_id;
+                return Ok(Some(Self::project_peer(state, &app_id)));
+            }
+            Err(NodeError::PeerNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+
+        let Some(ms) = wait_ms.filter(|m| *m > 0) else {
+            return Ok(None);
+        };
+
+        let mut rx = self.session.on_peer_change();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(_)) => match self.resolve_peer(query).await {
+                    Ok(state) => {
+                        let app_id = self.network.local_identity().app_id;
+                        return Ok(Some(Self::project_peer(state, &app_id)));
+                    }
+                    Err(NodeError::PeerNotFound(_)) => continue,
+                    Err(e) => return Err(e),
+                },
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Ok(None),
+                Err(_) => return Ok(None), // timeout
+            }
+        }
     }
 
     /// Resolve any accepted peer identifier form to the peer's current
@@ -551,48 +649,85 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// documented on `resolve_peer_id`, plus the peer's Tailscale IP.
     pub(crate) async fn resolve_peer(&self, peer_ref: &str) -> Result<PeerState, NodeError> {
         let peers = self.session.peers().await;
+        let app_id = self.network.local_identity().app_id;
 
-        // Direct matches first — device_id, device_name, hostname,
-        // tailscale_id, IP — so deterministic inputs always take the
-        // fast path.
+        // Exact matches that are always unique.
         for p in &peers {
-            if let Some(identity) = p.identity.as_ref() {
-                if identity.device_id == peer_ref || identity.device_name == peer_ref {
+            if let Some(uid) = p.published_device_id() {
+                if uid == peer_ref {
                     return Ok(p.clone());
                 }
             }
             if p.id == peer_ref || p.name == peer_ref || p.ip.to_string() == peer_ref {
                 return Ok(p.clone());
             }
-        }
-
-        // Second pass: bare device name for peers that have not completed a
-        // hello yet (raw-transport-only contact — no WS envelope traffic).
-        // Layer 3 hostnames follow `truffle-{app_id}-{slug(device_name)}`
-        // (RFC 017), so match the slugged input against the hostname's slug
-        // part; slugging the input makes "EC2 Smoke" match "ec2-smoke".
-        let app_id = self.network.local_identity().app_id;
-        let ref_slug = identity::slug(peer_ref, 255);
-        if !ref_slug.is_empty() {
-            for p in &peers {
-                if hostname_slug(&p.name, &app_id) == Some(ref_slug.as_str()) {
-                    return Ok(p.clone());
-                }
+            if p.peer_ref() == peer_ref {
+                return Ok(p.clone());
             }
         }
 
-        // Prefix match on device_id (require at least 4 chars and a single
-        // unambiguous hit). This matches the CLI affordance of typing just
-        // the first few characters of a ULID.
-        if peer_ref.len() >= 4 {
-            let mut hits = peers.iter().filter(|p| {
+        // Device-name matches (published identity names) — may be ambiguous.
+        let name_hits: Vec<&PeerState> = peers
+            .iter()
+            .filter(|p| {
                 p.identity
                     .as_ref()
-                    .map(|i| i.device_id.starts_with(peer_ref))
+                    .map(|i| !p.identity_suppressed && i.device_name.eq_ignore_ascii_case(peer_ref))
                     .unwrap_or(false)
+            })
+            .collect();
+        if name_hits.len() > 1 {
+            return Err(NodeError::AmbiguousPeer {
+                query: peer_ref.to_string(),
+                candidates: name_hits
+                    .iter()
+                    .map(|p| p.published_device_id().unwrap_or(p.id.as_str()).to_string())
+                    .collect(),
             });
-            if let (Some(hit), None) = (hits.next(), hits.next()) {
-                return Ok(hit.clone());
+        }
+        if let Some(hit) = name_hits.first() {
+            return Ok((*hit).clone());
+        }
+
+        // Bare device name via hostname slug (pre-identity peers).
+        let ref_slug = identity::slug(peer_ref, 255);
+        if !ref_slug.is_empty() {
+            let slug_hits: Vec<&PeerState> = peers
+                .iter()
+                .filter(|p| hostname_slug(&p.name, &app_id) == Some(ref_slug.as_str()))
+                .collect();
+            if slug_hits.len() > 1 {
+                return Err(NodeError::AmbiguousPeer {
+                    query: peer_ref.to_string(),
+                    candidates: slug_hits.iter().map(|p| p.id.clone()).collect(),
+                });
+            }
+            if let Some(hit) = slug_hits.first() {
+                return Ok((*hit).clone());
+            }
+        }
+
+        // Prefix match on published device_id (require ≥4 chars, unique).
+        if peer_ref.len() >= 4 {
+            let hits: Vec<&PeerState> = peers
+                .iter()
+                .filter(|p| {
+                    p.published_device_id()
+                        .map(|uid| uid.starts_with(peer_ref))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if hits.len() > 1 {
+                return Err(NodeError::AmbiguousPeer {
+                    query: peer_ref.to_string(),
+                    candidates: hits
+                        .iter()
+                        .filter_map(|p| p.published_device_id().map(|s| s.to_string()))
+                        .collect(),
+                });
+            }
+            if let Some(hit) = hits.first() {
+                return Ok((*hit).clone());
             }
         }
 
@@ -608,8 +743,12 @@ impl<N: NetworkProvider + 'static> Node<N> {
         Ok(self.resolve_peer(peer_ref).await?.ip)
     }
 
-    /// Resolve a peer identifier to the canonical per-device ULID
-    /// (`device_id`) from the RFC 017 hello envelope.
+    /// Resolve a peer query to a string safe to pass to [`send`](Self::send)
+    /// and other peer-addressed methods.
+    ///
+    /// Prefer the published durable ULID when known and not suppressed;
+    /// otherwise return the Tailscale stable id (routing key). This is the
+    /// legacy string path — RFC 022 Phase B replaces it with `peer()` handles.
     ///
     /// Accepts any of:
     /// - the stable `device_id` (full ULID)
@@ -618,19 +757,13 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// - the human-readable `device_name` from the hello
     /// - the bare device name of a peer that has not helloed yet (matched
     ///   via the `truffle-{app_id}-{slug}` hostname convention)
-    /// - the Layer 3 Tailscale hostname (the sanitised slug) — legacy
-    /// - the Tailscale stable ID — escape hatch for diagnostics
+    /// - the Layer 3 Tailscale hostname (the sanitised slug)
+    /// - the Tailscale stable ID
     /// - the Tailscale IP address (e.g. `100.x.x.x`)
-    ///
-    /// The returned string is always a `device_id` (or the Tailscale
-    /// stable ID when no hello identity is known yet), so it is safe to
-    /// feed back into `Node::send` or any other method that takes a peer
-    /// identifier.
     pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
         let p = self.resolve_peer(peer_id).await?;
-        Ok(p.identity
-            .as_ref()
-            .map(|i| i.device_id.clone())
+        Ok(p.published_device_id()
+            .map(|s| s.to_string())
             .unwrap_or_else(|| p.id.clone()))
     }
 
@@ -947,6 +1080,8 @@ pub struct NodeBuilder {
     ephemeral: bool,
     ws_port: u16,
     idle_timeout_secs: Option<u64>,
+    /// RFC 022 Phase C: proactively exchange hello with online peers.
+    eager_identity: bool,
 }
 
 /// Atomically write a string to `path` by writing to a sibling `.tmp`
@@ -993,6 +1128,7 @@ impl Default for NodeBuilder {
             ephemeral: false,
             ws_port: 9417,
             idle_timeout_secs: None,
+            eager_identity: true,
         }
     }
 }
@@ -1057,6 +1193,13 @@ impl NodeBuilder {
     }
 
     /// Set the WebSocket listen port.
+    /// RFC 022 Phase C: when true (default), proactively exchange hello with
+    /// online peers so durable `device_id` is learned without app `send`.
+    pub fn eager_identity(mut self, enabled: bool) -> Self {
+        self.eager_identity = enabled;
+        self
+    }
+
     pub fn ws_port(mut self, port: u16) -> Self {
         self.ws_port = port;
         self
@@ -1183,6 +1326,7 @@ impl NodeBuilder {
     /// or propagates errors from the network provider startup.
     pub async fn build(self) -> Result<Node<TailscaleProvider>, NodeError> {
         let ws_port = self.ws_port;
+        let eager_identity = self.eager_identity;
         let config = self.prepare_config()?;
         let state_dir = PathBuf::from(&config.state_dir);
 
@@ -1199,7 +1343,14 @@ impl NodeBuilder {
         let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config));
 
         // 3. Create PeerRegistry and start session.
-        let session = Arc::new(PeerRegistry::new(network.clone(), ws_transport));
+        let session = Arc::new(PeerRegistry::with_options(
+            network.clone(),
+            ws_transport,
+            crate::session::PeerRegistryOptions {
+                eager_identity,
+                ..Default::default()
+            },
+        ));
         session.start().await;
 
         // 4. Create the node with the envelope router.
@@ -1228,6 +1379,7 @@ impl NodeBuilder {
         on_auth: impl Fn(String) + Send + 'static,
     ) -> Result<Node<TailscaleProvider>, NodeError> {
         let ws_port = self.ws_port;
+        let eager_identity = self.eager_identity;
         let config = self.prepare_config()?;
         let state_dir = PathBuf::from(&config.state_dir);
 
@@ -1269,7 +1421,14 @@ impl NodeBuilder {
         let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config));
 
         // 7. Create PeerRegistry and start session.
-        let session = Arc::new(PeerRegistry::new(network.clone(), ws_transport));
+        let session = Arc::new(PeerRegistry::with_options(
+            network.clone(),
+            ws_transport,
+            crate::session::PeerRegistryOptions {
+                eager_identity,
+                ..Default::default()
+            },
+        ));
         session.start().await;
 
         // 8. Create the node with the envelope router.
@@ -1525,7 +1684,11 @@ mod tests {
 
         let peers = node.peers().await;
         assert_eq!(peers.len(), 1);
-        assert_eq!(peers[0].id, "peer-a");
+        assert_eq!(peers[0].tailscale_id, "peer-a");
+        assert!(
+            peers[0].device_id.is_none(),
+            "RFC 022: no ULID before identity"
+        );
         assert!(peers[0].online);
         assert!(!peers[0].ws_connected);
     }
@@ -2034,9 +2197,11 @@ mod tests {
 
         let peers = node.peers().await;
         assert_eq!(peers.len(), 1);
-        // device_name reads like getLocalInfo() names, not the raw hostname.
-        assert_eq!(peers[0].device_name, "ec2-smoke");
-        assert_eq!(peers[0].name, "truffle-test-ec2-smoke");
+        // Pre-identity: device_name is None; display_name uses stripped slug.
+        assert!(peers[0].device_name.is_none());
+        assert_eq!(peers[0].display_name, "ec2-smoke");
+        assert_eq!(peers[0].hostname, "truffle-test-ec2-smoke");
+        assert!(peers[0].device_id.is_none());
     }
 
     #[tokio::test]
@@ -2183,6 +2348,112 @@ mod tests {
         assert!(
             result.is_err(),
             "cross-app QUIC connect must fail (ALPN mismatch)"
+        );
+    }
+
+    // ── RFC 022 honest projection ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_rfc022_node_peer_resolves_and_wait_miss_returns_none() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        // Miss without wait
+        assert!(node.peer("nope", None).await.unwrap().is_none());
+
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-a")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let p = node.peer("peer-a", None).await.unwrap().expect("found");
+        assert_eq!(p.tailscale_id, "peer-a");
+        assert!(p.device_id.is_none());
+
+        // waitMs on unknown times out to None
+        let start = std::time::Instant::now();
+        let miss = node.peer("still-missing", Some(80)).await.unwrap();
+        assert!(miss.is_none());
+        assert!(start.elapsed() >= Duration::from_millis(70));
+    }
+
+    #[test]
+    fn test_rfc022_peer_projection_never_uses_tailscale_as_device_id() {
+        use crate::session::PeerState;
+        use std::net::Ipv4Addr;
+
+        // Pre-identity
+        let pre = PeerState {
+            id: "ts-abc".into(),
+            generation: 1,
+            name: "truffle-app-laptop".into(),
+            ip: Ipv4Addr::new(100, 64, 0, 1).into(),
+            online: true,
+            ws_connected: false,
+            connection_type: "direct".into(),
+            os: None,
+            last_seen: None,
+            identity: None,
+            identity_suppressed: false,
+        };
+        let p = Peer::from(pre);
+        assert!(p.device_id.is_none());
+        assert_eq!(p.tailscale_id, "ts-abc");
+        assert_eq!(p.peer_ref, "ts-abc:1");
+        assert_eq!(p.display_name, "laptop");
+        assert!(p
+            .device_id
+            .as_ref()
+            .map(|d| d.as_str() != p.tailscale_id)
+            .unwrap_or(true));
+
+        // Post-identity
+        let post = PeerState {
+            id: "ts-abc".into(),
+            generation: 1,
+            name: "truffle-app-laptop".into(),
+            ip: Ipv4Addr::new(100, 64, 0, 1).into(),
+            online: true,
+            ws_connected: true,
+            connection_type: "direct".into(),
+            os: Some("darwin".into()),
+            last_seen: None,
+            identity: Some(crate::session::PeerIdentity {
+                app_id: "app".into(),
+                device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".into(),
+                device_name: "Alice's Mac".into(),
+                os: "darwin".into(),
+                tailscale_id: "ts-abc".into(),
+            }),
+            identity_suppressed: false,
+        };
+        let p = Peer::from(post);
+        assert_eq!(p.device_id.as_deref(), Some("01J4K9M2Z8AB3RNYQPW6H5TC0X"));
+        assert_ne!(p.device_id.as_deref().unwrap(), p.tailscale_id);
+        assert_eq!(p.display_name, "Alice's Mac");
+
+        // Suppressed (first-wins loser)
+        let suppressed = PeerState {
+            id: "ts-xyz".into(),
+            generation: 1,
+            name: "truffle-app-other".into(),
+            ip: Ipv4Addr::new(100, 64, 0, 2).into(),
+            online: true,
+            ws_connected: true,
+            connection_type: "direct".into(),
+            os: None,
+            last_seen: None,
+            identity: Some(crate::session::PeerIdentity {
+                app_id: "app".into(),
+                device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".into(),
+                device_name: "Clone".into(),
+                os: "linux".into(),
+                tailscale_id: "ts-xyz".into(),
+            }),
+            identity_suppressed: true,
+        };
+        let p = Peer::from(suppressed);
+        assert!(
+            p.device_id.is_none(),
+            "suppressed claim must project null device_id"
         );
     }
 }

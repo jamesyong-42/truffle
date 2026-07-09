@@ -48,6 +48,9 @@ pub struct NapiNodeConfig {
     pub ephemeral: Option<bool>,
     /// WebSocket listen port. Defaults to 9417.
     pub ws_port: Option<u16>,
+    /// RFC 022 Phase C: proactively exchange hello with online peers so
+    /// durable deviceId is learned without app send. Defaults to true.
+    pub eager_identity: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,35 +86,24 @@ pub struct NapiNodeIdentity {
 // Peer
 // ---------------------------------------------------------------------------
 
-/// A peer as seen by application code (RFC 017 §7.3).
+/// A peer as seen by application code (RFC 022 honest projection).
 #[napi(object)]
 pub struct NapiPeer {
-    /// Remote device identity. Equals the remote node's stable **ULID** only
-    /// once its identity has been learned over the envelope-bus WebSocket hello
-    /// (RFC 017 §8) — i.e. once `wsConnected` is `true`. Until then, and
-    /// permanently for raw-transport-only apps that never open the bus, it
-    /// falls back to the peer's **Tailscale stable node id** (the same value as
-    /// `tailscaleId`). It therefore CHANGES from the Tailscale id to the ULID
-    /// the moment the WS session connects (verified by probe: the flip is
-    /// simultaneous with `wsConnected` going true, and does not regress) — do
-    /// NOT treat it as stable within a session. Code that keys peers by
-    /// identity while using only the raw transports (QUIC/TCP/UDP) should key
-    /// on `tailscaleId` instead.
-    pub device_id: String,
-    /// Human-readable device name from the remote node's hello. Falls back to
-    /// the Tailscale hostname (slug) until `wsConnected` is `true`, on the
-    /// same rule as `deviceId`.
-    pub device_name: String,
+    /// Durable ULID once known; `null` until identity is learned.
+    /// Never equals `tailscaleId` and never silently falls back to it.
+    pub device_id: Option<String>,
+    /// Human-readable device name from the hello identity block, if known.
+    pub device_name: Option<String>,
+    /// Best label for UI (identity name → hostname slug → short id).
+    pub display_name: String,
+    /// Layer 3 Tailscale hostname (`truffle-{appId}-{slug}`).
+    pub hostname: String,
     /// Network IP address as a string.
     pub ip: String,
     /// Whether the peer is online (from Layer 3).
     pub online: bool,
-    /// Whether an envelope-bus WebSocket session is currently open to this
-    /// peer. Also gates `deviceId` / `deviceName`: while `false` they are the
-    /// Tailscale-stable-id / hostname fallback; the first time it becomes
-    /// `true` the RFC 017 hello lands and both flip to the remote ULID / real
-    /// name. Raw-transport-only apps (that never call `send`/`broadcast`/
-    /// `onMessage`) keep this `false` and so never see the ULID here.
+    /// Whether an envelope-bus WebSocket session is currently open.
+    /// Advanced: do not gate `send` on this field.
     pub ws_connected: bool,
     /// Connection type description (e.g., "direct" or "relay:ord").
     pub connection_type: String,
@@ -119,13 +111,12 @@ pub struct NapiPeer {
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
-    /// Tailscale stable node id — the peer's transport routing key and the ONLY
-    /// identity here that is stable for the whole session. Prefer this as the
-    /// map key for raw-transport-only apps, where `deviceId` never becomes the
-    /// ULID (no WS hello is exchanged) and would otherwise change under you. For
-    /// apps on the envelope bus, `deviceId` (the ULID, once `wsConnected`) is
-    /// the portable cross-restart identity.
+    /// Tailscale stable node id — routing key / diagnostics (advanced).
     pub tailscale_id: String,
+    /// Process-local ref `{tailscaleId}:{generation}` (RFC 022).
+    pub peer_ref: String,
+    /// Registry entry generation (bumped on re-join).
+    pub generation: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -167,15 +158,14 @@ pub struct NapiHealthInfo {
 /// A peer change event delivered to JS.
 #[napi(object)]
 pub struct NapiPeerEvent {
-    /// Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required".
+    /// Event type: "joined", "left", "updated", "identity", "ws_connected",
+    /// "ws_disconnected", "auth_required".
     pub event_type: String,
-    /// `device_id` of the affected peer — the ULID once the peer's hello has
-    /// been seen, otherwise the Tailscale stable id fallback (same rule as
-    /// `NapiPeer.deviceId`). `left` / `ws_disconnected` events in
-    /// particular often carry the Tailscale id because the hello may already be
-    /// gone. Empty string for `auth_required` events (no associated peer).
+    /// Routing key of the affected peer (Tailscale stable id), or empty for
+    /// `auth_required`. Prefer `peer` when present (RFC 022).
     pub peer_id: String,
-    /// Full peer info (present for joined/updated events).
+    /// Full peer info when available (joined/updated/identity; also preferred
+    /// on ws_* when resolvable).
     pub peer: Option<NapiPeer>,
     /// Auth URL (present only for auth_required events).
     pub auth_url: Option<String>,

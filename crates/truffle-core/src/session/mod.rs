@@ -24,7 +24,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex, RwLock, Semaphore};
 
 pub use self::hello::{
     HelloEnvelope, HelloKind, PeerIdentity, CLOSE_APP_MISMATCH, CLOSE_HELLO_PROTOCOL, HELLO_TIMEOUT,
@@ -45,11 +45,19 @@ use crate::transport::{FramedStream, StreamTransport};
 /// Layer 5 session state (connection status). Peers are added to the
 /// registry when Layer 3 reports them, NOT when transport connections
 /// are established.
+///
+/// RFC 022: `id` is always the Tailscale stable node id (routing key).
+/// Application-facing durable identity lives in [`Self::identity`] and is
+/// projected as an honest `Option` (never filled with the Tailscale id).
 #[derive(Debug, Clone)]
 pub struct PeerState {
     /// Tailscale stable node ID from the network provider. Used as the
     /// primary key for routing inside the session layer.
     pub id: String,
+    /// Generation counter for this `id` within this process (RFC 022 §7.7).
+    /// Bumped each time the same Tailscale node re-joins after `Left`.
+    /// Combined with `id` to form [`peer_ref`].
+    pub generation: u64,
     /// Tailscale hostname (as seen by Layer 3). This is the slugged form,
     /// NOT the user-facing `device_name`.
     pub name: String,
@@ -67,10 +75,34 @@ pub struct PeerState {
     pub last_seen: Option<String>,
     /// Peer identity advertised in the remote's hello envelope (RFC 017 §8).
     ///
-    /// `None` until the WebSocket hello handshake has completed; `Some`
-    /// once we have received the remote's identity block. This is the
-    /// source of truth for `device_id` and the display `device_name`.
+    /// `None` until identity is learned (hello / future hostinfo). This is
+    /// the source of truth for the durable ULID — never filled with the
+    /// Tailscale id as a fallback (RFC 022).
     pub identity: Option<PeerIdentity>,
+    /// When true, `identity` is stored but **not published** as `device_id`
+    /// because another live peer already owns that ULID in `by_device`
+    /// (first-wins, RFC 022 §7.7).
+    pub identity_suppressed: bool,
+}
+
+impl PeerState {
+    /// Process-local peer ref: `{tailscale_id}:{generation}` (RFC 022).
+    pub fn peer_ref(&self) -> String {
+        format_peer_ref(&self.id, self.generation)
+    }
+
+    /// Published durable device id, if any (respects first-wins suppression).
+    pub fn published_device_id(&self) -> Option<&str> {
+        if self.identity_suppressed {
+            return None;
+        }
+        self.identity.as_ref().map(|i| i.device_id.as_str())
+    }
+}
+
+/// Format a [`PeerState::peer_ref`] / user-facing `Peer.peer_ref`.
+pub fn format_peer_ref(tailscale_id: &str, generation: u64) -> String {
+    format!("{tailscale_id}:{generation}")
 }
 
 /// Events emitted by the session layer when peer state changes.
@@ -83,12 +115,18 @@ pub enum PeerEvent {
     /// A new peer appeared on the network (from Layer 3).
     Joined(PeerState),
     /// A peer left the network (by stable node ID, from Layer 3).
+    /// Payload is the Tailscale stable id (routing key).
     Left(String),
     /// A peer's metadata changed (IP, relay, online status, from Layer 3).
     Updated(PeerState),
+    /// Durable identity was first set or rotated on a peer (RFC 022).
+    /// Carries the full peer snapshot after the change.
+    Identity(PeerState),
     /// A WebSocket connection was established to a peer (Layer 5 — WS transport).
+    /// Payload is the Tailscale stable id.
     WsConnected(String),
     /// A WebSocket connection was lost to a peer (Layer 5 — WS transport).
+    /// Payload is the Tailscale stable id. Does **not** clear learned identity.
     WsDisconnected(String),
     /// Authentication is required — the URL should be shown to the user.
     AuthRequired { url: String },
@@ -100,9 +138,9 @@ pub enum PeerEvent {
 /// raw bytes along with the sender's identity and a timestamp.
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
-    /// Sender's stable `device_id` (ULID) from the hello envelope.
-    /// RFC 017: application code always sees peer identity as `device_id`,
-    /// never as the Tailscale stable ID.
+    /// Sender's **WhoIs-verified Tailscale stable id** (the connection's
+    /// routing key). RFC 022 §7.5: attribution never uses the self-declared
+    /// ULID from the hello envelope.
     pub from: String,
     /// Raw bytes received (Layer 6 will interpret this).
     pub data: Vec<u8>,
@@ -211,10 +249,18 @@ pub struct PeerRegistry<N: NetworkProvider + 'static> {
     /// Layer 4 WebSocket transport (for framed connections).
     ws_transport: Arc<WebSocketTransport<N>>,
 
-    /// All known peers from Layer 3. Peers exist here even with zero connections.
+    /// All known peers from Layer 3, keyed by Tailscale stable id.
+    /// Peers exist here even with zero connections.
     peers: Arc<RwLock<HashMap<String, PeerState>>>,
 
-    /// Active WebSocket connection handles indexed by peer_id.
+    /// Durable ULID → Tailscale id for at most one **published** live entry
+    /// (RFC 022 §7.7). Used for queries only — never for message attribution.
+    by_device: Arc<RwLock<HashMap<String, String>>>,
+
+    /// Next generation number per Tailscale id (incremented on each join).
+    next_generation: Arc<RwLock<HashMap<String, u64>>>,
+
+    /// Active WebSocket connection handles indexed by peer_id (Tailscale id).
     ws_connections: Arc<RwLock<HashMap<String, WsConnectionHandle>>>,
 
     /// Reconnect backoff trackers per peer.
@@ -228,10 +274,38 @@ pub struct PeerRegistry<N: NetworkProvider + 'static> {
 
     /// Channel for incoming messages from any connected peer.
     incoming_tx: broadcast::Sender<IncomingMessage>,
+
+    /// RFC 022 Phase C: proactively exchange hello with online peers.
+    eager_identity: bool,
+
+    /// Cap concurrent eager-identity dials (default 4).
+    eager_identity_sem: Arc<Semaphore>,
+
+    /// Peer ids with an in-flight ensure_identity task (dedupe).
+    identity_inflight: Arc<AsyncMutex<HashSet<String>>>,
+}
+
+/// Options for [`PeerRegistry::with_options`].
+#[derive(Debug, Clone)]
+pub struct PeerRegistryOptions {
+    /// When true (default), dial the envelope WS once per online peer to
+    /// learn durable identity without waiting for app `send` (RFC 022 §8).
+    pub eager_identity: bool,
+    /// Max concurrent eager-identity dials. Default: 4.
+    pub eager_identity_concurrency: usize,
+}
+
+impl Default for PeerRegistryOptions {
+    fn default() -> Self {
+        Self {
+            eager_identity: true,
+            eager_identity_concurrency: 4,
+        }
+    }
 }
 
 impl<N: NetworkProvider + 'static> PeerRegistry<N> {
-    /// Create a new peer registry.
+    /// Create a new peer registry with default options (eager identity on).
     ///
     /// - `network`: The Layer 3 network provider for peer discovery.
     /// - `ws_transport`: The Layer 4 WebSocket transport for connections.
@@ -239,18 +313,33 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// Call [`start()`](Self::start) after creation to begin processing
     /// peer events and accepting incoming connections.
     pub fn new(network: Arc<N>, ws_transport: Arc<WebSocketTransport<N>>) -> Self {
+        Self::with_options(network, ws_transport, PeerRegistryOptions::default())
+    }
+
+    /// Create a peer registry with explicit options (RFC 022 Phase C).
+    pub fn with_options(
+        network: Arc<N>,
+        ws_transport: Arc<WebSocketTransport<N>>,
+        options: PeerRegistryOptions,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         let (incoming_tx, _) = broadcast::channel(1024);
+        let concurrency = options.eager_identity_concurrency.max(1);
 
         Self {
             network,
             ws_transport,
             peers: Arc::new(RwLock::new(HashMap::new())),
+            by_device: Arc::new(RwLock::new(HashMap::new())),
+            next_generation: Arc::new(RwLock::new(HashMap::new())),
             ws_connections: Arc::new(RwLock::new(HashMap::new())),
             peer_backoffs: Arc::new(RwLock::new(HashMap::new())),
             connecting: Arc::new(RwLock::new(HashSet::new())),
             event_tx,
             incoming_tx,
+            eager_identity: options.eager_identity,
+            eager_identity_sem: Arc::new(Semaphore::new(concurrency)),
+            identity_inflight: Arc::new(AsyncMutex::new(HashSet::new())),
         }
     }
 
@@ -276,14 +365,39 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     fn spawn_peer_event_loop(&self) {
         let mut events = self.network.peer_events();
         let peers = self.peers.clone();
+        let by_device = self.by_device.clone();
+        let next_generation = self.next_generation.clone();
         let ws_connections = self.ws_connections.clone();
         let event_tx = self.event_tx.clone();
+        // Clones for scheduling eager identity from the event loop.
+        let schedule_ctx = EagerScheduleCtx {
+            eager_identity: self.eager_identity,
+            peers: self.peers.clone(),
+            by_device: self.by_device.clone(),
+            ws_connections: self.ws_connections.clone(),
+            peer_backoffs: self.peer_backoffs.clone(),
+            connecting: self.connecting.clone(),
+            event_tx: self.event_tx.clone(),
+            incoming_tx: self.incoming_tx.clone(),
+            ws_transport: self.ws_transport.clone(),
+            network: self.network.clone(),
+            eager_identity_sem: self.eager_identity_sem.clone(),
+            identity_inflight: self.identity_inflight.clone(),
+        };
 
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(NetworkPeerEvent::Joined(network_peer)) => {
-                        let state = network_peer_to_state(&network_peer);
+                        let generation = {
+                            let mut gens = next_generation.write().await;
+                            let e = gens.entry(network_peer.id.clone()).or_insert(0);
+                            *e += 1;
+                            *e
+                        };
+                        let state = network_peer_to_state(&network_peer, generation);
+                        let online = state.online;
+                        let peer_id = network_peer.id.clone();
                         let peer_event = PeerEvent::Joined(state.clone());
 
                         {
@@ -294,9 +408,14 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                         let _ = event_tx.send(peer_event);
                         tracing::info!(
                             peer_id = %network_peer.id,
+                            generation,
                             peer_name = %network_peer.hostname,
                             "session: peer joined"
                         );
+
+                        if online {
+                            schedule_ctx.schedule(peer_id);
+                        }
                     }
                     Ok(NetworkPeerEvent::Left(peer_id)) => {
                         // Close any active WS connection for this peer
@@ -314,35 +433,101 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                             );
                         }
 
-                        {
+                        let removed = {
                             let mut map = peers.write().await;
-                            map.remove(&peer_id);
+                            map.remove(&peer_id)
+                        };
+
+                        // Drop by_device mapping if it pointed at this peer; promote
+                        // a suppressed claimant if one exists (RFC 022 §7.7).
+                        if let Some(removed) = removed {
+                            let promote = {
+                                let mut by_dev = by_device.write().await;
+                                if let Some(uid) = removed.published_device_id() {
+                                    if by_dev.get(uid).map(|s| s.as_str()) == Some(peer_id.as_str())
+                                    {
+                                        by_dev.remove(uid);
+                                        Some(uid.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else if let Some(ref ident) = removed.identity {
+                                    // Suppressed holder leaving — nothing published
+                                    let _ = ident;
+                                    None
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let Some(uid) = promote {
+                                let mut map = peers.write().await;
+                                let mut by_dev = by_device.write().await;
+                                if let Some(promoted) = map.values_mut().find(|p| {
+                                    p.id != peer_id
+                                        && p.online
+                                        && p.identity
+                                            .as_ref()
+                                            .map(|i| i.device_id == uid)
+                                            .unwrap_or(false)
+                                        && p.identity_suppressed
+                                }) {
+                                    promoted.identity_suppressed = false;
+                                    by_dev.insert(uid.clone(), promoted.id.clone());
+                                    let snap = promoted.clone();
+                                    drop(map);
+                                    drop(by_dev);
+                                    let _ = event_tx.send(PeerEvent::Identity(snap));
+                                    tracing::info!(
+                                        device_id = %uid,
+                                        "session: promoted suppressed ULID claimant after holder left"
+                                    );
+                                }
+                            }
                         }
 
                         let _ = event_tx.send(PeerEvent::Left(peer_id.clone()));
                         tracing::info!(peer_id = %peer_id, "session: peer left");
                     }
                     Ok(NetworkPeerEvent::Updated(network_peer)) => {
-                        let mut state = network_peer_to_state(&network_peer);
+                        let mut state = network_peer_to_state(&network_peer, 0);
+                        let mut became_online_without_identity = false;
 
-                        // Preserve Layer 5 state (ws_connected, identity)
-                        // from the existing entry — Layer 3 Updated events
-                        // only carry discovery metadata, not connection or
-                        // hello state.
+                        // Preserve Layer 5 state (ws_connected, identity,
+                        // generation, suppression) from the existing entry —
+                        // Layer 3 Updated events only carry discovery metadata.
                         {
                             let mut map = peers.write().await;
                             if let Some(existing) = map.get(&network_peer.id) {
+                                state.generation = existing.generation;
                                 state.ws_connected = existing.ws_connected;
                                 state.identity = existing.identity.clone();
+                                state.identity_suppressed = existing.identity_suppressed;
+                                became_online_without_identity = !existing.online
+                                    && state.online
+                                    && existing.published_device_id().is_none();
+                            } else {
+                                // Unknown peer Updated without Joined — treat as gen 1.
+                                let mut gens = next_generation.write().await;
+                                let e = gens.entry(network_peer.id.clone()).or_insert(0);
+                                *e += 1;
+                                state.generation = *e;
+                                became_online_without_identity =
+                                    state.online && state.published_device_id().is_none();
                             }
                             map.insert(network_peer.id.clone(), state.clone());
                         }
 
+                        let peer_id = network_peer.id.clone();
                         let _ = event_tx.send(PeerEvent::Updated(state));
                         tracing::debug!(
                             peer_id = %network_peer.id,
                             "session: peer updated"
                         );
+
+                        if became_online_without_identity {
+                            schedule_ctx.schedule(peer_id);
+                        }
                     }
                     Ok(NetworkPeerEvent::AuthRequired { url }) => {
                         let _ = event_tx.send(PeerEvent::AuthRequired { url });
@@ -367,6 +552,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         let ws_transport = self.ws_transport.clone();
         let ws_connections = self.ws_connections.clone();
         let peers = self.peers.clone();
+        let by_device = self.by_device.clone();
         let event_tx = self.event_tx.clone();
         let incoming_tx = self.incoming_tx.clone();
 
@@ -391,7 +577,8 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                             "session: accepted incoming WS connection"
                         );
 
-                        // Create connection handle and spawn connection task
+                        // Create connection handle and spawn connection task.
+                        // Attribution uses WhoIs-verified Tailscale id (peer_id).
                         let handle = spawn_connection_task(
                             stream,
                             peer_id.clone(),
@@ -406,14 +593,17 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                             conns.insert(peer_id.clone(), handle);
                         }
 
-                        // Mark peer as connected and stamp identity from hello
+                        // Mark peer as connected and apply identity from hello.
                         {
                             let mut map = peers.write().await;
+                            let mut by_dev = by_device.write().await;
                             if let Some(state) = map.get_mut(&peer_id) {
                                 state.ws_connected = true;
-                                if remote_identity.is_some() {
-                                    state.identity = remote_identity.clone();
-                                }
+                            }
+                            if let Some(identity) = remote_identity {
+                                let outcomes =
+                                    apply_identity(&mut map, &mut by_dev, &peer_id, identity);
+                                emit_identity_outcomes(&event_tx, outcomes);
                             }
                         }
 
@@ -459,42 +649,42 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// - [`SessionError::ConnectFailed`] if the WS connection cannot be established
     /// - [`SessionError::SendFailed`] if the send operation fails
     pub async fn send(&self, peer_id: &str, data: &[u8]) -> Result<(), SessionError> {
-        // 0. Resolve peer_id to the session's internal routing key
-        //    (the Tailscale stable node ID). Accepts any of:
-        //    - Tailscale stable ID (direct match on `state.id`)
-        //    - Device ID (ULID) from the hello envelope
-        //    - Device name from the hello envelope
-        //    - Layer 3 hostname (the sanitised slug)
-        let peer_id = {
-            let map = self.peers.read().await;
-            if map.contains_key(peer_id) {
-                peer_id.to_string()
-            } else {
-                map.values()
-                    .find(|p| {
-                        p.name == peer_id
-                            || p.identity
-                                .as_ref()
-                                .map(|i| i.device_id == peer_id || i.device_name == peer_id)
-                                .unwrap_or(false)
-                    })
-                    .map(|p| p.id.clone())
-                    .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))?
-            }
-        };
-        let peer_id = peer_id.as_str();
+        let peer_id = self.resolve_routing_key(peer_id).await?;
+        self.ensure_ws_connected(&peer_id).await?;
 
-        // 1. Look up peer in the registry
+        let conns = self.ws_connections.read().await;
+        let handle = conns
+            .get(&peer_id)
+            .ok_or_else(|| SessionError::SendFailed("connection missing after connect".into()))?;
+        handle
+            .send_tx
+            .send(data.to_vec())
+            .await
+            .map_err(|_| SessionError::SendFailed("connection task closed".to_string()))
+    }
+
+    /// Ensure a WS session exists to `peer_id` (Tailscale routing key).
+    /// Completes the RFC 017 hello and applies identity (RFC 022).
+    ///
+    /// Used by app `send` and by eager-identity (Phase C). Idempotent when
+    /// already connected.
+    pub async fn ensure_ws_connected(&self, peer_id: &str) -> Result<(), SessionError> {
+        // Already connected?
+        {
+            let conns = self.ws_connections.read().await;
+            if conns.contains_key(peer_id) {
+                return Ok(());
+            }
+        }
+
         let peer_addr = {
             let map = self.peers.read().await;
             let state = map
                 .get(peer_id)
                 .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))?;
-
             if !state.online {
                 return Err(SessionError::PeerOffline(peer_id.to_string()));
             }
-
             PeerAddr {
                 ip: Some(state.ip),
                 hostname: state.name.clone(),
@@ -502,19 +692,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         };
 
-        // 2. Check for existing WS connection
-        {
-            let conns = self.ws_connections.read().await;
-            if let Some(handle) = conns.get(peer_id) {
-                return handle
-                    .send_tx
-                    .send(data.to_vec())
-                    .await
-                    .map_err(|_| SessionError::SendFailed("connection task closed".to_string()));
-            }
-        }
-
-        // 3. Check reconnect backoff before attempting a new connection
+        // Backoff
         {
             let backoffs = self.peer_backoffs.read().await;
             if let Some(backoff) = backoffs.get(peer_id) {
@@ -525,12 +703,32 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         }
 
-        // 4. Concurrent send protection — check if another task is already connecting
+        // Dedupe concurrent dials
         {
+            let already = {
+                let connecting = self.connecting.read().await;
+                connecting.contains(peer_id)
+            };
+            if already {
+                // Wait briefly for the other dial to finish, then re-check.
+                for _ in 0..50 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let conns = self.ws_connections.read().await;
+                    if conns.contains_key(peer_id) {
+                        return Ok(());
+                    }
+                    let connecting = self.connecting.read().await;
+                    if !connecting.contains(peer_id) {
+                        break;
+                    }
+                }
+                let conns = self.ws_connections.read().await;
+                if conns.contains_key(peer_id) {
+                    return Ok(());
+                }
+            }
             let mut connecting = self.connecting.write().await;
             if connecting.contains(peer_id) {
-                // Another send() is already dialing this peer. Fail fast rather
-                // than creating a duplicate connection.
                 return Err(SessionError::ConnectFailed(
                     "connection already in progress".to_string(),
                 ));
@@ -538,12 +736,10 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             connecting.insert(peer_id.to_string());
         }
 
-        // 5. No existing connection — lazily connect via Layer 4
-        tracing::info!(peer_id = %peer_id, "session: lazy connecting WS");
+        tracing::info!(peer_id = %peer_id, "session: connecting WS");
 
         let connect_result = self.ws_transport.connect(&peer_addr).await;
 
-        // Remove from connecting set regardless of outcome
         {
             let mut connecting = self.connecting.write().await;
             connecting.remove(peer_id);
@@ -551,7 +747,6 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
 
         let ws_stream = match connect_result {
             Ok(stream) => {
-                // Successful connect — reset backoff
                 let mut backoffs = self.peer_backoffs.write().await;
                 backoffs
                     .entry(peer_id.to_string())
@@ -560,7 +755,6 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                 stream
             }
             Err(e) => {
-                // Failed connect — increase backoff
                 let mut backoffs = self.peer_backoffs.write().await;
                 backoffs
                     .entry(peer_id.to_string())
@@ -570,11 +764,8 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         };
 
-        // Capture the remote identity from the hello BEFORE moving the
-        // stream into the connection task.
         let remote_identity = ws_stream.remote_identity().cloned();
 
-        // 6. Create connection handle and spawn connection task
         let handle = spawn_connection_task(
             ws_stream,
             peer_id.to_string(),
@@ -584,26 +775,20 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             self.incoming_tx.clone(),
         );
 
-        // Send data before inserting (so we don't lose the race)
-        let send_result = handle
-            .send_tx
-            .send(data.to_vec())
-            .await
-            .map_err(|_| SessionError::SendFailed("connection task closed".to_string()));
-
         {
             let mut conns = self.ws_connections.write().await;
             conns.insert(peer_id.to_string(), handle);
         }
 
-        // Mark peer as connected and stamp identity from hello
         {
             let mut map = self.peers.write().await;
+            let mut by_dev = self.by_device.write().await;
             if let Some(state) = map.get_mut(peer_id) {
                 state.ws_connected = true;
-                if remote_identity.is_some() {
-                    state.identity = remote_identity;
-                }
+            }
+            if let Some(identity) = remote_identity {
+                let outcomes = apply_identity(&mut map, &mut by_dev, peer_id, identity);
+                emit_identity_outcomes(&self.event_tx, outcomes);
             }
         }
 
@@ -611,7 +796,42 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             .event_tx
             .send(PeerEvent::WsConnected(peer_id.to_string()));
 
-        send_result
+        Ok(())
+    }
+
+    /// One-shot identity exchange for an online peer (RFC 022 Phase C).
+    ///
+    /// No-ops if identity is already published or the peer is offline.
+    pub async fn ensure_identity(&self, peer_id: &str) -> Result<(), SessionError> {
+        {
+            let map = self.peers.read().await;
+            match map.get(peer_id) {
+                Some(s) if s.published_device_id().is_some() => return Ok(()),
+                Some(s) if !s.online => {
+                    return Err(SessionError::PeerOffline(peer_id.to_string()));
+                }
+                None => return Err(SessionError::UnknownPeer(peer_id.to_string())),
+                _ => {}
+            }
+        }
+        self.ensure_ws_connected(peer_id).await
+    }
+
+    async fn resolve_routing_key(&self, peer_id: &str) -> Result<String, SessionError> {
+        let map = self.peers.read().await;
+        if map.contains_key(peer_id) {
+            return Ok(peer_id.to_string());
+        }
+        map.values()
+            .find(|p| {
+                p.name == peer_id
+                    || p.identity
+                        .as_ref()
+                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
+                        .unwrap_or(false)
+            })
+            .map(|p| p.id.clone())
+            .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))
     }
 
     /// Broadcast data to all peers with active WebSocket connections.
@@ -644,16 +864,23 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// Test-only: stamp a synthetic [`PeerIdentity`] onto an existing
     /// peer in the registry, simulating the effect of a completed hello
     /// exchange without running a real WebSocket handshake. Returns
-    /// `true` if the peer was found and updated.
+    /// `true` if the peer was found and updated (including suppressed).
     #[doc(hidden)]
     pub async fn test_stamp_identity(&self, peer_id: &str, identity: PeerIdentity) -> bool {
         let mut map = self.peers.write().await;
-        if let Some(state) = map.get_mut(peer_id) {
-            state.identity = Some(identity);
-            true
-        } else {
-            false
+        if !map.contains_key(peer_id) {
+            return false;
         }
+        let mut by_dev = self.by_device.write().await;
+        let outcomes = apply_identity(&mut map, &mut by_dev, peer_id, identity);
+        emit_identity_outcomes(&self.event_tx, outcomes);
+        true
+    }
+
+    /// Look up the published Tailscale id for a durable device ULID, if any.
+    #[doc(hidden)]
+    pub async fn test_by_device(&self, device_id: &str) -> Option<String> {
+        self.by_device.read().await.get(device_id).cloned()
     }
 
     /// Disconnect a specific peer's WebSocket connection.
@@ -738,16 +965,9 @@ fn spawn_connection_task(
         connected_at: Instant::now(),
     };
 
-    // Resolve the sender identifier the session will stamp on every
-    // inbound message: RFC 017 says this is the remote's `device_id`
-    // from the hello envelope (not the Tailscale stable ID). Fall back
-    // to the routing key if we somehow received a stream without a
-    // hello — in production that should never happen because the hello
-    // exchange runs before this function is called.
-    let from_device_id = stream
-        .remote_identity()
-        .map(|i| i.device_id.clone())
-        .unwrap_or_else(|| peer_id.clone());
+    // RFC 022 §7.5: attribute inbound traffic by the WhoIs-verified
+    // Tailscale stable id of this connection — never the self-declared ULID.
+    let from_tailscale_id = peer_id.clone();
 
     tokio::spawn(async move {
         let mut stream = stream;
@@ -772,7 +992,7 @@ fn spawn_connection_task(
                     match result {
                         Ok(Some(data)) => {
                             let msg = IncomingMessage {
-                                from: from_device_id.clone(),
+                                from: from_tailscale_id.clone(),
                                 data,
                                 received_at: Instant::now(),
                             };
@@ -831,14 +1051,247 @@ fn spawn_connection_task(
 }
 
 // ---------------------------------------------------------------------------
+// Eager identity scheduling (RFC 022 Phase C)
+// ---------------------------------------------------------------------------
+
+/// Arcs needed to dial for identity without holding `&PeerRegistry`.
+struct EagerScheduleCtx<N: NetworkProvider + 'static> {
+    eager_identity: bool,
+    peers: Arc<RwLock<HashMap<String, PeerState>>>,
+    by_device: Arc<RwLock<HashMap<String, String>>>,
+    ws_connections: Arc<RwLock<HashMap<String, WsConnectionHandle>>>,
+    peer_backoffs: Arc<RwLock<HashMap<String, ReconnectBackoff>>>,
+    connecting: Arc<RwLock<HashSet<String>>>,
+    event_tx: broadcast::Sender<PeerEvent>,
+    incoming_tx: broadcast::Sender<IncomingMessage>,
+    ws_transport: Arc<WebSocketTransport<N>>,
+    network: Arc<N>,
+    eager_identity_sem: Arc<Semaphore>,
+    identity_inflight: Arc<AsyncMutex<HashSet<String>>>,
+}
+
+impl<N: NetworkProvider + 'static> EagerScheduleCtx<N> {
+    fn schedule(&self, peer_id: String) {
+        if !self.eager_identity {
+            return;
+        }
+
+        // Dedupe in-flight ensures.
+        {
+            // try_lock: if contended, still spawn (double-check inside task).
+            if let Ok(mut inflight) = self.identity_inflight.try_lock() {
+                if !inflight.insert(peer_id.clone()) {
+                    return;
+                }
+            }
+        }
+
+        let peers = self.peers.clone();
+        let by_device = self.by_device.clone();
+        let ws_connections = self.ws_connections.clone();
+        let peer_backoffs = self.peer_backoffs.clone();
+        let connecting = self.connecting.clone();
+        let event_tx = self.event_tx.clone();
+        let incoming_tx = self.incoming_tx.clone();
+        let ws_transport = self.ws_transport.clone();
+        let _network = self.network.clone();
+        let sem = self.eager_identity_sem.clone();
+        let inflight = self.identity_inflight.clone();
+
+        tokio::spawn(async move {
+            // Mark inflight (if try_lock missed earlier).
+            {
+                let mut set = inflight.lock().await;
+                set.insert(peer_id.clone());
+            }
+
+            // Per-peer jitter 0–400ms to avoid thundering herd.
+            let jitter_ms = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut h = DefaultHasher::new();
+                peer_id.hash(&mut h);
+                (h.finish() % 400) as u64
+            };
+            tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+
+            let permit = match sem.acquire().await {
+                Ok(p) => p,
+                Err(_) => {
+                    let mut set = inflight.lock().await;
+                    set.remove(&peer_id);
+                    return;
+                }
+            };
+
+            // Skip if identity already known or peer gone/offline.
+            let needs = {
+                let map = peers.read().await;
+                match map.get(&peer_id) {
+                    Some(s) => s.online && s.published_device_id().is_none(),
+                    None => false,
+                }
+            };
+
+            if needs {
+                // Build a temporary view with the same connection logic as
+                // PeerRegistry::ensure_ws_connected (duplicated fields).
+                if let Err(e) = eager_connect_ws(
+                    &peer_id,
+                    &peers,
+                    &by_device,
+                    &ws_connections,
+                    &peer_backoffs,
+                    &connecting,
+                    &event_tx,
+                    &incoming_tx,
+                    &ws_transport,
+                )
+                .await
+                {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "session: eager identity dial failed"
+                    );
+                }
+            }
+
+            drop(permit);
+            let mut set = inflight.lock().await;
+            set.remove(&peer_id);
+        });
+    }
+}
+
+/// Connection path shared by eager identity (no send payload).
+async fn eager_connect_ws<N: NetworkProvider + 'static>(
+    peer_id: &str,
+    peers: &Arc<RwLock<HashMap<String, PeerState>>>,
+    by_device: &Arc<RwLock<HashMap<String, String>>>,
+    ws_connections: &Arc<RwLock<HashMap<String, WsConnectionHandle>>>,
+    peer_backoffs: &Arc<RwLock<HashMap<String, ReconnectBackoff>>>,
+    connecting: &Arc<RwLock<HashSet<String>>>,
+    event_tx: &broadcast::Sender<PeerEvent>,
+    incoming_tx: &broadcast::Sender<IncomingMessage>,
+    ws_transport: &Arc<WebSocketTransport<N>>,
+) -> Result<(), SessionError> {
+    {
+        let conns = ws_connections.read().await;
+        if conns.contains_key(peer_id) {
+            return Ok(());
+        }
+    }
+
+    let peer_addr = {
+        let map = peers.read().await;
+        let state = map
+            .get(peer_id)
+            .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))?;
+        if !state.online {
+            return Err(SessionError::PeerOffline(peer_id.to_string()));
+        }
+        if state.published_device_id().is_some() {
+            return Ok(());
+        }
+        PeerAddr {
+            ip: Some(state.ip),
+            hostname: state.name.clone(),
+            dns_name: None,
+        }
+    };
+
+    {
+        let backoffs = peer_backoffs.read().await;
+        if let Some(backoff) = backoffs.get(peer_id) {
+            if backoff.should_retry().is_none() {
+                return Err(SessionError::ReconnectBackoff {
+                    retry_after: backoff.retry_after(),
+                });
+            }
+        }
+    }
+
+    {
+        let mut connecting_g = connecting.write().await;
+        if connecting_g.contains(peer_id) {
+            return Err(SessionError::ConnectFailed(
+                "connection already in progress".to_string(),
+            ));
+        }
+        connecting_g.insert(peer_id.to_string());
+    }
+
+    tracing::info!(peer_id = %peer_id, "session: eager identity connecting WS");
+
+    let connect_result = ws_transport.connect(&peer_addr).await;
+
+    {
+        let mut connecting_g = connecting.write().await;
+        connecting_g.remove(peer_id);
+    }
+
+    let ws_stream = match connect_result {
+        Ok(stream) => {
+            let mut backoffs = peer_backoffs.write().await;
+            backoffs
+                .entry(peer_id.to_string())
+                .or_insert_with(ReconnectBackoff::new)
+                .success();
+            stream
+        }
+        Err(e) => {
+            let mut backoffs = peer_backoffs.write().await;
+            backoffs
+                .entry(peer_id.to_string())
+                .or_insert_with(ReconnectBackoff::new)
+                .failure();
+            return Err(SessionError::ConnectFailed(e.to_string()));
+        }
+    };
+
+    let remote_identity = ws_stream.remote_identity().cloned();
+
+    let handle = spawn_connection_task(
+        ws_stream,
+        peer_id.to_string(),
+        ws_connections.clone(),
+        peers.clone(),
+        event_tx.clone(),
+        incoming_tx.clone(),
+    );
+
+    {
+        let mut conns = ws_connections.write().await;
+        conns.insert(peer_id.to_string(), handle);
+    }
+
+    {
+        let mut map = peers.write().await;
+        let mut by_dev = by_device.write().await;
+        if let Some(state) = map.get_mut(peer_id) {
+            state.ws_connected = true;
+        }
+        if let Some(identity) = remote_identity {
+            let outcomes = apply_identity(&mut map, &mut by_dev, peer_id, identity);
+            emit_identity_outcomes(event_tx, outcomes);
+        }
+    }
+
+    let _ = event_tx.send(PeerEvent::WsConnected(peer_id.to_string()));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helper: convert NetworkPeer to PeerState
 // ---------------------------------------------------------------------------
 
 /// Convert a Layer 3 `NetworkPeer` to a Layer 5 `PeerState`.
 ///
 /// Sets `ws_connected: false` by default — connections are managed by Layer 5,
-/// not by Layer 3 discovery.
-fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
+/// not by Layer 3 discovery. `generation` must be supplied by the registry
+/// (bumped per re-join of the same Tailscale id).
+fn network_peer_to_state(peer: &NetworkPeer, generation: u64) -> PeerState {
     let connection_type = if let Some(ref relay) = peer.relay {
         format!("relay:{relay}")
     } else if peer.cur_addr.is_some() {
@@ -849,6 +1302,7 @@ fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
 
     PeerState {
         id: peer.id.clone(),
+        generation,
         name: peer.hostname.clone(),
         ip: peer.ip,
         online: peer.online,
@@ -857,5 +1311,111 @@ fn network_peer_to_state(peer: &NetworkPeer) -> PeerState {
         os: peer.os.clone(),
         last_seen: peer.last_seen.clone(),
         identity: None,
+        identity_suppressed: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Identity application (RFC 022 §7.7)
+// ---------------------------------------------------------------------------
+
+/// Side effects from applying a hello identity to a registry entry.
+#[derive(Debug)]
+enum IdentityOutcome {
+    /// Emit `PeerEvent::Identity` for this snapshot.
+    Identity(PeerState),
+    /// Retire a ghost entry (same ULID, offline holder) before the new claim.
+    GhostLeft(String),
+}
+
+/// Apply `identity` to the peer at `ts_id`, updating `by_device` under
+/// first-wins / ghost-retire / rotation rules.
+fn apply_identity(
+    peers: &mut HashMap<String, PeerState>,
+    by_device: &mut HashMap<String, String>,
+    ts_id: &str,
+    identity: PeerIdentity,
+) -> Vec<IdentityOutcome> {
+    let mut outcomes = Vec::new();
+    let uid = identity.device_id.clone();
+
+    let Some(state) = peers.get(ts_id) else {
+        return outcomes;
+    };
+
+    // Rotation: same entry, different ULID already published.
+    if let Some(prev) = state.published_device_id() {
+        if prev != uid.as_str() {
+            by_device.remove(prev);
+        } else if !state.identity_suppressed {
+            // Same ULID already published — refresh metadata only.
+            if let Some(s) = peers.get_mut(ts_id) {
+                s.identity = Some(identity);
+                s.identity_suppressed = false;
+                outcomes.push(IdentityOutcome::Identity(s.clone()));
+            }
+            return outcomes;
+        }
+    }
+
+    match by_device.get(&uid).cloned() {
+        Some(holder) if holder == ts_id => {
+            // Already the published owner — update identity block.
+            if let Some(s) = peers.get_mut(ts_id) {
+                s.identity = Some(identity);
+                s.identity_suppressed = false;
+                outcomes.push(IdentityOutcome::Identity(s.clone()));
+            }
+        }
+        Some(holder) => {
+            let holder_online = peers.get(&holder).map(|p| p.online).unwrap_or(false);
+            if holder_online {
+                // First-wins: store identity but suppress publication.
+                tracing::warn!(
+                    device_id = %uid,
+                    holder = %holder,
+                    claimant = %ts_id,
+                    "session: duplicate-device-id — first-wins, suppressing claimant"
+                );
+                if let Some(s) = peers.get_mut(ts_id) {
+                    s.identity = Some(identity);
+                    s.identity_suppressed = true;
+                    // No Identity event for suppressed claim (deviceId stays null).
+                }
+            } else {
+                // Ghost retire: offline holder loses the ULID.
+                outcomes.push(IdentityOutcome::GhostLeft(holder.clone()));
+                peers.remove(&holder);
+                by_device.insert(uid.clone(), ts_id.to_string());
+                if let Some(s) = peers.get_mut(ts_id) {
+                    s.identity = Some(identity);
+                    s.identity_suppressed = false;
+                    outcomes.push(IdentityOutcome::Identity(s.clone()));
+                }
+            }
+        }
+        None => {
+            by_device.insert(uid, ts_id.to_string());
+            if let Some(s) = peers.get_mut(ts_id) {
+                s.identity = Some(identity);
+                s.identity_suppressed = false;
+                outcomes.push(IdentityOutcome::Identity(s.clone()));
+            }
+        }
+    }
+
+    outcomes
+}
+
+fn emit_identity_outcomes(event_tx: &broadcast::Sender<PeerEvent>, outcomes: Vec<IdentityOutcome>) {
+    for o in outcomes {
+        match o {
+            IdentityOutcome::GhostLeft(ts_id) => {
+                let _ = event_tx.send(PeerEvent::Left(ts_id));
+            }
+            IdentityOutcome::Identity(state) => {
+                let _ = event_tx.send(PeerEvent::Identity(state));
+            }
+        }
     }
 }

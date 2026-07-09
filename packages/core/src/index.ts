@@ -77,4 +77,21 @@ export {
 } from './ws.js';
 
 // High-level API
-export { createMeshNode, type CreateMeshNodeOptions, type MeshNode } from './create-mesh-node.js';
+export {
+  createMeshNode,
+  type CreateMeshNodeOptions,
+  type MeshNode,
+  type MeshPeerEvent,
+  type MeshNamespacedMessage,
+} from './create-mesh-node.js';
+
+// RFC 022 Peer handles
+export {
+  Peer,
+  PeerRegistry,
+  isPeer,
+  peerLikeToQuery,
+  type PeerLike,
+  type PeerRef,
+  type PeerSnapshot,
+} from './peer.js';

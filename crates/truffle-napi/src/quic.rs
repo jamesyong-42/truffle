@@ -29,7 +29,7 @@ async fn peer_id_for_ip(node: &Arc<Node<TailscaleProvider>>, ip: &str) -> Option
         .await
         .into_iter()
         .find(|p| p.ip.to_string() == ip)
-        .map(|p| p.device_id)
+        .map(|p| p.device_id.unwrap_or(p.tailscale_id))
 }
 
 /// A raw QUIC connection to a peer over the mesh.

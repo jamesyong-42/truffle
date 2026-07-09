@@ -6,7 +6,7 @@
     <title>Truffle API Reference</title>
     <meta
       name="description"
-      content="Reference for the @vibecook/truffle JavaScript API: createMeshNode, TCP, HTTP, UDP, WebSocket, QUIC, messaging, files, synced stores, proxy, and React hooks."
+      content="Reference for the @vibecook/truffle JavaScript API: Peer handles, createMeshNode, TCP, HTTP, UDP, WebSocket, QUIC, messaging, files, synced stores, proxy, and React hooks."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -606,11 +606,13 @@
       <p class="eyebrow">API reference</p>
       <h1>@vibecook/truffle</h1>
       <p class="lede">
-        The JavaScript API starts a Tailscale tsnet-backed mesh node and exposes familiar
-        network-programming namespaces for TCP, HTTP, UDP, WebSocket, and QUIC, plus higher-level
-        messaging, file transfer, synced stores, and diagnostics.
+        Start a Tailscale tsnet-backed mesh node, get interned <strong>Peer</strong> handles, and
+        use familiar network-programming namespaces for TCP, HTTP, UDP, WebSocket, and QUIC — plus
+        messaging, file transfer, synced stores, and diagnostics. Networking takes
+        <code>Peer | string</code>; you do not pick id strings for the happy path.
       </p>
       <nav class="hero-links" aria-label="Reference shortcuts">
+        <a href="#identity">Peers</a>
         <a href="#tcp">TCP</a>
         <a href="#http">HTTP</a>
         <a href="#udp">UDP</a>
@@ -626,7 +628,7 @@
         <strong>Start</strong>
         <a href="#install">Install</a>
         <a href="#mesh-node">createMeshNode</a>
-        <a href="#identity">Identity and peers</a>
+        <a href="#identity">Peer handles</a>
         <strong>Transports</strong>
         <a href="#tcp">TCP</a>
         <a href="#http">HTTP</a>
@@ -656,6 +658,7 @@
 pnpm add ws # optional, only for mesh.ws</code></pre>
           <pre><code>import {
   createMeshNode,
+  Peer,
   resolveSidecarPath,
   NapiNode,
 } from '@vibecook/truffle';</code></pre>
@@ -676,7 +679,11 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
   appId: 'my-app',
   deviceName: 'alice-laptop',
   onAuthRequired: (url) =&gt; console.log(url),
-});</code></pre>
+});
+
+const peers = await mesh.getPeers();
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
 
           <h3>CreateMeshNodeOptions</h3>
           <table>
@@ -732,6 +739,14 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
                 <td>Internal WebSocket listener port. Defaults to 9417.</td>
               </tr>
               <tr>
+                <td><code>eagerIdentity</code></td>
+                <td><code>boolean</code></td>
+                <td>
+                  When true (default), proactively complete hello with online peers so durable
+                  <code>deviceId</code> is learned without an app <code>send</code>.
+                </td>
+              </tr>
+              <tr>
                 <td><code>autoAuth</code></td>
                 <td><code>boolean</code></td>
                 <td>Auto-open the Tailscale auth URL. Defaults to true.</td>
@@ -748,36 +763,137 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
               </tr>
               <tr>
                 <td><code>onPeerChange</code></td>
-                <td><code>(event) =&gt; void</code></td>
-                <td>Called for peer lifecycle events after startup.</td>
+                <td><code>(event: MeshPeerEvent) =&gt; void</code></td>
+                <td>
+                  Called for peer lifecycle events after startup. Events carry an interned
+                  <code>peer</code> when available.
+                </td>
               </tr>
             </tbody>
           </table>
 
           <h3>MeshNode shape</h3>
-          <pre><code>type MeshNode = NapiNode &amp; {
+          <pre><code>type PeerLike = Peer | string; // string = query, resolved internally
+
+type MeshNode = Omit&lt;NapiNode, 'getPeers' | 'peer' | 'send' | 'ping' | 'onPeerChange' | 'onMessage'&gt; &amp; {
   net: TruffleNet;
   http: TruffleHttp;
   quic: TruffleQuic;
   dgram: TruffleDgram;
   ws: TruffleWs;
   native: NapiNode;
+  getPeers(): Promise&lt;Peer[]&gt;;
+  peer(query: string, opts?: { waitMs?: number }): Promise&lt;Peer | null&gt;;
+  send(to: PeerLike, namespace: string, data: Buffer | Uint8Array): Promise&lt;void&gt;;
+  ping(to: PeerLike): Promise&lt;NapiPingResult&gt;;
+  onPeerChange(cb: (event: MeshPeerEvent) =&gt; void): void;
+  onMessage(namespace: string, cb: (msg: MeshNamespacedMessage) =&gt; void): void;
+};
+
+type MeshPeerEvent = {
+  type: string;          // joined | left | updated | identity | ws_connected | …
+  peerId: string;        // Tailscale routing key when peer-related; empty for auth
+  peer?: Peer;           // interned handle when present
+  authUrl?: string;
+};
+
+type MeshNamespacedMessage = {
+  from: Peer | string;   // Peer when sender is interned
+  namespace: string;
+  msgType: string;
+  payload: unknown;
+  timestamp?: number;
 };</code></pre>
         </section>
 
         <section id="identity">
           <p class="eyebrow">Identity and discovery</p>
-          <h2>Peers are app-scoped devices</h2>
+          <h2>Peer handles (RFC 022)</h2>
           <p class="summary">
-            Use stable <code>deviceId</code> values for identity and authorization. Names are
-            convenient for examples and user-facing selection. Caveat: a <em>peer's</em>
-            <code>deviceId</code> is the remote ULID only once <code>wsConnected</code> is
-            <code>true</code> (its identity travels over the envelope-bus hello); before then, and
-            permanently for apps that use only the raw transports, it falls back to the peer's
-            <code>tailscaleId</code> and flips to the ULID when the session connects. Raw-transport
-            apps should key identity on <code>tailscaleId</code>, which is stable for the whole
-            session. Your own <code>getLocalInfo().deviceId</code> is always the real ULID.
+            Networking takes <code>Peer</code> handles (or a query string). Do not pick between ULID
+            and Tailscale id for <code>send</code> / connect. A peer's
+            <code>deviceId</code> is an honest ULID or <code>null</code> — never a Tailscale id
+            fallback, and it does not flip mid-session. Use <code>deviceId</code> only to
+            <em>persist</em> across process restarts; rebind with
+            <code>mesh.peer(savedId, { waitMs })</code>. Your own
+            <code>getLocalInfo().deviceId</code> is always the real ULID.
           </p>
+
+          <h3>class Peer</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Member</th>
+                <th>Type</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>displayName</code></td>
+                <td><code>string</code></td>
+                <td>Best UI label (identity name → hostname slug → short ref).</td>
+              </tr>
+              <tr>
+                <td><code>online</code></td>
+                <td><code>boolean</code></td>
+                <td>L3 peer liveness from Tailscale discovery.</td>
+              </tr>
+              <tr>
+                <td><code>wsConnected</code></td>
+                <td><code>boolean</code></td>
+                <td>Envelope-bus WebSocket up. Advanced — do not gate <code>send</code> on this.</td>
+              </tr>
+              <tr>
+                <td><code>ip</code>, <code>hostname</code>, <code>os</code>, <code>connectionType</code>, <code>lastSeen</code></td>
+                <td>various</td>
+                <td>Display / diagnostics.</td>
+              </tr>
+              <tr>
+                <td><code>deviceId</code></td>
+                <td><code>string | null</code></td>
+                <td>
+                  Durable ULID once known; <code>null</code> until identity is learned. Never equals
+                  <code>tailscaleId</code>. Persist only when non-null.
+                </td>
+              </tr>
+              <tr>
+                <td><code>deviceName</code></td>
+                <td><code>string | null</code></td>
+                <td>App-level device name from identity, when known.</td>
+              </tr>
+              <tr>
+                <td><code>tailscaleId</code></td>
+                <td><code>string</code></td>
+                <td>Advanced routing key. Not for happy-path tutorials.</td>
+              </tr>
+              <tr>
+                <td><code>ref</code></td>
+                <td><code>PeerRef</code></td>
+                <td>Process-local token for Map keys / IPC. Do not persist across restarts.</td>
+              </tr>
+              <tr>
+                <td><code>generation</code></td>
+                <td><code>number</code></td>
+                <td>Increments when a peer leaves and rejoins.</td>
+              </tr>
+              <tr>
+                <td><code>equals(other)</code></td>
+                <td><code>boolean</code></td>
+                <td>Same registry generation. Left+rejoin → false even with same Tailscale id.</td>
+              </tr>
+              <tr>
+                <td><code>send(namespace, data)</code></td>
+                <td><code>Promise&lt;void&gt;</code></td>
+                <td>Sugar for <code>mesh.send(this, …)</code>.</td>
+              </tr>
+              <tr>
+                <td><code>ping()</code></td>
+                <td><code>Promise&lt;NapiPingResult&gt;</code></td>
+                <td>Sugar for <code>mesh.ping(this)</code>.</td>
+              </tr>
+            </tbody>
+          </table>
 
           <div class="method">
             <h4>mesh.getLocalInfo(): NapiNodeIdentity</h4>
@@ -786,35 +902,62 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
           </div>
 
           <div class="method">
-            <h4>await mesh.getPeers(): NapiPeer[]</h4>
+            <h4>await mesh.getPeers(): Peer[]</h4>
             <p>
-              Returns known peers with <code>deviceId</code>, <code>deviceName</code>,
-              <code>ip</code>, <code>online</code>, <code>wsConnected</code>,
-              <code>connectionType</code>, optional OS and last-seen data. For a peer with
-              <code>wsConnected: false</code>, <code>deviceId</code> is that peer's
-              <code>tailscaleId</code> rather than its ULID — it flips to the ULID the moment the
-              WebSocket session connects, so it is not stable within a session. Key raw-transport
-              identity on <code>tailscaleId</code>.
+              Interned <code>Peer</code> handles. The same object is returned from events and
+              messages for a live registry generation, so <code>Map&lt;Peer, T&gt;</code> and
+              <code>===</code> work. Fields update in place as discovery and identity change.
             </p>
           </div>
 
           <div class="method">
-            <h4>await mesh.resolvePeerId(peerRef): string</h4>
+            <h4>await mesh.peer(query, opts?: { waitMs?: number }): Peer | null</h4>
             <p>
-              Resolves a peer reference to a canonical device ID. Peer references can be device IDs,
-              unique prefixes of at least four characters, device names, Tailscale hostnames, or
-              Tailscale IPs.
+              Resolve a query to an interned Peer. Accepts display/device name, ULID (or unique
+              prefix ≥4 chars), hostname slug, Tailscale id, or tailnet IP. Not found →
+              <code>null</code>. Ambiguous names throw. <code>waitMs</code> blocks until resolvable
+              or timeout (useful after restart while durable identity is learned via eager hello).
             </p>
           </div>
 
           <div class="method">
-            <h4>await mesh.ping(peerRef): NapiPingResult</h4>
-            <p>Returns latency in milliseconds, connection type, and peer endpoint when known.</p>
+            <h4>await mesh.ping(to: PeerLike): NapiPingResult</h4>
+            <p>Handle-first ping. String form is a query, resolved internally.</p>
+          </div>
+
+          <div class="method">
+            <h4>mesh.onPeerChange(callback)</h4>
+            <p>
+              Events include <code>type</code> (<code>joined</code>, <code>left</code>,
+              <code>updated</code>, <code>identity</code>, <code>ws_connected</code>,
+              <code>ws_disconnected</code>, auth-related), <code>peerId</code> (Tailscale routing
+              key when peer-related), optional interned <code>peer</code>, and optional
+              <code>authUrl</code>. Prefer <code>event.peer</code> for app state keyed by handle.
+            </p>
           </div>
 
           <div class="method">
             <h4>await mesh.health(): NapiHealthInfo</h4>
             <p>Returns Tailscale backend state, health warnings, key expiry, and a healthy flag.</p>
+          </div>
+
+          <pre><code>// Preferred collections
+const sessions = new Map(); // Map&lt;Peer, AppSession&gt;
+mesh.onPeerChange((ev) =&gt; {
+  if (ev.type === 'joined' &amp;&amp; ev.peer) sessions.set(ev.peer, openSession(ev.peer));
+  if (ev.type === 'left' &amp;&amp; ev.peer) sessions.delete(ev.peer);
+});
+
+// Persistence across restarts — only place durable ids appear
+if (peer.deviceId) localStorage.setItem('lastPeer', peer.deviceId);
+const id = localStorage.getItem('lastPeer');
+const again = id ? await mesh.peer(id, { waitMs: 5000 }) : null;</code></pre>
+
+          <div class="note">
+            <code>resolvePeerId</code> is legacy. Prefer <code>mesh.peer(query)</code> or pass a
+            <code>PeerLike</code> into networking APIs directly. Raw
+            <code>NapiNode.getPeers()</code> still returns snapshot objects without hard
+            <code>===</code>; use <code>createMeshNode()</code> for interned handles.
           </div>
         </section>
 
@@ -825,14 +968,18 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
             Node-style TCP over the mesh. <code>TruffleSocket</code> is a
             <code>stream.Duplex</code>; <code>TruffleServer</code> emits
             <code>listening</code>, <code>connection</code>, <code>close</code>, and
-            <code>error</code>.
+            <code>error</code>. Connect targets are <code>PeerLike</code>
+            (<code>Peer | string</code>).
           </p>
           <pre><code>const server = mesh.net.createServer((socket) =&gt; {
   socket.pipe(socket);
 });
 server.listen(7000);
 
-const socket = mesh.net.connect({ host: 'bob-laptop', port: 7000 });
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+const socket = mesh.net.connect({ peer: bob ?? 'bob-laptop', port: 7000 });
+// host: PeerLike also accepted — mesh.net.connect({ host: bob, port: 7000 })
+// Node-style: mesh.net.connect(7000, bob)
 socket.on('connect', () =&gt; socket.write('ping'));
 socket.on('data', (chunk) =&gt; console.log(chunk.toString()));</code></pre>
           <table>
@@ -845,11 +992,15 @@ socket.on('data', (chunk) =&gt; console.log(chunk.toString()));</code></pre>
             <tbody>
               <tr>
                 <td><code>mesh.net.connect(options)</code></td>
-                <td>Open a TCP stream to <code>{ host, port }</code>. Returns immediately.</td>
+                <td>
+                  Open a TCP stream to <code>{ peer?, host?, port }</code>.
+                  <code>peer</code> is an alias of <code>host</code>; both accept
+                  <code>PeerLike</code>. Returns immediately.
+                </td>
               </tr>
               <tr>
                 <td><code>mesh.net.connect(port, host)</code></td>
-                <td>Node-compatible overload.</td>
+                <td>Node-compatible overload. <code>host</code> is <code>PeerLike</code>.</td>
               </tr>
               <tr>
                 <td><code>mesh.net.createConnection(...)</code></td>
@@ -869,6 +1020,8 @@ socket.on('data', (chunk) =&gt; console.log(chunk.toString()));</code></pre>
           <p class="summary">
             Outbound HTTP is a <code>node:http</code> agent that dials peers through
             <code>mesh.net</code>. Inbound HTTP uses an ordinary <code>http.Server</code>.
+            High-level helpers take a query string host; prefer
+            <code>mesh.net.connect({ peer })</code> when you already hold a handle.
           </p>
           <pre><code>import http from 'node:http';
 
@@ -877,7 +1030,12 @@ mesh.net
   .createServer((socket) =&gt; app.emit('connection', socket))
   .listen(8080);
 
-const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');</code></pre>
+// fetchText host is a query string (name / ULID / hostname)
+const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');
+
+// Or dial with a Peer and hand the duplex to node:http yourself
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (bob) mesh.net.connect({ peer: bob, port: 8080 });</code></pre>
           <table>
             <thead>
               <tr>
@@ -903,8 +1061,11 @@ const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');</code></pr
                 <td><code>http.get</code> with the mesh agent injected by default.</td>
               </tr>
               <tr>
-                <td><code>mesh.http.fetchText(peer, port, path)</code></td>
-                <td>GET helper that buffers the response body as UTF-8 text.</td>
+                <td><code>mesh.http.fetchText(host, port, path)</code></td>
+                <td>
+                  GET helper that buffers the response body as UTF-8 text.
+                  <code>host</code> is a query string resolved by the mesh agent.
+                </td>
               </tr>
             </tbody>
           </table>
@@ -916,7 +1077,7 @@ const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');</code></pr
           <p class="summary">
             A Node-style datagram API over the mesh. Datagrams preserve message boundaries and emit
             <code>message</code>, <code>listening</code>, <code>error</code>, and
-            <code>close</code>.
+            <code>close</code>. Send address is <code>PeerLike</code>.
           </p>
           <pre><code>const sock = mesh.dgram.createSocket();
 sock.on('message', (msg, rinfo) =&gt; {
@@ -924,7 +1085,8 @@ sock.on('message', (msg, rinfo) =&gt; {
 });
 await sock.bind(9999);
 
-sock.send(Buffer.from('ping'), 9999, 'bob-laptop');</code></pre>
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+sock.send(Buffer.from('ping'), 9999, bob ?? 'bob-laptop');</code></pre>
           <table>
             <thead>
               <tr>
@@ -943,7 +1105,9 @@ sock.send(Buffer.from('ping'), 9999, 'bob-laptop');</code></pre>
               </tr>
               <tr>
                 <td><code>socket.send(msg, port, address, callback?)</code></td>
-                <td>Send to a peer reference and port. Call <code>bind()</code> first.</td>
+                <td>
+                  Send to a <code>PeerLike</code> address and port. Call <code>bind()</code> first.
+                </td>
               </tr>
               <tr>
                 <td><code>socket.close(callback?)</code></td>
@@ -967,13 +1131,15 @@ sock.send(Buffer.from('ping'), 9999, 'bob-laptop');</code></pre>
           <p class="summary">
             Thin wrappers over the standard <code>ws</code> package. The package is optional and
             loaded lazily, so install it only in apps that use this namespace.
+            <code>connect</code> host is <code>PeerLike</code>.
           </p>
           <pre><code>const wss = await mesh.ws.createServer({ port: 7788, path: '/chat' });
 wss.on('connection', (ws, req) =&gt; {
   ws.on('message', (data) =&gt; ws.send('echo: ' + data.toString()));
 });
 
-const ws = await mesh.ws.connect('bob-laptop', 7788, '/chat');
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+const ws = await mesh.ws.connect(bob ?? 'bob-laptop', 7788, '/chat');
 ws.once('open', () =&gt; ws.send('hello'));</code></pre>
           <table>
             <thead>
@@ -985,7 +1151,10 @@ ws.once('open', () =&gt; ws.send('hello'));</code></pre>
             <tbody>
               <tr>
                 <td><code>await mesh.ws.connect(host, port, path?, options?)</code></td>
-                <td>Return a connecting <code>ws</code> client. Wait for its <code>open</code> event.</td>
+                <td>
+                  Return a connecting <code>ws</code> client. <code>host</code> is
+                  <code>PeerLike</code>. Wait for its <code>open</code> event.
+                </td>
               </tr>
               <tr>
                 <td><code>await mesh.ws.createServer({ port, path? })</code></td>
@@ -1001,6 +1170,7 @@ ws.once('open', () =&gt; ws.send('hello'));</code></pre>
           <p class="summary">
             QUIC connections carry many concurrent bidirectional byte streams. Streams are
             <code>stream.Duplex</code> instances; connections and servers are async iterable.
+            <code>connect</code> takes <code>PeerLike</code>.
           </p>
           <pre><code>const server = await mesh.quic.listen(9420);
 (async () =&gt; {
@@ -1013,7 +1183,8 @@ ws.once('open', () =&gt; ws.send('hello'));</code></pre>
   }
 })();
 
-const conn = await mesh.quic.connect('bob-laptop', 9420);
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+const conn = await mesh.quic.connect(bob ?? 'bob-laptop', 9420);
 const stream = await conn.openStream();
 stream.write('hello');
 stream.end();</code></pre>
@@ -1027,7 +1198,7 @@ stream.end();</code></pre>
             <tbody>
               <tr>
                 <td><code>await mesh.quic.connect(host, port)</code></td>
-                <td>Open a QUIC connection to a peer.</td>
+                <td>Open a QUIC connection to a <code>PeerLike</code> host.</td>
               </tr>
               <tr>
                 <td><code>await mesh.quic.listen(port)</code></td>
@@ -1064,15 +1235,20 @@ stream.end();</code></pre>
             JSON bytes are delivered as structured JSON payloads; other bytes are delivered as byte
             arrays.
           </p>
-          <pre><code>mesh.onMessage('chat', (msg) =&gt; {
-  console.log(msg.from, msg.msgType, msg.payload);
+          <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
+  if (typeof msg.from === 'string') return;
+  console.log(msg.from.displayName, msg.msgType, msg.payload);
+  await msg.from.send('chat', Buffer.from(JSON.stringify({ text: 'ack' })));
 });
 
-await mesh.send(
-  peer.deviceId,
-  'chat',
-  Buffer.from(JSON.stringify({ text: 'hello' })),
-);
+const peer = (await mesh.getPeers())[0];
+if (peer) {
+  await peer.send(
+    'chat',
+    Buffer.from(JSON.stringify({ text: 'hello' })),
+  );
+  // same: await mesh.send(peer, 'chat', Buffer.from(...));
+}
 
 await mesh.broadcast(
   'chat',
@@ -1087,8 +1263,11 @@ await mesh.broadcast(
             </thead>
             <tbody>
               <tr>
-                <td><code>await mesh.send(peerId, namespace, data)</code></td>
-                <td>Send to one peer. Lazily establishes a session connection if needed.</td>
+                <td><code>await mesh.send(to, namespace, data)</code></td>
+                <td>
+                  <code>to</code> is <code>Peer | string</code> (query). Lazily establishes a
+                  session connection if needed. Prefer <code>peer.send(...)</code> sugar.
+                </td>
               </tr>
               <tr>
                 <td><code>await mesh.broadcast(namespace, data)</code></td>
@@ -1096,7 +1275,10 @@ await mesh.broadcast(
               </tr>
               <tr>
                 <td><code>mesh.onMessage(namespace, callback)</code></td>
-                <td>Subscribe to messages in one namespace.</td>
+                <td>
+                  Subscribe to messages in one namespace. <code>msg.from</code> is a
+                  <code>Peer</code> when the sender is interned; otherwise a string id.
+                </td>
               </tr>
             </tbody>
           </table>
@@ -1107,7 +1289,10 @@ await mesh.broadcast(
           <h2>File transfer</h2>
           <p class="summary">
             <code>mesh.fileTransfer()</code> returns a file-transfer handle for push, pull, offers,
-            progress events, max-size policy, and pull-root policy.
+            progress events, max-size policy, and pull-root policy. Target peers are still query
+            strings (name / ULID / hostname) — full <code>PeerLike</code> on FT is not landed yet.
+            Resolve a handle first, then pass a stable query such as
+            <code>peer.displayName</code> or a saved <code>deviceId</code>.
           </p>
           <pre><code>const ft = mesh.fileTransfer();
 
@@ -1117,7 +1302,10 @@ ft.onOffer((offer, responder) =&gt; {
 
 ft.onEvent((event) =&gt; console.log(event.eventType, event.progress));
 
-await ft.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre>
+const peer = (await mesh.getPeers())[0];
+if (peer) {
+  await ft.sendFile(peer.displayName, './report.pdf', '/tmp/report.pdf');
+}</code></pre>
           <table>
             <thead>
               <tr>
@@ -1127,12 +1315,15 @@ await ft.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre
             </thead>
             <tbody>
               <tr>
-                <td><code>sendFile(peerId, localPath, remotePath)</code></td>
-                <td>Push a local file to a peer. Resolves with bytes, SHA-256, and elapsed time.</td>
+                <td><code>sendFile(peerQuery, localPath, remotePath)</code></td>
+                <td>
+                  Push a local file to a peer (query string). Resolves with bytes, SHA-256, and
+                  elapsed time.
+                </td>
               </tr>
               <tr>
-                <td><code>pullFile(peerId, remotePath, localPath)</code></td>
-                <td>Pull a file from a peer into a local path.</td>
+                <td><code>pullFile(peerQuery, remotePath, localPath)</code></td>
+                <td>Pull a file from a peer (query string) into a local path.</td>
               </tr>
               <tr>
                 <td><code>autoAccept(outputDir)</code></td>
@@ -1171,7 +1362,10 @@ await ft.sendFile(peer.deviceId, './report.pdf', '/tmp/report.pdf');</code></pre
           <h2>Synced stores</h2>
           <p class="summary">
             A synced store holds device-owned JSON slices. Each device updates its own slice and
-            observes slices from peers.
+            observes slices from peers. Slice keys are durable device ULIDs
+            (<code>getLocalInfo().deviceId</code> / peer <code>deviceId</code> once known) — that is
+            store identity, not a networking address. Prefer Peer handles for dial/send; use
+            store <code>deviceId</code> only to correlate slices with peers after identity is known.
           </p>
           <pre><code>const store = mesh.syncedStore('presence');
 
@@ -1179,7 +1373,15 @@ store.onChange((event) =&gt; console.log(event));
 await store.set({ status: 'online', file: 'notes.md' });
 
 console.log(await store.local());
-console.table(await store.all());</code></pre>
+console.table(await store.all());
+
+// Correlate a slice with a live Peer after identity is known
+const me = mesh.getLocalInfo().deviceId;
+for (const slice of await store.all()) {
+  if (slice.deviceId === me) continue;
+  const peer = await mesh.peer(slice.deviceId, { waitMs: 0 });
+  if (peer) console.log(peer.displayName, slice.data);
+}</code></pre>
           <table>
             <thead>
               <tr>
@@ -1198,7 +1400,7 @@ console.table(await store.all());</code></pre>
               </tr>
               <tr>
                 <td><code>get(deviceId)</code></td>
-                <td>Return one peer slice or <code>null</code>.</td>
+                <td>Return one peer slice by durable ULID, or <code>null</code>.</td>
               </tr>
               <tr>
                 <td><code>all()</code></td>
@@ -1206,7 +1408,7 @@ console.table(await store.all());</code></pre>
               </tr>
               <tr>
                 <td><code>deviceIds()</code></td>
-                <td>Return device IDs that currently have data in the store.</td>
+                <td>Return durable device ULIDs that currently have data in the store.</td>
               </tr>
               <tr>
                 <td><code>version()</code></td>
@@ -1274,7 +1476,11 @@ const info = await proxy.add({
           <h2>@vibecook/truffle-react</h2>
           <p class="summary">
             React hooks are thin helpers around an already-started <code>NapiNode</code> or
-            <code>MeshNode</code>.
+            <code>MeshNode</code>. Prefer passing a <code>MeshNode</code> from
+            <code>createMeshNode()</code>. Hook peer snapshots currently track native
+            <code>NapiPeer</code> fields; send helpers still take a peer query string. For
+            handle-first networking in React, keep the Peer from
+            <code>mesh.getPeers()</code> / events and call <code>peer.send</code> yourself.
           </p>
           <pre><code>import { useMesh, useAuth, useSyncedStore } from '@vibecook/truffle-react';
 
@@ -1282,6 +1488,9 @@ function Peers({ node }) {
   const { peers, send, broadcast } = useMesh(node);
   const auth = useAuth(node);
   const presence = useSyncedStore(node, 'presence');
+
+  // send still takes a query string today
+  // await send(peers[0]?.deviceId ?? peers[0]?.displayName, 'chat', { text: 'hi' });
 }</code></pre>
           <table>
             <thead>
@@ -1293,7 +1502,10 @@ function Peers({ node }) {
             <tbody>
               <tr>
                 <td><code>useMesh(node)</code></td>
-                <td>Peers, local info, started flag, JSON send helper, JSON broadcast helper.</td>
+                <td>
+                  Peer list, local info, started flag, JSON <code>send(peerQuery, …)</code> helper,
+                  JSON broadcast helper.
+                </td>
               </tr>
               <tr>
                 <td><code>useAuth(node)</code></td>
@@ -1301,7 +1513,7 @@ function Peers({ node }) {
               </tr>
               <tr>
                 <td><code>useSyncedStore&lt;T&gt;(node, storeId)</code></td>
-                <td>Local data, all slices, device IDs, version, and a setter.</td>
+                <td>Local data, all slices, device ULIDs, version, and a setter.</td>
               </tr>
             </tbody>
           </table>
@@ -1312,13 +1524,30 @@ function Peers({ node }) {
           <h2>Native classes</h2>
           <p class="summary">
             The package re-exports classes and types from <code>@vibecook/truffle-native</code> for
-            apps that need the lower-level pull-model handles directly.
+            apps that need the lower-level pull-model handles directly. Native
+            <code>NapiNode.getPeers()</code> returns snapshot objects (honest
+            <code>deviceId: string | null</code>, <code>tailscaleId</code>,
+            <code>peerRef</code>, <code>generation</code>) without interned
+            <code>===</code>. Prefer <code>createMeshNode()</code> for the TS
+            <code>Peer</code> registry.
           </p>
           <div class="grid">
             <div class="card">
               <span class="tag">Node</span>
               <h3>NapiNode</h3>
-              <p>Manual lifecycle, discovery, messaging, raw TCP/UDP/QUIC, file transfer, proxy, and synced stores.</p>
+              <p>
+                Manual lifecycle, discovery, messaging, raw TCP/UDP/QUIC, file transfer, proxy, and
+                synced stores. String peer parameters are route/query strings.
+              </p>
+            </div>
+            <div class="card">
+              <span class="tag">Peer</span>
+              <h3>Peer (packages/core)</h3>
+              <p>
+                User-facing handle with hard <code>===</code> via <code>PeerRegistry</code>.
+                Exported from <code>@vibecook/truffle</code> alongside
+                <code>isPeer</code> and <code>peerLikeToQuery</code>.
+              </p>
             </div>
             <div class="card">
               <span class="tag">TCP</span>
@@ -1326,20 +1555,16 @@ function Peers({ node }) {
               <p>Pull-model raw TCP handles. The high-level package wraps these as streams.</p>
             </div>
             <div class="card">
-              <span class="tag">UDP</span>
-              <h3>NapiUdpSocket</h3>
-              <p>Raw datagram send and receive handle.</p>
-            </div>
-            <div class="card">
-              <span class="tag">QUIC</span>
-              <h3>NapiQuicConnection, NapiQuicListener, NapiQuicStream</h3>
-              <p>Raw QUIC connection, listener, and stream handles.</p>
+              <span class="tag">UDP / QUIC</span>
+              <h3>NapiUdpSocket, NapiQuic*</h3>
+              <p>Raw datagram and QUIC connection/listener/stream handles.</p>
             </div>
           </div>
           <div class="note">
-            Most application code should start with <code>createMeshNode()</code> and the
-            <code>mesh.net</code>, <code>mesh.http</code>, <code>mesh.dgram</code>,
-            <code>mesh.ws</code>, and <code>mesh.quic</code> namespaces.
+            Most application code should start with <code>createMeshNode()</code>, use
+            <code>Peer</code> handles, and the <code>mesh.net</code> /
+            <code>mesh.http</code> / <code>mesh.dgram</code> / <code>mesh.ws</code> /
+            <code>mesh.quic</code> namespaces.
           </div>
         </section>
 

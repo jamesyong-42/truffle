@@ -115,19 +115,34 @@ export declare class NapiNode {
   /** Get the local node's identity. */
   getLocalInfo(): NapiNodeIdentity
   /**
-   * Get all known peers.
+   * Get all known peers as plain snapshots (RFC 022 honest fields).
    *
-   * Each peer's `deviceId` is the remote ULID only once that peer's hello
-   * has been received over the envelope-bus WebSocket (`wsConnected == true`);
-   * before then it falls back to the peer's Tailscale stable id (equal to
-   * `tailscaleId`) and flips to the ULID when the session connects.
-   * Raw-transport-only callers should key identity on `tailscaleId`. See
-   * `NapiPeer`.
+   * Prefer {@link createMeshNode}'s wrapped `getPeers()` which returns
+   * interned `Peer` handles with `===` identity. This native method
+   * returns plain objects for low-level callers.
    */
   getPeers(): Promise<Array<NapiPeer>>
-  /** Resolve a peer identifier (name or ID) to the canonical node ID. */
+  /**
+   * Resolve a query to a peer snapshot (RFC 022).
+   *
+   * Accepts display name, ULID, ULID prefix (≥4 unique chars), hostname,
+   * Tailscale id, or tailnet IP. Not found → `null`. Ambiguous → throws.
+   *
+   * `waitMs`: block until resolvable or timeout (then `null`) — for
+   * rehydrating a saved ULID before hello completes.
+   */
+  peer(query: string, waitMs?: number | undefined | null): Promise<NapiPeer | null>
+  /**
+   * Resolve a peer identifier (name or ID) to a routing string.
+   *
+   * @deprecated Prefer {@link peer} or Peer handles from `createMeshNode`.
+   */
   resolvePeerId(peerId: string): Promise<string>
-  /** Ping a peer and return latency info. */
+  /**
+   * Ping a peer and return latency info.
+   *
+   * `peer_id` may be a ULID, name, Tailscale id, or IP (query string).
+   */
   ping(peerId: string): Promise<NapiPingResult>
   /** Get health information from the network layer. */
   health(): Promise<NapiHealthInfo>
@@ -452,6 +467,46 @@ export declare class NapiUdpSocket {
   close(): void
 }
 
+/**
+ * Snapshot fields mirrored onto the JS `Peer` class.
+ *
+ * Getters read from this snapshot; call [`Peer::refresh_from`] when the
+ * registry updates the peer so live fields stay current without reallocating
+ * the JS object (preserving `===`).
+ */
+export declare class Peer {
+  /**
+   * Process-local opaque ref — safe Map key when object identity is
+   * inconvenient; do not persist across restarts.
+   */
+  get peerRef(): string
+  /** Best label for UI. */
+  get displayName(): string
+  /** Durable ULID once known; `null` until identity is learned. */
+  get deviceId(): string | null
+  /** Human-readable name from hello identity, if known. */
+  get deviceName(): string | null
+  /** Layer 3 Tailscale hostname. */
+  get hostname(): string
+  /** Tailscale stable node id (advanced / routing diagnostics). */
+  get tailscaleId(): string
+  /** Registry generation (bumped on re-join). */
+  get generation(): number
+  get ip(): string
+  get online(): boolean
+  /** Envelope-bus WebSocket up. Advanced — do not gate `send` on this. */
+  get wsConnected(): boolean
+  get connectionType(): string
+  get os(): string | null
+  get lastSeen(): string | null
+  /** Same registry entry generation (RFC 022 §7.7). */
+  equals(other: Peer): boolean
+  /** Send a namespaced message to this peer. */
+  send(namespace: string, data: Buffer): Promise<void>
+  /** Ping this peer. */
+  ping(): Promise<NapiPingResult>
+}
+
 /** A datagram received from the mesh. */
 export interface NapiDatagram {
   data: Buffer
@@ -567,6 +622,11 @@ export interface NapiNodeConfig {
   ephemeral?: boolean
   /** WebSocket listen port. Defaults to 9417. */
   wsPort?: number
+  /**
+   * RFC 022 Phase C: proactively exchange hello with online peers so
+   * durable deviceId is learned without app send. Defaults to true.
+   */
+  eagerIdentity?: boolean
 }
 
 /** Identity of the local node (RFC 017 §7.2). */
@@ -597,39 +657,26 @@ export interface NapiNodeIdentity {
   ip?: string
 }
 
-/** A peer as seen by application code (RFC 017 §7.3). */
+/** A peer as seen by application code (RFC 022 honest projection). */
 export interface NapiPeer {
   /**
-   * Remote device identity. Equals the remote node's stable **ULID** only
-   * once its identity has been learned over the envelope-bus WebSocket hello
-   * (RFC 017 §8) — i.e. once `wsConnected` is `true`. Until then, and
-   * permanently for raw-transport-only apps that never open the bus, it
-   * falls back to the peer's **Tailscale stable node id** (the same value as
-   * `tailscaleId`). It therefore CHANGES from the Tailscale id to the ULID
-   * the moment the WS session connects (verified by probe: the flip is
-   * simultaneous with `wsConnected` going true, and does not regress) — do
-   * NOT treat it as stable within a session. Code that keys peers by
-   * identity while using only the raw transports (QUIC/TCP/UDP) should key
-   * on `tailscaleId` instead.
+   * Durable ULID once known; `null` until identity is learned.
+   * Never equals `tailscaleId` and never silently falls back to it.
    */
-  deviceId: string
-  /**
-   * Human-readable device name from the remote node's hello. Falls back to
-   * the Tailscale hostname (slug) until `wsConnected` is `true`, on the
-   * same rule as `deviceId`.
-   */
-  deviceName: string
+  deviceId?: string
+  /** Human-readable device name from the hello identity block, if known. */
+  deviceName?: string
+  /** Best label for UI (identity name → hostname slug → short id). */
+  displayName: string
+  /** Layer 3 Tailscale hostname (`truffle-{appId}-{slug}`). */
+  hostname: string
   /** Network IP address as a string. */
   ip: string
   /** Whether the peer is online (from Layer 3). */
   online: boolean
   /**
-   * Whether an envelope-bus WebSocket session is currently open to this
-   * peer. Also gates `deviceId` / `deviceName`: while `false` they are the
-   * Tailscale-stable-id / hostname fallback; the first time it becomes
-   * `true` the RFC 017 hello lands and both flip to the remote ULID / real
-   * name. Raw-transport-only apps (that never call `send`/`broadcast`/
-   * `onMessage`) keep this `false` and so never see the ULID here.
+   * Whether an envelope-bus WebSocket session is currently open.
+   * Advanced: do not gate `send` on this field.
    */
   wsConnected: boolean
   /** Connection type description (e.g., "direct" or "relay:ord"). */
@@ -638,30 +685,30 @@ export interface NapiPeer {
   os?: string
   /** Last time the peer was seen online (RFC 3339 string). */
   lastSeen?: string
-  /**
-   * Tailscale stable node id — the peer's transport routing key and the ONLY
-   * identity here that is stable for the whole session. Prefer this as the
-   * map key for raw-transport-only apps, where `deviceId` never becomes the
-   * ULID (no WS hello is exchanged) and would otherwise change under you. For
-   * apps on the envelope bus, `deviceId` (the ULID, once `wsConnected`) is
-   * the portable cross-restart identity.
-   */
+  /** Tailscale stable node id — routing key / diagnostics (advanced). */
   tailscaleId: string
+  /** Process-local ref `{tailscaleId}:{generation}` (RFC 022). */
+  peerRef: string
+  /** Registry entry generation (bumped on re-join). */
+  generation: number
 }
 
 /** A peer change event delivered to JS. */
 export interface NapiPeerEvent {
-  /** Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required". */
+  /**
+   * Event type: "joined", "left", "updated", "identity", "ws_connected",
+   * "ws_disconnected", "auth_required".
+   */
   eventType: string
   /**
-   * `device_id` of the affected peer — the ULID once the peer's hello has
-   * been seen, otherwise the Tailscale stable id fallback (same rule as
-   * `NapiPeer.deviceId`). `left` / `ws_disconnected` events in
-   * particular often carry the Tailscale id because the hello may already be
-   * gone. Empty string for `auth_required` events (no associated peer).
+   * Routing key of the affected peer (Tailscale stable id), or empty for
+   * `auth_required`. Prefer `peer` when present (RFC 022).
    */
   peerId: string
-  /** Full peer info (present for joined/updated events). */
+  /**
+   * Full peer info when available (joined/updated/identity; also preferred
+   * on ws_* when resolvable).
+   */
   peer?: NapiPeer
   /** Auth URL (present only for auth_required events). */
   authUrl?: string

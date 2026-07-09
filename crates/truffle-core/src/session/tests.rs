@@ -15,7 +15,7 @@ use crate::transport::websocket::WebSocketTransport;
 use crate::transport::WsConfig;
 
 use super::reconnect::ReconnectBackoff;
-use super::{PeerEvent, PeerRegistry};
+use super::{format_peer_ref, PeerEvent, PeerIdentity, PeerRegistry, PeerRegistryOptions};
 
 // ---------------------------------------------------------------------------
 // Mock NetworkProvider for session tests
@@ -232,11 +232,23 @@ fn build_registry_with_app(
     PeerRegistry<MockNetworkProvider>,
     broadcast::Sender<NetworkPeerEvent>,
 ) {
+    build_registry_with_options(app_id, id, port, PeerRegistryOptions::default())
+}
+
+fn build_registry_with_options(
+    app_id: &str,
+    id: &str,
+    port: u16,
+    options: PeerRegistryOptions,
+) -> (
+    PeerRegistry<MockNetworkProvider>,
+    broadcast::Sender<NetworkPeerEvent>,
+) {
     let provider = MockNetworkProvider::new_with_app(app_id, id);
     let event_sender = provider.event_sender();
     let network = Arc::new(provider);
     let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(port)));
-    let registry = PeerRegistry::new(network, ws_transport);
+    let registry = PeerRegistry::with_options(network, ws_transport, options);
     (registry, event_sender)
 }
 
@@ -1010,4 +1022,255 @@ async fn test_hello_exchange_hello_timeout() {
         saw_close,
         "server should close with CLOSE_HELLO_PROTOCOL after hello timeout"
     );
+}
+
+// ===========================================================================
+// RFC 022 identity index (first-wins, ghost retire, generation)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_rfc022_generation_bumps_on_rejoin() {
+    let port = random_port().await;
+    let (registry, es) = build_registry("local", port);
+    registry.start().await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-a")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let gen1 = registry
+        .peers()
+        .await
+        .into_iter()
+        .find(|p| p.id == "peer-a")
+        .unwrap()
+        .generation;
+    assert_eq!(gen1, 1);
+
+    es.send(NetworkPeerEvent::Left("peer-a".into())).unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-a")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let gen2 = registry
+        .peers()
+        .await
+        .into_iter()
+        .find(|p| p.id == "peer-a")
+        .unwrap()
+        .generation;
+    assert_eq!(gen2, 2);
+    assert_ne!(
+        format_peer_ref("peer-a", gen1),
+        format_peer_ref("peer-a", gen2)
+    );
+}
+
+#[tokio::test]
+async fn test_rfc022_first_wins_duplicate_ulid() {
+    let port = random_port().await;
+    let (registry, es) = build_registry("local", port);
+    registry.start().await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("a")))
+        .unwrap();
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("b")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let uid = "01J4K9M2Z8AB3RNYQPW6H5TC0X";
+    let ident = |ts: &str| PeerIdentity {
+        app_id: "test".into(),
+        device_id: uid.into(),
+        device_name: format!("Node {ts}"),
+        os: "linux".into(),
+        tailscale_id: ts.into(),
+    };
+
+    assert!(registry.test_stamp_identity("a", ident("a")).await);
+    assert!(registry.test_stamp_identity("b", ident("b")).await);
+
+    let peers = registry.peers().await;
+    let a = peers.iter().find(|p| p.id == "a").unwrap();
+    let b = peers.iter().find(|p| p.id == "b").unwrap();
+    assert!(!a.identity_suppressed);
+    assert_eq!(a.published_device_id(), Some(uid));
+    assert!(b.identity_suppressed);
+    assert!(b.published_device_id().is_none());
+    assert_eq!(registry.test_by_device(uid).await.as_deref(), Some("a"));
+
+    // Projection honesty
+    let pa: crate::node::Peer = a.clone().into();
+    let pb: crate::node::Peer = b.clone().into();
+    assert_eq!(pa.device_id.as_deref(), Some(uid));
+    assert!(pb.device_id.is_none());
+}
+
+#[tokio::test]
+async fn test_rfc022_ghost_retire_on_offline_holder() {
+    let port = random_port().await;
+    let (registry, es) = build_registry("local", port);
+    registry.start().await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("old")))
+        .unwrap();
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("new")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let uid = "01J4K9M2Z8AB3RNYQPW6H5TC0Y";
+    let ident = |ts: &str| PeerIdentity {
+        app_id: "test".into(),
+        device_id: uid.into(),
+        device_name: format!("Node {ts}"),
+        os: "linux".into(),
+        tailscale_id: ts.into(),
+    };
+
+    assert!(registry.test_stamp_identity("old", ident("old")).await);
+    // Mark old offline without removing (simulate stale ghost still in map)
+    {
+        // Left removes; for ghost we need offline but still present.
+        // Use Updated with online=false via NetworkPeer.
+        let mut p = make_loopback_peer("old");
+        p.online = false;
+        es.send(NetworkPeerEvent::Updated(p)).unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    assert!(registry.test_stamp_identity("new", ident("new")).await);
+
+    let peers = registry.peers().await;
+    assert!(
+        peers.iter().all(|p| p.id != "old"),
+        "ghost should be retired"
+    );
+    let n = peers.iter().find(|p| p.id == "new").unwrap();
+    assert_eq!(n.published_device_id(), Some(uid));
+    assert_eq!(registry.test_by_device(uid).await.as_deref(), Some("new"));
+}
+
+#[tokio::test]
+async fn test_rfc022_inbound_from_is_tailscale_id() {
+    let server_port = random_port().await;
+
+    let (server_registry, server_es) = build_registry("server", server_port);
+    let mut server_incoming = server_registry.subscribe();
+    server_registry.start().await;
+
+    let (client_registry, client_es) = build_registry("client", server_port);
+    client_registry.start().await;
+
+    server_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("client")))
+        .unwrap();
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    client_registry.send("server", b"ping").await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_millis(800), server_incoming.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
+    // RFC 022 §7.5: from is the connection's Tailscale id, not the ULID.
+    // In the test harness identity.device_id == tailscale id ("client"), so
+    // check that from matches the routing key used for the connection.
+    assert_eq!(msg.from, "client");
+}
+
+#[tokio::test]
+async fn test_rfc022_eager_identity_without_app_send() {
+    let server_port = random_port().await;
+
+    let (server_registry, server_es) = build_registry("server", server_port);
+    server_registry.start().await;
+
+    let (client_registry, client_es) = build_registry("client", server_port);
+    client_registry.start().await;
+
+    server_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("client")))
+        .unwrap();
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+
+    // No client_registry.send — rely on eager identity (default on).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw = false;
+    while tokio::time::Instant::now() < deadline {
+        let peers = client_registry.peers().await;
+        if let Some(p) = peers.iter().find(|p| p.id == "server") {
+            if p.published_device_id().is_some() {
+                saw = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw,
+        "eager identity should populate device_id without app send"
+    );
+
+    // Symmetric: server should also learn client identity (accept path or eager dial).
+    let peers = server_registry.peers().await;
+    let client = peers.iter().find(|p| p.id == "client");
+    // May take a moment if only accept path fires after client dials.
+    if client.and_then(|p| p.published_device_id()).is_none() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let peers = server_registry.peers().await;
+            if peers
+                .iter()
+                .find(|p| p.id == "client")
+                .and_then(|p| p.published_device_id())
+                .is_some()
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let peers = server_registry.peers().await;
+    let client = peers.iter().find(|p| p.id == "client").unwrap();
+    assert!(
+        client.published_device_id().is_some(),
+        "server should see client identity after eager exchange"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc022_eager_identity_disabled_no_auto_hello() {
+    let server_port = random_port().await;
+    let opts = PeerRegistryOptions {
+        eager_identity: false,
+        ..Default::default()
+    };
+    let (server_registry, _server_es) =
+        build_registry_with_options("test", "server", server_port, opts.clone());
+    server_registry.start().await;
+
+    let (client_registry, client_es) =
+        build_registry_with_options("test", "client", server_port, opts);
+    client_registry.start().await;
+
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let peers = client_registry.peers().await;
+    let server = peers.iter().find(|p| p.id == "server").unwrap();
+    assert!(
+        server.published_device_id().is_none(),
+        "with eager_identity=false, no auto hello"
+    );
+    assert!(!server.ws_connected);
 }

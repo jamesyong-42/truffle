@@ -1,111 +1,106 @@
 import { execFile } from 'node:child_process';
-import { NapiNode, type NapiNodeConfig, type NapiPeerEvent } from '@vibecook/truffle-native';
+import {
+  NapiNode,
+  type NapiNodeConfig,
+  type NapiNamespacedMessage,
+  type NapiPeerEvent,
+  type NapiPingResult,
+} from '@vibecook/truffle-native';
 import { createNetNamespace, type TruffleNet } from './net.js';
 import { createHttpNamespace, type TruffleHttp } from './http.js';
 import { createQuicNamespace, type TruffleQuic } from './quic.js';
 import { createDgramNamespace, type TruffleDgram } from './dgram.js';
 import { createWsNamespace, type TruffleWs } from './ws.js';
 import { resolveSidecarPath } from './sidecar.js';
+import { Peer, PeerRegistry, peerLikeToQuery, type PeerLike, type PeerRef } from './peer.js';
+
+export type { PeerLike, PeerRef };
+export { Peer };
 
 /**
- * A started mesh node: the full native `NapiNode` API plus protocol
- * namespaces (RFC 021). Namespaces are attached to the same underlying
- * instance, so every `NapiNode` method is available directly and new
- * native methods surface automatically.
+ * A started mesh node: native `NapiNode` methods plus RFC 021 namespaces
+ * and RFC 022 Peer-handle APIs.
  */
-export type MeshNode = NapiNode & {
-  /** node:net-shaped raw TCP API over the mesh (RFC 021). */
+export type MeshNode = Omit<
+  NapiNode,
+  'getPeers' | 'peer' | 'send' | 'ping' | 'onPeerChange' | 'onMessage'
+> & {
   net: TruffleNet;
-  /**
-   * node:http interop over the mesh (RFC 021): a MeshAgent for outbound
-   * requests to peers plus `request`/`get`/`fetchText` sugar. Inbound HTTP
-   * is served by feeding `mesh.net` connections into an `http.Server` via
-   * `httpServer.emit('connection', socket)`.
-   */
   http: TruffleHttp;
-  /**
-   * QUIC over the mesh (RFC 021): multiplexed bidirectional byte streams
-   * with no head-of-line blocking, async-iterable connections/streams.
-   */
   quic: TruffleQuic;
-  /**
-   * node:dgram-shaped raw UDP API over the mesh (RFC 021): datagram sockets
-   * with `'message'` events and preserved datagram boundaries.
-   */
   dgram: TruffleDgram;
-  /**
-   * WebSocket over the mesh (RFC 021): thin wrappers over the `ws` package —
-   * `ws.connect(peer, port)` for a client, `ws.createServer({ port })` for a
-   * server. Requires the optional `ws` peer dependency to be installed.
-   */
   ws: TruffleWs;
-  /** The underlying native handle (escape hatch; the same object). */
   native: NapiNode;
+
+  /** Interned Peer handles (`===` stable per peerRef). */
+  getPeers(): Promise<Peer[]>;
+
+  /**
+   * Resolve a query to an interned Peer.
+   * `waitMs` blocks until resolvable or timeout → null.
+   */
+  peer(query: string, opts?: { waitMs?: number }): Promise<Peer | null>;
+
+  /** Handle-first send (`Peer` or query string). */
+  send(to: PeerLike, namespace: string, data: Buffer | Uint8Array): Promise<void>;
+
+  /** Handle-first ping. */
+  ping(to: PeerLike): Promise<NapiPingResult>;
+
+  /**
+   * Peer-change subscription with interned `event.peer` when present.
+   */
+  onPeerChange(callback: (event: MeshPeerEvent) => void): void;
+
+  /**
+   * Namespace messages with `from` as an interned Peer when known.
+   */
+  onMessage(namespace: string, callback: (msg: MeshNamespacedMessage) => void): void;
 };
 
-/**
- * Options for {@link createMeshNode}. RFC 017 shape — `appId` is required,
- * `deviceName` / `deviceId` are optional overrides that the underlying
- * `NodeBuilder` defaults when absent (OS hostname / auto-generated ULID).
- */
+/** Peer event with interned handle (RFC 022). */
+export type MeshPeerEvent = {
+  type: string;
+  /** Tailscale routing key when peer-related; empty for auth. */
+  peerId: string;
+  peer?: Peer;
+  authUrl?: string;
+};
+
+/** Inbound message; `from` is Peer when the sender is interned. */
+export type MeshNamespacedMessage = {
+  from: Peer | string;
+  namespace: string;
+  msgType: string;
+  payload: unknown;
+  timestamp?: number;
+};
+
 export interface CreateMeshNodeOptions {
   /**
-   * Required. Application namespace identifier. Two apps with different
-   * `appId`s cannot see each other as peers.
-   *
-   * Format: `^[a-z][a-z0-9-]{1,31}$` (lowercase letters, digits, hyphens,
-   * 2–32 characters, must start with a letter).
+   * Required. Application namespace. Format: `^[a-z][a-z0-9-]{1,31}$`
    */
   appId: string;
-  /**
-   * Optional human-readable device name. Defaults to the OS hostname.
-   * May contain any Unicode characters; truffle derives a Tailscale-safe
-   * hostname from this automatically.
-   */
   deviceName?: string;
-  /**
-   * Optional stable per-device ULID. If omitted, one is generated on
-   * first run and persisted inside `stateDir`. Provide your own if you
-   * want to federate identity with an existing user system.
-   */
   deviceId?: string;
-  /** Override sidecar path. If omitted, auto-resolved. */
   sidecarPath?: string;
-  /**
-   * State directory for Tailscale. Defaults to
-   * `{userDataDir}/truffle/{appId}/{slug(deviceName)}`.
-   */
   stateDir?: string;
-  /** Tailscale auth key (for headless/CI setups). */
   authKey?: string;
-  /** Whether this node is ephemeral (removed from tailnet on stop). */
   ephemeral?: boolean;
   /** WebSocket listener port. Defaults to 9417 when omitted. */
   wsPort?: number;
   /**
-   * Auto-open the Tailscale auth URL in the default browser.
-   * Defaults to true. Set to false to handle auth manually.
+   * When true (default), proactively exchange hello with online peers so
+   * durable `deviceId` is learned without application `send` (RFC 022 §8).
    */
+  eagerIdentity?: boolean;
   autoAuth?: boolean;
-  /**
-   * Custom URL opener. Overrides the default browser opener.
-   * Useful in Electron where you'd use `shell.openExternal()`.
-   */
   openUrl?: (url: string) => void;
-  /** Called when Tailscale auth is required. Receives the auth URL. */
   onAuthRequired?: (url: string) => void;
-  /** Called for peer change events (join, leave, update, ws_connected, etc.). */
-  onPeerChange?: (event: NapiPeerEvent) => void;
+  onPeerChange?: (event: MeshPeerEvent) => void;
 }
 
-/**
- * Open a URL in the system's default browser.
- */
 function defaultOpenUrl(url: string): void {
-  // Only ever open http(s) URLs, and pass the URL as an argv element (never
-  // through a shell) so it cannot be interpreted as a command. The previous
-  // `execSync(`open "${url}"`)` form let shell metacharacters ($(), backticks)
-  // in the URL execute arbitrary commands.
   if (!/^https?:\/\//i.test(url)) return;
   const [cmd, args]: [string, string[]] =
     process.platform === 'darwin'
@@ -113,33 +108,41 @@ function defaultOpenUrl(url: string): void {
       : process.platform === 'win32'
         ? ['explorer', [url]]
         : ['xdg-open', [url]];
-  execFile(cmd, args, () => {
-    // Best-effort; ignore failures (no browser, headless environment, etc.).
-  });
+  execFile(cmd, args, () => {});
+}
+
+function toMeshPeerEvent(reg: PeerRegistry, raw: NapiPeerEvent): MeshPeerEvent {
+  const type = raw.eventType;
+  const peerId = raw.peerId;
+  let peer: Peer | undefined;
+  if (raw.peer) {
+    peer = reg.upsert(raw.peer);
+  }
+  if (type === 'left' && peerId) {
+    if (peer) {
+      reg.remove(peer.ref);
+    } else {
+      reg.removeByTailscaleId(peerId);
+    }
+  }
+  return { type, peerId, peer, authUrl: raw.authUrl };
 }
 
 /**
  * Create and start a Truffle node with sensible defaults.
  *
- * - Auto-resolves the sidecar binary path
- * - Auto-opens the Tailscale auth URL in the browser (configurable)
- * - Provides auth and peer lifecycle callbacks
- *
  * @example
  * ```ts
- * const mesh = await createMeshNode({
- *   appId: 'playground',
- *   deviceName: 'alice-mbp',
- *   onPeerChange: (event) => console.log('Peer event:', event),
+ * const mesh = await createMeshNode({ appId: 'chat', deviceName: 'laptop' });
+ *
+ * mesh.onMessage('chat', async (msg) => {
+ *   if (typeof msg.from !== 'string') {
+ *     await msg.from.send('chat', Buffer.from('ack'));
+ *   }
  * });
  *
  * const peers = await mesh.getPeers();
- * await mesh.send(peers[0].deviceId, 'chat', Buffer.from(JSON.stringify({ text: 'hello' })));
- *
- * // Raw TCP over the mesh, node:net-style (RFC 021):
- * const server = mesh.net.createServer((socket) => socket.pipe(socket));
- * server.listen(8080);
- * const client = mesh.net.connect({ host: 'other-machine', port: 8080 });
+ * await peers[0]?.send('chat', Buffer.from('hello'));
  * ```
  */
 export async function createMeshNode(options: CreateMeshNodeOptions): Promise<MeshNode> {
@@ -156,10 +159,9 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     authKey,
     ephemeral,
     wsPort,
+    eagerIdentity,
   } = options;
 
-  // Validate appId synchronously (mirrors the Rust-side rule) so a bad value
-  // fails here with a clear error instead of asynchronously across the FFI.
   if (!/^[a-z][a-z0-9-]{1,31}$/.test(appId)) {
     throw new Error(
       `[truffle] Invalid appId ${JSON.stringify(appId)}: must match ^[a-z][a-z0-9-]{1,31}$ ` +
@@ -168,21 +170,11 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
   }
 
   const resolvedSidecarPath = sidecarPath ?? resolveSidecarPath();
-
   const node = new NapiNode();
 
-  // IMPORTANT: install the auth-required callback BEFORE calling `start()`.
-  // `start()` blocks waiting for Tailscale authentication to complete, so
-  // an `onPeerChange` subscription installed afterwards misses the
-  // `auth_required` event entirely and `start()` hangs until its internal
-  // 5-minute timeout with "timed out waiting for authentication".
-  //
-  // `onAuthRequired` is a distinct, pre-start hook on NapiNode that bridges
-  // to `NodeBuilder::build_with_auth_handler` under the hood.
   node.onAuthRequired((url: string) => {
     if (autoAuth) {
-      const opener = customOpenUrl ?? defaultOpenUrl;
-      opener(url);
+      (customOpenUrl ?? defaultOpenUrl)(url);
     }
     onAuthRequired?.(url);
   });
@@ -196,28 +188,69 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     authKey,
     ephemeral,
     wsPort,
+    eagerIdentity,
   };
 
   try {
     await node.start(config);
   } catch (err) {
-    // Best-effort cleanup so a failed start doesn't leak the spawned sidecar
-    // process. `stop()` is safe to call even if start() failed early.
     try {
       await node.stop();
     } catch {
-      // ignore — nothing to clean up, or already torn down
+      /* ignore */
     }
     throw err;
   }
 
-  // Post-start: forward ongoing peer lifecycle events to the user callback.
+  const registry = new PeerRegistry(node);
+  const mesh = node as unknown as MeshNode;
+
+  mesh.getPeers = async () => {
+    const snaps = await node.getPeers();
+    return registry.upsertAll(snaps);
+  };
+
+  mesh.peer = async (query: string, opts?: { waitMs?: number }) => {
+    const snap = await node.peer(query, opts?.waitMs);
+    if (!snap) return null;
+    return registry.upsert(snap);
+  };
+
+  const nativeSend = node.send.bind(node);
+  mesh.send = async (to: PeerLike, namespace: string, data: Buffer | Uint8Array) => {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    return nativeSend(peerLikeToQuery(to), namespace, buf);
+  };
+
+  const nativePing = node.ping.bind(node);
+  mesh.ping = async (to: PeerLike) => nativePing(peerLikeToQuery(to));
+
+  const nativeOnPeerChange = node.onPeerChange.bind(node);
+  mesh.onPeerChange = (callback: (event: MeshPeerEvent) => void) => {
+    nativeOnPeerChange((raw: NapiPeerEvent) => {
+      callback(toMeshPeerEvent(registry, raw));
+    });
+  };
+
+  const nativeOnMessage = node.onMessage.bind(node);
+  mesh.onMessage = (namespace: string, callback: (msg: MeshNamespacedMessage) => void) => {
+    nativeOnMessage(namespace, (raw: NapiNamespacedMessage) => {
+      // Attribution is Tailscale id; intern when we already know the peer.
+      const from: Peer | string = registry.getByTailscaleId(raw.from) ?? raw.from;
+      callback({
+        from,
+        namespace: raw.namespace,
+        msgType: raw.msgType,
+        payload: raw.payload,
+        timestamp: raw.timestamp,
+      });
+    });
+  };
+
   if (onPeerChange) {
-    node.onPeerChange(onPeerChange);
+    mesh.onPeerChange(onPeerChange);
   }
 
-  // Attach the protocol namespaces (RFC 021) to the native instance.
-  const mesh = node as MeshNode;
   mesh.net = createNetNamespace(node);
   mesh.http = createHttpNamespace(mesh.net);
   mesh.quic = createQuicNamespace(node);

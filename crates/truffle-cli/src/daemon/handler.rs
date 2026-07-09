@@ -258,12 +258,8 @@ fn peer_event_to_notification(
             .map(|i| i.device_name.clone())
             .unwrap_or_else(|| state.name.clone())
     };
-    let peer_device_id = |state: &truffle_core::session::PeerState| -> String {
-        state
-            .identity
-            .as_ref()
-            .map(|i| i.device_id.clone())
-            .unwrap_or_else(|| state.id.clone())
+    let peer_device_id = |state: &truffle_core::session::PeerState| -> Option<String> {
+        state.published_device_id().map(|s| s.to_string())
     };
 
     let (method_name, params) = match event {
@@ -300,7 +296,7 @@ fn peer_event_to_notification(
                 }),
             )
         }
-        PeerEvent::Updated(state) => {
+        PeerEvent::Updated(state) | PeerEvent::Identity(state) => {
             let name = display_name(state);
             if !matches_peer_filter(&name, peer_filter) {
                 return None;

@@ -8,6 +8,7 @@
 
 pub mod file_transfer;
 pub mod node;
+pub mod peer;
 pub mod proxy;
 pub mod quic;
 pub mod raw_socket;

@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased]
+
+### ⚠ BREAKING CHANGES (RFC 022 — Peer Handle API)
+
+* Peer `deviceId` is now `string | null` (honest ULID only). It never falls
+  back to a Tailscale id. Use `displayName` / `hostname` for UI; use
+  `tailscaleId` only for advanced diagnostics.
+* Legacy core `Peer.id` / `Peer.name` removed in favor of `tailscaleId`,
+  `hostname`, `displayName`, `peerRef`, `generation`.
+* Inbound message attribution uses the connection's WhoIs-verified
+  Tailscale id (not the self-declared ULID).
+* Prefer **Peer handles** from `createMeshNode().getPeers()` / events over
+  string ids for networking. `send` / `ping` / `net.connect` / `quic.connect`
+  / `dgram.send` / `ws.connect` accept `Peer | string` (query).
+
+### Features
+
+* **RFC 022 Peer handles:** interned `Peer` objects with hard `===` identity
+  via `createMeshNode` (`packages/core`), `mesh.peer(query, { waitMs })`,
+  handle-first `send`/`ping`, peer-aware events and message `from`.
+* **RFC 022 honest identity:** dual-index registry, generation/`peerRef`,
+  first-wins + ghost-retire for ULID collisions, `identity` peer event.
+* **RFC 022 eager identity (default on):** proactively complete hello with
+  online peers so durable `deviceId` is learned without app `send`.
+  Configure with `eagerIdentity` / `NodeBuilder::eager_identity`.
+* **PeerLike** on mesh.net / quic / dgram / ws connect and send surfaces.
+
+### Bug Fixes
+
+* Disconnect no longer clears a learned `deviceId` until the peer leaves.
+
 ## [0.5.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.5.0...truffle-v0.5.1) (2026-07-09)
 
 

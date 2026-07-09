@@ -13,6 +13,7 @@ import type {
   NapiQuicListener,
   NapiQuicStream,
 } from '@vibecook/truffle-native';
+import { peerLikeToQuery, type PeerLike } from './peer.js';
 
 /**
  * A bidirectional byte stream on a QUIC connection, as a `stream.Duplex`.
@@ -170,11 +171,11 @@ export class TruffleQuicServer implements AsyncIterable<TruffleQuicConnection> {
 /** QUIC namespace bound to a mesh node. */
 export interface TruffleQuic {
   /**
-   * Open a QUIC connection to a peer. `host` accepts a device id (or
-   * unique ≥4-char prefix), device name, Tailscale hostname, or IP. Only
-   * same-app peers can complete the handshake (ALPN scoping).
+   * Open a QUIC connection to a peer. `host` is a {@link PeerLike}
+   * (handle or query string). Only same-app peers can complete the
+   * handshake (ALPN scoping).
    */
-  connect(host: string, port: number): Promise<TruffleQuicConnection>;
+  connect(host: PeerLike, port: number): Promise<TruffleQuicConnection>;
   /**
    * Listen for QUIC connections. Ports 443/9417 are reserved; port 0 is
    * not supported over the tsnet relay — choose an explicit port
@@ -185,8 +186,8 @@ export interface TruffleQuic {
 
 export function createQuicNamespace(node: NapiNode): TruffleQuic {
   return {
-    async connect(host: string, port: number): Promise<TruffleQuicConnection> {
-      return new TruffleQuicConnection(await node.connectQuic(host, port));
+    async connect(host: PeerLike, port: number): Promise<TruffleQuicConnection> {
+      return new TruffleQuicConnection(await node.connectQuic(peerLikeToQuery(host), port));
     },
     async listen(port: number): Promise<TruffleQuicServer> {
       return new TruffleQuicServer(await node.listenQuic(port));

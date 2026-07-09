@@ -22,14 +22,13 @@ use crate::types::{
 };
 use crate::udp_socket::NapiUdpSocket;
 
-/// Helper: convert a truffle-core `Peer` to a `NapiPeer`.
-///
-/// RFC 017: the user-facing identity is `device_id` / `device_name`, with
-/// the Tailscale stable ID preserved as an escape hatch for diagnostics.
+/// Helper: convert a truffle-core `Peer` to a `NapiPeer` (RFC 022).
 fn peer_to_napi(p: &truffle_core::node::Peer) -> NapiPeer {
     NapiPeer {
         device_id: p.device_id.clone(),
         device_name: p.device_name.clone(),
+        display_name: p.display_name.clone(),
+        hostname: p.hostname.clone(),
         ip: p.ip.to_string(),
         online: p.online,
         ws_connected: p.ws_connected,
@@ -37,6 +36,8 @@ fn peer_to_napi(p: &truffle_core::node::Peer) -> NapiPeer {
         os: p.os.clone(),
         last_seen: p.last_seen.clone(),
         tailscale_id: p.tailscale_id.clone(),
+        peer_ref: p.peer_ref.clone(),
+        generation: p.generation as u32,
     }
 }
 
@@ -130,6 +131,9 @@ impl NapiNode {
         if let Some(port) = config.ws_port {
             builder = builder.ws_port(port);
         }
+        if let Some(eager) = config.eager_identity {
+            builder = builder.eager_identity(eager);
+        }
 
         // If the caller installed a pre-start auth handler via
         // `on_auth_required()`, use `build_with_auth_handler` so the auth
@@ -186,14 +190,11 @@ impl NapiNode {
         })
     }
 
-    /// Get all known peers.
+    /// Get all known peers as plain snapshots (RFC 022 honest fields).
     ///
-    /// Each peer's `deviceId` is the remote ULID only once that peer's hello
-    /// has been received over the envelope-bus WebSocket (`wsConnected == true`);
-    /// before then it falls back to the peer's Tailscale stable id (equal to
-    /// `tailscaleId`) and flips to the ULID when the session connects.
-    /// Raw-transport-only callers should key identity on `tailscaleId`. See
-    /// `NapiPeer`.
+    /// Prefer {@link createMeshNode}'s wrapped `getPeers()` which returns
+    /// interned `Peer` handles with `===` identity. This native method
+    /// returns plain objects for low-level callers.
     #[napi]
     pub async fn get_peers(&self) -> Result<Vec<NapiPeer>> {
         let node = self.require_node()?;
@@ -201,7 +202,26 @@ impl NapiNode {
         Ok(peers.iter().map(peer_to_napi).collect())
     }
 
-    /// Resolve a peer identifier (name or ID) to the canonical node ID.
+    /// Resolve a query to a peer snapshot (RFC 022).
+    ///
+    /// Accepts display name, ULID, ULID prefix (≥4 unique chars), hostname,
+    /// Tailscale id, or tailnet IP. Not found → `null`. Ambiguous → throws.
+    ///
+    /// `waitMs`: block until resolvable or timeout (then `null`) — for
+    /// rehydrating a saved ULID before hello completes.
+    #[napi]
+    pub async fn peer(&self, query: String, wait_ms: Option<u32>) -> Result<Option<NapiPeer>> {
+        let node = self.require_node()?;
+        let found = node
+            .peer(&query, wait_ms.map(|m| m as u64))
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(found.as_ref().map(peer_to_napi))
+    }
+
+    /// Resolve a peer identifier (name or ID) to a routing string.
+    ///
+    /// @deprecated Prefer {@link peer} or Peer handles from `createMeshNode`.
     #[napi]
     pub async fn resolve_peer_id(&self, peer_id: String) -> Result<String> {
         let node = self.require_node()?;
@@ -211,6 +231,8 @@ impl NapiNode {
     }
 
     /// Ping a peer and return latency info.
+    ///
+    /// `peer_id` may be a ULID, name, Tailscale id, or IP (query string).
     #[napi]
     pub async fn ping(&self, peer_id: String) -> Result<NapiPingResult> {
         let node = self.require_node()?;
@@ -470,45 +492,33 @@ impl NapiNode {
 // PeerEvent conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a core `PeerEvent` into its NAPI shape.
+/// Convert a core `PeerEvent` into its NAPI shape (RFC 022).
 ///
-/// For `joined` / `updated` events we derive `peer_id` from the
-/// RFC 017 device_id carried on the hello envelope (via `Peer::from`).
-/// For `left` / `ws_connected` / `ws_disconnected` the session layer
-/// only gives us a Tailscale stable ID; if a `node` is provided we
-/// attempt to resolve that to a `device_id` via the node's peer cache
-/// so JS callers can key every `peer_id` by the same identifier.
-/// If resolution fails (e.g. transient races during disconnect) we
-/// fall back to the Tailscale stable ID — callers should be aware.
+/// `peer_id` is always the Tailscale routing key when a peer is involved.
+/// Prefer the nested `peer` object for display and durable identity.
 async fn convert_peer_event(
     event: &truffle_core::session::PeerEvent,
     node: Option<&Arc<Node<TailscaleProvider>>>,
 ) -> NapiPeerEvent {
     use truffle_core::session::PeerEvent;
 
-    // Helper: funnel through `Peer::from(PeerState)` so the `device_id`
-    // / `device_name` fallback logic lives in one place (see core/node.rs).
-    // The resulting `Peer` has `device_id == identity.device_id` when the
-    // hello has landed, otherwise it falls back to the Tailscale stable ID.
     let from_state = |state: &truffle_core::session::PeerState| -> NapiPeer {
         let peer: truffle_core::node::Peer = state.clone().into();
         peer_to_napi(&peer)
     };
 
-    // Resolve a Tailscale stable ID to the hello-advertised device_id by
-    // scanning the node's cached peer list. Returns the input on miss.
-    async fn resolve_device_id(
+    async fn peer_snapshot(
         node: Option<&Arc<Node<TailscaleProvider>>>,
         tailscale_id: &str,
-    ) -> String {
+    ) -> Option<NapiPeer> {
         if let Some(node) = node {
             for p in node.peers().await {
                 if p.tailscale_id == tailscale_id {
-                    return p.device_id.clone();
+                    return Some(peer_to_napi(&p));
                 }
             }
         }
-        tailscale_id.to_string()
+        None
     }
 
     match event {
@@ -516,36 +526,45 @@ async fn convert_peer_event(
             let peer = from_state(state);
             NapiPeerEvent {
                 event_type: "joined".to_string(),
-                peer_id: peer.device_id.clone(),
+                peer_id: peer.tailscale_id.clone(),
                 peer: Some(peer),
                 auth_url: None,
             }
         }
         PeerEvent::Left(id) => NapiPeerEvent {
             event_type: "left".to_string(),
-            peer_id: resolve_device_id(node, id).await,
-            peer: None,
+            peer_id: id.clone(),
+            peer: peer_snapshot(node, id).await,
             auth_url: None,
         },
         PeerEvent::Updated(state) => {
             let peer = from_state(state);
             NapiPeerEvent {
                 event_type: "updated".to_string(),
-                peer_id: peer.device_id.clone(),
+                peer_id: peer.tailscale_id.clone(),
+                peer: Some(peer),
+                auth_url: None,
+            }
+        }
+        PeerEvent::Identity(state) => {
+            let peer = from_state(state);
+            NapiPeerEvent {
+                event_type: "identity".to_string(),
+                peer_id: peer.tailscale_id.clone(),
                 peer: Some(peer),
                 auth_url: None,
             }
         }
         PeerEvent::WsConnected(id) => NapiPeerEvent {
             event_type: "ws_connected".to_string(),
-            peer_id: resolve_device_id(node, id).await,
-            peer: None,
+            peer_id: id.clone(),
+            peer: peer_snapshot(node, id).await,
             auth_url: None,
         },
         PeerEvent::WsDisconnected(id) => NapiPeerEvent {
             event_type: "ws_disconnected".to_string(),
-            peer_id: resolve_device_id(node, id).await,
-            peer: None,
+            peer_id: id.clone(),
+            peer: peer_snapshot(node, id).await,
             auth_url: None,
         },
         PeerEvent::AuthRequired { url } => NapiPeerEvent {

@@ -73,12 +73,14 @@ impl From<truffle_core::network::NodeIdentity> for NodeIdentityJs {
 // PeerJs
 // ---------------------------------------------------------------------------
 
-/// A peer as seen by the frontend.
+/// A peer as seen by the frontend (RFC 022).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerJs {
-    pub device_id: String,
-    pub device_name: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub display_name: String,
+    pub hostname: String,
     pub ip: String,
     pub online: bool,
     pub ws_connected: bool,
@@ -86,6 +88,8 @@ pub struct PeerJs {
     pub os: Option<String>,
     pub last_seen: Option<String>,
     pub tailscale_id: String,
+    pub peer_ref: String,
+    pub generation: u64,
 }
 
 impl From<truffle_core::Peer> for PeerJs {
@@ -93,6 +97,8 @@ impl From<truffle_core::Peer> for PeerJs {
         Self {
             device_id: p.device_id,
             device_name: p.device_name,
+            display_name: p.display_name,
+            hostname: p.hostname,
             ip: p.ip.to_string(),
             online: p.online,
             ws_connected: p.ws_connected,
@@ -100,6 +106,8 @@ impl From<truffle_core::Peer> for PeerJs {
             os: p.os,
             last_seen: p.last_seen,
             tailscale_id: p.tailscale_id,
+            peer_ref: p.peer_ref,
+            generation: p.generation,
         }
     }
 }
@@ -217,6 +225,7 @@ pub enum PeerEventJs {
     Joined { peer: PeerStateJs },
     Left { id: String },
     Updated { peer: PeerStateJs },
+    Identity { peer: PeerStateJs },
     WsConnected { id: String },
     WsDisconnected { id: String },
     AuthRequired { url: String },
@@ -225,14 +234,15 @@ pub enum PeerEventJs {
 /// Internal peer state, serialized for the frontend (used in PeerEventJs).
 ///
 /// Matches the `PeerJs` shape so the frontend only deals with one peer
-/// type shape. Built via the core `Peer::from(PeerState)` conversion, which
-/// applies the RFC 017 identity fallback (device_id from hello, or
-/// Tailscale stable ID before the hello lands).
+/// type shape. Built via the core `Peer::from(PeerState)` conversion
+/// (RFC 022 honest projection).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerStateJs {
-    pub device_id: String,
-    pub device_name: String,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub display_name: String,
+    pub hostname: String,
     pub ip: String,
     pub online: bool,
     pub ws_connected: bool,
@@ -240,16 +250,20 @@ pub struct PeerStateJs {
     pub os: Option<String>,
     pub last_seen: Option<String>,
     pub tailscale_id: String,
+    pub peer_ref: String,
+    pub generation: u64,
 }
 
 impl From<truffle_core::session::PeerState> for PeerStateJs {
     fn from(s: truffle_core::session::PeerState) -> Self {
-        // Delegate to the core `Peer` conversion so the identity fallback
+        // Delegate to the core `Peer` conversion so the identity projection
         // logic lives in one place.
         let peer: truffle_core::Peer = s.into();
         Self {
             device_id: peer.device_id,
             device_name: peer.device_name,
+            display_name: peer.display_name,
+            hostname: peer.hostname,
             ip: peer.ip.to_string(),
             online: peer.online,
             ws_connected: peer.ws_connected,
@@ -257,6 +271,8 @@ impl From<truffle_core::session::PeerState> for PeerStateJs {
             os: peer.os,
             last_seen: peer.last_seen,
             tailscale_id: peer.tailscale_id,
+            peer_ref: peer.peer_ref,
+            generation: peer.generation,
         }
     }
 }
@@ -268,6 +284,7 @@ impl From<truffle_core::session::PeerEvent> for PeerEventJs {
             PeerEvent::Joined(state) => PeerEventJs::Joined { peer: state.into() },
             PeerEvent::Left(id) => PeerEventJs::Left { id },
             PeerEvent::Updated(state) => PeerEventJs::Updated { peer: state.into() },
+            PeerEvent::Identity(state) => PeerEventJs::Identity { peer: state.into() },
             PeerEvent::WsConnected(id) => PeerEventJs::WsConnected { id },
             PeerEvent::WsDisconnected(id) => PeerEventJs::WsDisconnected { id },
             PeerEvent::AuthRequired { url } => PeerEventJs::AuthRequired { url },

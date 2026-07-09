@@ -172,7 +172,7 @@ async fn run_foreground(config: &TruffleConfig) -> Result<(), (i32, String)> {
                                 id,
                             );
                         }
-                        PeerEvent::Updated(_) => {}
+                        PeerEvent::Updated(_) | PeerEvent::Identity(_) => {}
                         PeerEvent::AuthRequired { .. } => {}
                     }
                 }

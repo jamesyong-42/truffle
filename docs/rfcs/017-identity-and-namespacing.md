@@ -592,6 +592,9 @@ This RFC emerged from a debugging session where the Electron playground rewrite 
 
 ## 15. Implementation deviation (as-built, v0.5.x)
 
+> **Superseded by [RFC 022: Peer Handle API](./022-peer-handle-api.md)** (proposed for 0.6.0).  
+> RFC 022 replaces string-id-first consumption with a single user-facing **Peer** handle, makes `deviceId` an honest `ULID | null`, and moves dual-index / routing complexity into `PeerRegistry`. The guidance below remains the source of truth for **v0.5.x** consumers until 0.6 ships.
+
 The design above presents `deviceId` as *the* peer identity — §7.3 calls `NapiPeer.deviceId` the "Primary key", and §7.4 has `send()` / routing take a `deviceId`. The shipped implementation only realises that once a peer's hello has been exchanged. This section records what `getPeers()` actually returns, why, and how consumers should key identity until the honest fix lands.
 
 ### 15.1 What `getPeers()` actually returns
@@ -629,9 +632,11 @@ Two same-host `tsnet` nodes (`appId: strata-collab`, `ephemeral: true`), talking
 
 ### 15.4 Future work — an honest fix
 
-The root cause is that the ULID is bound to a channel (the envelope-bus WS) that raw-transport apps never open, so identity and reachability are coupled. Options, sketched only (no commitment here):
+**See [RFC 022](./022-peer-handle-api.md).** The committed direction is:
 
-- **Carry the ULID at the Tailscale layer** — stamp it into the node's tsnet *hostinfo* (or a service record) so it rides the netmap and is present on every peer at discovery time, before any truffle-level session. `getPeers()` could then return the ULID with `wsConnected === false`, eliminating the flip entirely.
-- **A raw-transport handshake** — exchange a minimal identity frame on the first QUIC/TCP stream (and a UDP identity datagram), mirroring the WS hello, so raw-transport peers learn each other's ULID without the envelope bus. This keeps the ULID out of the netmap but adds a per-transport handshake.
+1. **Peer handle-first API** — networking takes `Peer`, not “the right string id.”
+2. **Honest `deviceId: ULID | null`** — never fall back to Tailscale id in that field.
+3. **Eager identity (default)** — learn ULID without requiring app `send`.
+4. Optional hostinfo advertisement and raw first-frame as later phases.
 
-Either way the target contract is: `getPeers()` never hands back a Tailscale id in the `deviceId` slot, and `deviceId` is stable from the first time a peer appears. Until then, `tailscaleId` is the canonical pre-hello key and this section is the source of truth over §7.3.
+Until 0.6 ships, `tailscaleId` remains the canonical pre-hello map key for v0.5.x consumers, and this section remains the source of truth over §7.3 for that line.
