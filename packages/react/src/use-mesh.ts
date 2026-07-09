@@ -18,7 +18,9 @@ export interface UseMeshResult {
  * React hook for Truffle mesh networking.
  *
  * Provides reactive peer state and messaging helpers built on the new
- * Node API (RFC 012). The NapiNode must already be started.
+ * Node API (RFC 012). The NapiNode must already be started. When using
+ * `createMeshNode()` from `@vibecook/truffle`, pass `mesh.native` — this
+ * hook consumes the raw NAPI event shape.
  *
  * @example
  * ```tsx
@@ -62,48 +64,43 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
     };
     init();
 
-    // Subscribe to peer change events
+    // Subscribe to peer change events. Rows are keyed by the Tailscale
+    // stable id (`event.peerId`): it is the one identifier present on every
+    // peer-scoped event and stable for the entry's lifetime, while
+    // `deviceId` is null until identity is learned (RFC 022) — keying on it
+    // would collide all pre-identity peers and never match `left` events.
     node.onPeerChange((event: NapiPeerEvent) => {
       if (cancelled) return;
+      const key = event.peerId;
+      if (!key) return; // auth_required has no peer
 
       switch (event.eventType) {
+        case 'left':
+          setPeers((prev) => prev.filter((p) => p.tailscaleId !== key));
+          break;
+
         case 'joined':
-          if (event.peer) {
-            setPeers((prev) => {
-              const idx = prev.findIndex((p) => p.deviceId === event.peer!.deviceId);
+        case 'updated':
+        case 'identity': // the only carrier of the durable deviceId
+        case 'ws_connected':
+        case 'ws_disconnected': {
+          const snap = event.peer;
+          setPeers((prev) => {
+            if (snap) {
+              const idx = prev.findIndex((p) => p.tailscaleId === key);
               if (idx >= 0) {
                 const next = [...prev];
-                next[idx] = event.peer!;
+                next[idx] = snap;
                 return next;
               }
-              return [...prev, event.peer!];
-            });
-          }
+              return [...prev, snap];
+            }
+            // ws_* events can arrive without a snapshot — patch the flag.
+            const wsConnected = event.eventType === 'ws_connected';
+            return prev.map((p) => (p.tailscaleId === key ? { ...p, wsConnected } : p));
+          });
           break;
-
-        case 'left':
-          setPeers((prev) => prev.filter((p) => p.deviceId !== event.peerId));
-          break;
-
-        case 'updated':
-          if (event.peer) {
-            setPeers((prev) =>
-              prev.map((p) => (p.deviceId === event.peer!.deviceId ? event.peer! : p)),
-            );
-          }
-          break;
-
-        case 'ws_connected':
-          setPeers((prev) =>
-            prev.map((p) => (p.deviceId === event.peerId ? { ...p, wsConnected: true } : p)),
-          );
-          break;
-
-        case 'ws_disconnected':
-          setPeers((prev) =>
-            prev.map((p) => (p.deviceId === event.peerId ? { ...p, wsConnected: false } : p)),
-          );
-          break;
+        }
       }
     });
 

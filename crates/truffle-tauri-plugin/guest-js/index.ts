@@ -51,17 +51,31 @@ export interface NodeIdentity {
   ip?: string;
 }
 
-/** A peer on the mesh. Mirrors `PeerJs` / `PeerStateJs`. */
+/** A peer on the mesh. Mirrors `PeerJs` / `PeerStateJs` (RFC 022). */
 export interface Peer {
-  deviceId: string;
-  deviceName: string;
+  /**
+   * Durable ULID once identity is learned; `null` until then — never a
+   * Tailscale id fallback (RFC 022 I1). Use only for persistence.
+   */
+  deviceId: string | null;
+  /** Hello identity name; `null` until identity is learned. */
+  deviceName: string | null;
+  /** Best UI label: identity name → hostname slug → short tailscale id. */
+  displayName: string;
+  /** L3 Tailscale hostname (`truffle-{appId}-{slug}`). */
+  hostname: string;
   ip: string;
   online: boolean;
   wsConnected: boolean;
   connectionType: string;
-  os?: string;
-  lastSeen?: string;
+  os: string | null;
+  lastSeen: string | null;
+  /** Tailscale stable node id — routing key (advanced). */
   tailscaleId: string;
+  /** Process-local `{tailscaleId}:{generation}` token; do not persist. */
+  peerRef: string;
+  /** Registry entry generation — bumped when the same node rejoins. */
+  generation: number;
 }
 
 /** Ping result. Mirrors `PingResultJs`. */
@@ -102,6 +116,8 @@ export type PeerEvent =
   | { type: 'joined'; peer: Peer }
   | { type: 'left'; id: string }
   | { type: 'updated'; peer: Peer }
+  /** `deviceId` was learned or rotated — the only carrier of the durable ULID. */
+  | { type: 'identity'; peer: Peer }
   | { type: 'wsConnected'; id: string }
   | { type: 'wsDisconnected'; id: string }
   | { type: 'authRequired'; url: string };

@@ -518,7 +518,11 @@ export interface NapiDatagram {
 
 /** An incoming file offer from a remote peer. */
 export interface NapiFileOffer {
-  /** Sender's stable `device_id` (ULID) from the RFC 017 hello envelope. */
+  /**
+   * Sender's WhoIs-verified **Tailscale stable id** (RFC 022 §7.5
+   * attribution). NOT the durable ULID: allowlists must compare against
+   * `peer.tailscaleId`, not `peer.deviceId`.
+   */
   fromPeer: string
   /** Human-readable device name of the sending peer. */
   fromName: string
@@ -579,7 +583,12 @@ export interface NapiHealthInfo {
 
 /** A message received on a specific namespace. */
 export interface NapiNamespacedMessage {
-  /** Sender's stable `device_id` (ULID) from the RFC 017 hello envelope. */
+  /**
+   * Sender's WhoIs-verified **Tailscale stable id** — the connection's
+   * authenticated routing key (RFC 022 §7.5). NOT the durable ULID:
+   * compare against `peer.tailscaleId`, or use `createMeshNode`'s
+   * `onMessage`, whose `msg.from` is an interned `Peer` handle.
+   */
   from: string
   /** Namespace the message was sent on. */
   namespace: string
