@@ -527,6 +527,21 @@ func (s *shim) recoverPanic(where string) {
 	}
 }
 
+// debugEnabled is read once at startup from TRUFFLE_DEBUG (any non-empty value).
+// When false, per-packet/per-connection debug chatter is suppressed and the
+// tsnet backend logger is left unset (tsnet discards it). Genuine errors and
+// warnings, plus startup milestones, are logged unconditionally via log.Printf.
+var debugEnabled = os.Getenv("TRUFFLE_DEBUG") != ""
+
+// debugf routes verbose per-packet/per-connection tracing to stderr only when
+// TRUFFLE_DEBUG is set. Real errors and warnings must call log.Printf directly
+// so they stay visible in the default (quiet) mode.
+func debugf(format string, args ...any) {
+	if debugEnabled {
+		log.Printf(format, args...)
+	}
+}
+
 func main() {
 	log.SetOutput(os.Stderr) // all logs go to stderr; stdout is JSON events only
 
@@ -670,8 +685,15 @@ func (s *shim) handleStart(data json.RawMessage) {
 	srv := &tsnet.Server{
 		Hostname:  d.Hostname,
 		Dir:       d.StateDir,
-		Logf:      log.Printf,
 		Ephemeral: d.Ephemeral,
+	}
+	// tsnet's backend Logf is a verbose firehose (magicsock/netcheck/netmap,
+	// "fake tun", etc.). Leaving it nil makes tsnet discard those logs; only
+	// wire it to stderr under TRUFFLE_DEBUG. UserLogf is intentionally left
+	// unset so tsnet still surfaces user-facing messages (the login AuthURL)
+	// via its log.Printf default.
+	if debugEnabled {
+		srv.Logf = log.Printf
 	}
 	if d.AuthKey != "" {
 		srv.AuthKey = d.AuthKey
@@ -858,7 +880,7 @@ func (s *shim) handleStop() {
 	// Close UDP relays
 	s.udpRelayMu.Lock()
 	for port, relay := range s.udpRelays {
-		log.Printf("closing UDP relay :%d", port)
+		debugf("closing UDP relay :%d", port)
 		relay.cancel()
 		relay.tsnetConn.Close()
 		relay.localConn.Close()
@@ -879,7 +901,7 @@ func (s *shim) handleStop() {
 	s.proxyMu.Unlock()
 
 	for _, entry := range proxyEntries {
-		log.Printf("shutting down proxy %s", entry.id)
+		debugf("shutting down proxy %s", entry.id)
 		entry.shutdown(2 * time.Second)
 	}
 
@@ -965,7 +987,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 
 		srv := s.getServer()
 		if srv == nil {
-			log.Printf("[handleDial] rid=%s FAIL: node not running", d.RequestID)
+			debugf("[handleDial] rid=%s FAIL: node not running", d.RequestID)
 			s.sendEvent("bridge:dialResult", dialResultData{
 				RequestID: d.RequestID,
 				Success:   false,
@@ -980,10 +1002,10 @@ func (s *shim) handleDial(data json.RawMessage) {
 
 		// Dial via tsnet
 		addr := fmt.Sprintf("%s:%d", d.Target, d.Port)
-		log.Printf("[handleDial] rid=%s dialing %s", d.RequestID, addr)
+		debugf("[handleDial] rid=%s dialing %s", d.RequestID, addr)
 		tsnetConn, err := srv.Dial(dialCtx, "tcp", addr)
 		if err != nil {
-			log.Printf("[handleDial] rid=%s DIAL FAILED: %v", d.RequestID, err)
+			debugf("[handleDial] rid=%s DIAL FAILED: %v", d.RequestID, err)
 			s.sendEvent("bridge:dialResult", dialResultData{
 				RequestID: d.RequestID,
 				Success:   false,
@@ -991,7 +1013,7 @@ func (s *shim) handleDial(data json.RawMessage) {
 			})
 			return
 		}
-		log.Printf("[handleDial] rid=%s dial succeeded, bridging to Rust", d.RequestID)
+		debugf("[handleDial] rid=%s dial succeeded, bridging to Rust", d.RequestID)
 
 		// TLS-wrap when requested (explicit tls flag, or legacy port==443).
 		var conn net.Conn = tsnetConn
@@ -1103,7 +1125,7 @@ func (s *shim) handleListen(data json.RawMessage) {
 		if d.TLS {
 			proto = "TLS"
 		}
-		log.Printf("listening %s on :%d (dynamic, requested :%d)", proto, actualPort, d.Port)
+		debugf("listening %s on :%d (dynamic, requested :%d)", proto, actualPort, d.Port)
 
 		for {
 			conn, err := ln.Accept()
@@ -1155,7 +1177,7 @@ func (s *shim) handleUnlisten(data json.RawMessage) {
 		log.Printf("close listener :%d error: %v", d.Port, err)
 	}
 
-	log.Printf("stopped listening on :%d (dynamic)", d.Port)
+	debugf("stopped listening on :%d (dynamic)", d.Port)
 	s.sendEvent("tsnet:unlistened", unlistenedData{Port: d.Port})
 }
 
@@ -1208,13 +1230,13 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		listenAddr := fmt.Sprintf("%s:%d", tsIP, d.Port)
 
 		// Bind tsnet PacketConn
-		log.Printf("UDP relay: calling ListenPacket(%q, %q)", "udp", listenAddr)
+		debugf("UDP relay: calling ListenPacket(%q, %q)", "udp", listenAddr)
 		tsnetPC, err := srv.ListenPacket("udp", listenAddr)
 		if err != nil {
 			s.sendError("LISTEN_PACKET_ERROR", fmt.Sprintf("ListenPacket %s: %v", listenAddr, err))
 			return
 		}
-		log.Printf("UDP relay: ListenPacket succeeded, local addr = %v", tsnetPC.LocalAddr())
+		debugf("UDP relay: ListenPacket succeeded, local addr = %v", tsnetPC.LocalAddr())
 
 		// Bind local relay UDP socket on ephemeral port
 		localPC, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -1256,7 +1278,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			LocalPort: localPort,
 		})
 
-		log.Printf("UDP relay started: tsnet %s <-> 127.0.0.1:%d", listenAddr, localPort)
+		debugf("UDP relay started: tsnet %s <-> 127.0.0.1:%d", listenAddr, localPort)
 
 		// Self-test: verify the tsnet PacketConn can send to itself.
 		// This catches misconfigurations early (wrong address format, etc).
@@ -1264,12 +1286,12 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 		go func() {
 			selfAddr := tsnetPC.LocalAddr()
 			testPayload := []byte("truffle-udp-selftest")
-			log.Printf("UDP relay self-test: sending %d bytes to self at %v", len(testPayload), selfAddr)
+			debugf("UDP relay self-test: sending %d bytes to self at %v", len(testPayload), selfAddr)
 			nw, werr := tsnetPC.WriteTo(testPayload, selfAddr)
 			if werr != nil {
-				log.Printf("UDP relay self-test: WriteTo FAILED: %v", werr)
+				debugf("UDP relay self-test: WriteTo FAILED: %v", werr)
 			} else {
-				log.Printf("UDP relay self-test: WriteTo sent %d bytes to self OK", nw)
+				debugf("UDP relay self-test: WriteTo sent %d bytes to self OK", nw)
 			}
 		}()
 
@@ -1298,18 +1320,18 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 					continue
 				}
 
-				log.Printf("UDP relay inbound: %d bytes from %v", n, remoteAddr)
+				debugf("UDP relay inbound: %d bytes from %v", n, remoteAddr)
 
 				// Parse remote address to get IP and port for the header
 				udpAddr, ok := remoteAddr.(*net.UDPAddr)
 				if !ok {
-					log.Printf("UDP relay: unexpected remote addr type: %T", remoteAddr)
+					debugf("UDP relay: unexpected remote addr type: %T", remoteAddr)
 					continue
 				}
 
 				ip4 := udpAddr.IP.To4()
 				if ip4 == nil {
-					log.Printf("UDP relay: non-IPv4 remote addr: %v", udpAddr)
+					debugf("UDP relay: non-IPv4 remote addr: %v", udpAddr)
 					continue
 				}
 
@@ -1324,11 +1346,11 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 				rustAddrMu.Unlock()
 
 				if ra == nil {
-					log.Printf("UDP relay: no Rust peer address yet, dropping inbound packet from %v", remoteAddr)
+					debugf("UDP relay: no Rust peer address yet, dropping inbound packet from %v", remoteAddr)
 					continue
 				}
 
-				log.Printf("UDP relay inbound: forwarding %d framed bytes to Rust at %v", len(framed), ra)
+				debugf("UDP relay inbound: forwarding %d framed bytes to Rust at %v", len(framed), ra)
 				if _, err := localPC.WriteTo(framed, ra); err != nil {
 					if relayCtx.Err() != nil {
 						return
@@ -1366,7 +1388,7 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			rustAddrMu.Lock()
 			if isRegister {
 				if rustAddr == nil {
-					log.Printf("UDP relay: learned Rust peer address: %v", senderAddr)
+					debugf("UDP relay: learned Rust peer address: %v", senderAddr)
 				}
 				rustAddr = senderAddr
 			}
@@ -1374,17 +1396,17 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			rustAddrMu.Unlock()
 
 			if isRegister {
-				log.Printf("UDP relay: registration packet from Rust at %v", senderAddr)
+				debugf("UDP relay: registration packet from Rust at %v", senderAddr)
 				continue
 			}
 
 			if !trusted {
-				log.Printf("UDP relay: dropping datagram from untrusted local sender %v", senderAddr)
+				debugf("UDP relay: dropping datagram from untrusted local sender %v", senderAddr)
 				continue
 			}
 
 			if n < 6 {
-				log.Printf("UDP relay: outbound packet too short (%d bytes)", n)
+				debugf("UDP relay: outbound packet too short (%d bytes)", n)
 				continue
 			}
 
@@ -1400,14 +1422,14 @@ func (s *shim) handleListenPacket(data json.RawMessage) {
 			payload := buf[6:n]
 
 			targetAddr := &net.UDPAddr{IP: targetIP, Port: int(targetPort)}
-			log.Printf("UDP relay outbound: %d payload bytes -> %v (IP len=%d, raw IP=%x)", len(payload), targetAddr, len(targetIP), []byte(targetIP))
+			debugf("UDP relay outbound: %d payload bytes -> %v (IP len=%d, raw IP=%x)", len(payload), targetAddr, len(targetIP), []byte(targetIP))
 			if _, err := tsnetPC.WriteTo(payload, targetAddr); err != nil {
 				if relayCtx.Err() != nil {
 					return
 				}
 				log.Printf("UDP relay tsnet write error to %v: %v", targetAddr, err)
 			} else {
-				log.Printf("UDP relay outbound: sent %d bytes to %v OK", len(payload), targetAddr)
+				debugf("UDP relay outbound: sent %d bytes to %v OK", len(payload), targetAddr)
 			}
 		}
 	}()
@@ -1436,7 +1458,7 @@ func (s *shim) handleUnlistenPacket(data json.RawMessage) {
 	relay.tsnetConn.Close()
 	relay.localConn.Close()
 
-	log.Printf("stopped UDP relay on :%d", d.Port)
+	debugf("stopped UDP relay on :%d", d.Port)
 	s.sendEvent("tsnet:unlistenedPacket", listenPacketData{Port: d.Port})
 }
 
@@ -1624,7 +1646,7 @@ func (s *shim) handleWatchPeers(data json.RawMessage) {
 				continue
 			}
 			backoff = time.Second // reset on a successful (re)connect
-			log.Printf("WatchIPNBus started, listening for peer changes")
+			debugf("WatchIPNBus started, listening for peer changes")
 
 			// Seed / re-baseline on (re)connect.
 			diff()
