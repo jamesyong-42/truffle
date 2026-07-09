@@ -531,12 +531,17 @@ async fn convert_peer_event(
                 auth_url: None,
             }
         }
-        PeerEvent::Left(id) => NapiPeerEvent {
-            event_type: "left".to_string(),
-            peer_id: id.clone(),
-            peer: peer_snapshot(node, id).await,
-            auth_url: None,
-        },
+        PeerEvent::Left(state) => {
+            // Core emits `Left` with the entry's final (offline) state — the
+            // registry no longer holds it, so a snapshot lookup would miss.
+            let peer = from_state(state);
+            NapiPeerEvent {
+                event_type: "left".to_string(),
+                peer_id: peer.tailscale_id.clone(),
+                peer: Some(peer),
+                auth_url: None,
+            }
+        }
         PeerEvent::Updated(state) => {
             let peer = from_state(state);
             NapiPeerEvent {

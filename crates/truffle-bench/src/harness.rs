@@ -48,6 +48,11 @@ pub async fn make_bench_pair(authkey: &str) -> Result<BenchPair, String> {
     let run_id = uuid::Uuid::new_v4().to_string();
     let short: String = run_id.chars().take(8).collect();
 
+    // Unique per-run app id keeps ghost ephemerals from previous runs out of
+    // discovery (RFC 017 namespacing) — see tests/common/mod.rs in
+    // truffle-core for the full rationale.
+    let app_id = format!("{TEST_APP_ID}-{short}");
+
     let alpha_state =
         tempfile::TempDir::with_prefix("truffle-bench-alpha-").map_err(|e| e.to_string())?;
     let beta_state =
@@ -61,7 +66,7 @@ pub async fn make_bench_pair(authkey: &str) -> Result<BenchPair, String> {
     // Both sides use the same ws_port: WS transport dials `peer_ip:self_port`
     // so a mismatch = closed port. Each node is on its own tailnet IP.
     let alpha_fut = NodeBuilder::default()
-        .app_id(TEST_APP_ID)
+        .app_id(app_id.clone())
         .map_err(|e| e.to_string())?
         .device_name(alpha_name.clone())
         .sidecar_path(sidecar.clone())
@@ -71,7 +76,7 @@ pub async fn make_bench_pair(authkey: &str) -> Result<BenchPair, String> {
         .ws_port(9417)
         .build();
     let beta_fut = NodeBuilder::default()
-        .app_id(TEST_APP_ID)
+        .app_id(app_id.clone())
         .map_err(|e| e.to_string())?
         .device_name(beta_name.clone())
         .sidecar_path(sidecar)
@@ -125,14 +130,24 @@ async fn warm_up(
         .peers()
         .await
         .into_iter()
-        .find(|p| p.name.contains(beta_name) || p.device_name.contains(beta_name))
+        .find(|p| {
+            p.hostname.contains(beta_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(beta_name))
+        })
         .map(|p| p.tailscale_id)
         .ok_or("beta missing from alpha's peer list")?;
     let alpha_ts_id = beta
         .peers()
         .await
         .into_iter()
-        .find(|p| p.name.contains(alpha_name) || p.device_name.contains(alpha_name))
+        .find(|p| {
+            p.hostname.contains(alpha_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(alpha_name))
+        })
         .map(|p| p.tailscale_id)
         .ok_or("alpha missing from beta's peer list")?;
 
@@ -189,12 +204,18 @@ async fn rendezvous(
         let alpha_peers = alpha.peers().await;
         let beta_peers = beta.peers().await;
 
-        let a_ok = alpha_peers
-            .iter()
-            .any(|p| p.name.contains(beta_name) || p.device_name.contains(beta_name));
-        let b_ok = beta_peers
-            .iter()
-            .any(|p| p.name.contains(alpha_name) || p.device_name.contains(alpha_name));
+        let a_ok = alpha_peers.iter().any(|p| {
+            p.hostname.contains(beta_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(beta_name))
+        });
+        let b_ok = beta_peers.iter().any(|p| {
+            p.hostname.contains(alpha_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(alpha_name))
+        });
         if a_ok && b_ok {
             return Ok(());
         }

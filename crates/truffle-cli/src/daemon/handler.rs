@@ -282,7 +282,10 @@ fn peer_event_to_notification(
                 }),
             )
         }
-        PeerEvent::Left(id) => {
+        PeerEvent::Left(state) => {
+            // Keep the daemon protocol's field values unchanged: both fields
+            // carried the Tailscale stable id before Left gained full state.
+            let id = &state.id;
             if !matches_peer_filter(id, peer_filter) {
                 return None;
             }

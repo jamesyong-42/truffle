@@ -327,11 +327,15 @@ async fn pull_file<N: NetworkProvider + 'static>(
     // the receiving side can match requester to sender.
     let requester_id = node.local_info().device_id;
 
-    // 0. Resolve peer_id to the canonical Tailscale node ID.
+    // 0. Resolve peer_id to the Tailscale routing key. The OFFER filter
+    // below compares against `IncomingMessage.from`, which carries the
+    // connection's WhoIs-verified Tailscale id (RFC 022 §7.5) — never the
+    // ULID, so resolving to the ULID here would reject every reply.
     let peer_id = node
-        .resolve_peer_id(peer_id)
+        .resolve_peer(peer_id)
         .await
-        .map_err(|e| TransferError::Node(e.to_string()))?;
+        .map_err(|e| TransferError::Node(e.to_string()))?
+        .id;
     let peer_id = peer_id.as_str();
 
     // 1. Send PULL_REQUEST and wait for OFFER from peer

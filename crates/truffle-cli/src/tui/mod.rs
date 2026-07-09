@@ -663,8 +663,10 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
                 });
             }
         }
-        PeerEvent::Left(id) => {
-            // PeerEvent::Left carries the session-layer Tailscale stable ID.
+        PeerEvent::Left(state) => {
+            // Carries the departed entry's final state; key rows by the
+            // Tailscale stable id, same as WsConnected/WsDisconnected.
+            let id = state.id;
             let name = app
                 .peers
                 .iter()

@@ -114,9 +114,11 @@ pub fn format_peer_ref(tailscale_id: &str, generation: u64) -> String {
 pub enum PeerEvent {
     /// A new peer appeared on the network (from Layer 3).
     Joined(PeerState),
-    /// A peer left the network (by stable node ID, from Layer 3).
-    /// Payload is the Tailscale stable id (routing key).
-    Left(String),
+    /// A peer left the network (from Layer 3). Carries the entry's **final
+    /// state** (marked offline, WS down) — the registry entry is already
+    /// gone when this fires, so consumers get a usable last view for
+    /// cleanup (RFC 022 §7.4 / §16.4) instead of a bare id.
+    Left(PeerState),
     /// A peer's metadata changed (IP, relay, online status, from Layer 3).
     Updated(PeerState),
     /// Durable identity was first set or rotated on a peer (RFC 022).
@@ -440,7 +442,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
 
                         // Drop by_device mapping if it pointed at this peer; promote
                         // a suppressed claimant if one exists (RFC 022 §7.7).
-                        if let Some(removed) = removed {
+                        if let Some(mut removed) = removed {
                             let promote = {
                                 let mut by_dev = by_device.write().await;
                                 if let Some(uid) = removed.published_device_id() {
@@ -484,10 +486,22 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                                     );
                                 }
                             }
-                        }
 
-                        let _ = event_tx.send(PeerEvent::Left(peer_id.clone()));
-                        tracing::info!(peer_id = %peer_id, "session: peer left");
+                            // Emit `Left` with the entry's final view: the map
+                            // entry is already gone, and consumers need a
+                            // usable last state for cleanup (RFC 022 §16.4).
+                            removed.online = false;
+                            removed.ws_connected = false;
+                            let _ = event_tx.send(PeerEvent::Left(removed));
+                            tracing::info!(peer_id = %peer_id, "session: peer left");
+                        } else {
+                            // Never announced via `joined` — nothing to retire,
+                            // so no `left` is emitted either.
+                            tracing::debug!(
+                                peer_id = %peer_id,
+                                "session: left for unknown peer; no event"
+                            );
+                        }
                     }
                     Ok(NetworkPeerEvent::Updated(network_peer)) => {
                         let mut state = network_peer_to_state(&network_peer, 0);
@@ -763,6 +777,25 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                 return Err(SessionError::ConnectFailed(e.to_string()));
             }
         };
+
+        // RFC 022 §7.5, dial side: the answerer's claimed tailscale_id must
+        // match the peer this connection was dialed for. A mismatch means we
+        // reached something other than `peer_id` (port collision, loopback
+        // test rig, or a lying hello) — registering it would poison the
+        // entry's identity and route this peer's traffic to the answerer.
+        if let Some(claimed) = ws_stream.remote_identity() {
+            if claimed.tailscale_id != peer_id {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    claimed = %claimed.tailscale_id,
+                    "session: dialed peer answered as a different tailscale_id; dropping connection"
+                );
+                return Err(SessionError::ConnectFailed(format!(
+                    "hello identity mismatch: dialed {peer_id}, answerer claims {}",
+                    claimed.tailscale_id
+                )));
+            }
+        }
 
         let remote_identity = ws_stream.remote_identity().cloned();
 
@@ -1250,6 +1283,23 @@ async fn eager_connect_ws<N: NetworkProvider + 'static>(
         }
     };
 
+    // RFC 022 §7.5, dial side: same claimed-vs-dialed check as
+    // `ensure_ws_connected` — an eager hello must never adopt an identity
+    // from an answerer that is not the peer it dialed.
+    if let Some(claimed) = ws_stream.remote_identity() {
+        if claimed.tailscale_id != peer_id {
+            tracing::warn!(
+                peer_id = %peer_id,
+                claimed = %claimed.tailscale_id,
+                "session: eager dial answered as a different tailscale_id; dropping connection"
+            );
+            return Err(SessionError::ConnectFailed(format!(
+                "hello identity mismatch: dialed {peer_id}, answerer claims {}",
+                claimed.tailscale_id
+            )));
+        }
+    }
+
     let remote_identity = ws_stream.remote_identity().cloned();
 
     let handle = spawn_connection_task(
@@ -1325,7 +1375,8 @@ enum IdentityOutcome {
     /// Emit `PeerEvent::Identity` for this snapshot.
     Identity(PeerState),
     /// Retire a ghost entry (same ULID, offline holder) before the new claim.
-    GhostLeft(String),
+    /// Carries the ghost's final state for the synthesized `Left` event.
+    GhostLeft(PeerState),
 }
 
 /// Apply `identity` to the peer at `ts_id`, updating `by_device` under
@@ -1384,8 +1435,11 @@ fn apply_identity(
                 }
             } else {
                 // Ghost retire: offline holder loses the ULID.
-                outcomes.push(IdentityOutcome::GhostLeft(holder.clone()));
-                peers.remove(&holder);
+                if let Some(mut ghost) = peers.remove(&holder) {
+                    ghost.online = false;
+                    ghost.ws_connected = false;
+                    outcomes.push(IdentityOutcome::GhostLeft(ghost));
+                }
                 by_device.insert(uid.clone(), ts_id.to_string());
                 if let Some(s) = peers.get_mut(ts_id) {
                     s.identity = Some(identity);
@@ -1410,8 +1464,8 @@ fn apply_identity(
 fn emit_identity_outcomes(event_tx: &broadcast::Sender<PeerEvent>, outcomes: Vec<IdentityOutcome>) {
     for o in outcomes {
         match o {
-            IdentityOutcome::GhostLeft(ts_id) => {
-                let _ = event_tx.send(PeerEvent::Left(ts_id));
+            IdentityOutcome::GhostLeft(state) => {
+                let _ = event_tx.send(PeerEvent::Left(state));
             }
             IdentityOutcome::Identity(state) => {
                 let _ = event_tx.send(PeerEvent::Identity(state));

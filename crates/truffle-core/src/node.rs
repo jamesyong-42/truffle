@@ -1474,13 +1474,21 @@ mod tests {
 
     impl MockNetworkProvider {
         fn new(id: &str) -> Self {
+            // RFC 017: align `device_id` with fixture input so tests can
+            // reason about a single identifier.
+            Self::new_with_device_id(id, id)
+        }
+
+        /// `device_id` distinct from the tailscale id — required when a test
+        /// lets the node hello with itself (loopback self-dial): publishing
+        /// an identity whose device_id equals the entry's tailscale_id would
+        /// violate RFC 022 invariant I1.
+        fn new_with_device_id(id: &str, device_id: &str) -> Self {
             let (peer_event_tx, _) = broadcast::channel(64);
             Self {
                 identity: NodeIdentity {
                     app_id: "test".to_string(),
-                    // RFC 017: align `device_id` with fixture input so
-                    // tests can reason about a single identifier.
-                    device_id: id.to_string(),
+                    device_id: device_id.to_string(),
                     device_name: format!("Test Node {id}"),
                     tailscale_hostname: format!("truffle-test-{id}"),
                     tailscale_id: id.to_string(),
@@ -1642,7 +1650,21 @@ mod tests {
         broadcast::Sender<NetworkPeerEvent>,
         Arc<MockNetworkProvider>,
     ) {
-        let provider = MockNetworkProvider::new(id);
+        make_test_node_with_device_id(id, id, ws_port).await
+    }
+
+    /// Like [`make_test_node`] but with a `device_id` distinct from the
+    /// tailscale id — see [`MockNetworkProvider::new_with_device_id`].
+    async fn make_test_node_with_device_id(
+        id: &str,
+        device_id: &str,
+        ws_port: u16,
+    ) -> (
+        Node<MockNetworkProvider>,
+        broadcast::Sender<NetworkPeerEvent>,
+        Arc<MockNetworkProvider>,
+    ) {
+        let provider = MockNetworkProvider::new_with_device_id(id, device_id);
         let event_tx = provider.event_sender();
         let network = Arc::new(provider);
         let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(ws_port)));
@@ -1969,27 +1991,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_stop_closes_ws_connections() {
-        // Two nodes on random ports, each discovering the other as a loopback
-        // peer. Modeled on `test_node_send_and_receive_roundtrip`.
+        // A single node that discovers itself as a loopback peer. Under the
+        // loopback mock every dial lands on the node's own listener, and the
+        // RFC 022 dial-side identity check drops any connection whose
+        // answerer is not the dialed peer — so the only WS a mock node can
+        // legitimately establish is to an entry carrying its own
+        // tailscale_id. That is all this test needs: a live WS connection
+        // for stop() to tear down. The distinct device_id keeps the
+        // self-hello from violating invariant I1 on projection.
         let port_a = random_port().await;
-        let port_b = random_port().await;
+        let (node_a, event_tx_a, _net_a) =
+            make_test_node_with_device_id("node-a", "dev-node-a", port_a).await;
 
-        let (node_a, event_tx_a, _net_a) = make_test_node("node-a", port_a).await;
-        let (node_b, event_tx_b, _net_b) = make_test_node("node-b", port_b).await;
-
-        let peer_b = NetworkPeer {
-            id: "node-b".to_string(),
-            hostname: "truffle-test-node-b".to_string(),
-            ip: "127.0.0.1".parse().unwrap(),
-            online: true,
-            cur_addr: Some("127.0.0.1:41641".to_string()),
-            relay: None,
-            os: None,
-            last_seen: None,
-            key_expiry: None,
-            dns_name: None,
-        };
-        let peer_a = NetworkPeer {
+        let self_peer = NetworkPeer {
             id: "node-a".to_string(),
             hostname: "truffle-test-node-a".to_string(),
             ip: "127.0.0.1".parse().unwrap(),
@@ -2001,45 +2015,32 @@ mod tests {
             key_expiry: None,
             dns_name: None,
         };
-
-        let _ = event_tx_a.send(NetworkPeerEvent::Joined(peer_b));
-        let _ = event_tx_b.send(NetworkPeerEvent::Joined(peer_a));
+        let _ = event_tx_a.send(NetworkPeerEvent::Joined(self_peer));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // node_b's listener exists on port_b; in a real multi-IP tailnet
-        // node_a would dial it. Under the loopback mock every node shares
-        // 127.0.0.1, so node_a's dial lands on its own listener instead —
-        // which is fine for exercising stop()'s connection teardown.
-        let _rx = node_b.subscribe("test");
-
-        // Send from node_a to establish the WS. In loopback the dial lands on
-        // node_a's own listener, so the hello stamps node_a's identity onto
-        // the node-b entry — that flips the public `Peer.id` projection to
-        // node-a, so we key off the stable `tailscale_id` (the Layer 3
-        // routing key) which stays "node-b".
         node_a
-            .send("node-b", "test", b"hello from a")
+            .send("node-a", "test", b"hello from a")
             .await
-            .expect("loopback send should establish a WS connection");
+            .expect("loopback self-dial should establish a WS connection");
 
         let peers = node_a.peers().await;
-        let b = peers
+        let entry = peers
             .iter()
-            .find(|p| p.tailscale_id == "node-b")
-            .expect("peer b discovered");
+            .find(|p| p.tailscale_id == "node-a")
+            .expect("self peer discovered");
         assert!(
-            b.ws_connected,
-            "send() should have established a WS connection to node-b"
+            entry.ws_connected,
+            "send() should have established a WS connection"
         );
 
         node_a.stop().await;
         let peers = node_a.peers().await;
-        let b = peers
+        let entry = peers
             .iter()
-            .find(|p| p.tailscale_id == "node-b")
-            .expect("peer b still discovered");
+            .find(|p| p.tailscale_id == "node-a")
+            .expect("self peer still discovered");
         assert!(
-            !b.ws_connected,
+            !entry.ws_connected,
             "stop() must close and un-mark WS connections"
         );
     }

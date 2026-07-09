@@ -134,8 +134,9 @@ pub fn init_test_tracing() {
 // Two-node pair harness (RFC 019 §7)
 // =============================================================================
 
-/// App-id used by all pair-harness nodes. Peer filter matches
-/// `truffle-{app_id}-*` hostnames, so both nodes in the pair see each other.
+/// Base app-id for pair-harness nodes. Peer filter matches
+/// `truffle-{app_id}-*` hostnames, so both nodes in a pair see each other;
+/// `PairOpts::default()` appends a per-run suffix so runs are hermetic.
 pub const TEST_APP_ID: &str = "test-integ";
 
 /// How long to wait for the pair to see each other via `peers()` before
@@ -158,8 +159,15 @@ pub struct PairOpts {
 
 impl Default for PairOpts {
     fn default() -> Self {
+        // Unique per-run app id: RFC 017 namespacing filters discovery to
+        // `truffle-{app_id}-*` hostnames, so ghost ephemerals from previous
+        // runs (which linger on the tailnet ~30–60 min after their process
+        // dies) stay invisible. With a shared app id, every run's
+        // eager-identity dialer chases the accumulated dead ghosts and
+        // convergence windows turn flaky.
+        let short: String = uuid::Uuid::new_v4().to_string().chars().take(8).collect();
         Self {
-            app_id: TEST_APP_ID.to_string(),
+            app_id: format!("{TEST_APP_ID}-{short}"),
             rendezvous_timeout: RENDEZVOUS_TIMEOUT,
             sidecar_path: default_sidecar_path(),
         }
@@ -494,12 +502,18 @@ async fn rendezvous_nodes(
         let alpha_peers = alpha.peers().await;
         let beta_peers = beta.peers().await;
 
-        let alpha_sees_beta = alpha_peers
-            .iter()
-            .any(|p| p.name.contains(beta_name) || p.device_name.contains(beta_name));
-        let beta_sees_alpha = beta_peers
-            .iter()
-            .any(|p| p.name.contains(alpha_name) || p.device_name.contains(alpha_name));
+        let alpha_sees_beta = alpha_peers.iter().any(|p| {
+            p.hostname.contains(beta_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(beta_name))
+        });
+        let beta_sees_alpha = beta_peers.iter().any(|p| {
+            p.hostname.contains(alpha_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(alpha_name))
+        });
 
         if alpha_sees_beta && beta_sees_alpha {
             return;
@@ -512,7 +526,7 @@ async fn rendezvous_nodes(
                 alpha_peers.len(),
                 alpha_peers
                     .iter()
-                    .map(|p| format!("{} ({})", p.name, p.device_name))
+                    .map(|p| format!("{} ({})", p.hostname, p.display_name))
                     .collect::<Vec<_>>()
             );
             eprintln!(
@@ -520,7 +534,7 @@ async fn rendezvous_nodes(
                 beta_peers.len(),
                 beta_peers
                     .iter()
-                    .map(|p| format!("{} ({})", p.name, p.device_name))
+                    .map(|p| format!("{} ({})", p.hostname, p.display_name))
                     .collect::<Vec<_>>()
             );
             panic!(
@@ -548,14 +562,24 @@ async fn warm_up_pair(
         .peers()
         .await
         .into_iter()
-        .find(|p| p.name.contains(beta_name) || p.device_name.contains(beta_name))
+        .find(|p| {
+            p.hostname.contains(beta_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(beta_name))
+        })
         .map(|p| p.tailscale_id)
         .expect("beta must be in alpha's peer list after rendezvous");
     let alpha_ts_id = beta
         .peers()
         .await
         .into_iter()
-        .find(|p| p.name.contains(alpha_name) || p.device_name.contains(alpha_name))
+        .find(|p| {
+            p.hostname.contains(alpha_name)
+                || p.device_name
+                    .as_deref()
+                    .is_some_and(|n| n.contains(alpha_name))
+        })
         .map(|p| p.tailscale_id)
         .expect("alpha must be in beta's peer list after rendezvous");
 

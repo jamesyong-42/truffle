@@ -69,8 +69,8 @@ where
                         Ok(PeerEvent::Joined(state)) => {
                             handle_peer_joined(&node, &inner, &namespace, &state.id).await;
                         }
-                        Ok(PeerEvent::Left(peer_id)) => {
-                            handle_peer_left(&inner, &peer_id).await;
+                        Ok(PeerEvent::Left(state)) => {
+                            handle_peer_left(&inner, &state.id).await;
                         }
                         Ok(_) => {} // Updated, WsConnected, WsDisconnected, AuthRequired — ignore
                         Err(broadcast::error::RecvError::Lagged(n)) => {

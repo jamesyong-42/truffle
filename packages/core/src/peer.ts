@@ -41,6 +41,11 @@ export class Peer {
     this.#snap = snap;
   }
 
+  /** @internal — registry only: pin the final offline view after `left`. */
+  _markLeft(): void {
+    this.#snap = { ...this.#snap, online: false, wsConnected: false };
+  }
+
   // ── Display ────────────────────────────────────────────────────────────
 
   get displayName(): string {
@@ -152,6 +157,14 @@ export class PeerRegistry {
       return existing;
     }
     const peer = Peer._create(this.#node, snap);
+    // A fresh ref for a tailscale id we already track is a new generation —
+    // retire the superseded handle so message attribution cannot resurrect
+    // it and #byRef cannot grow across rejoins.
+    const prev = this.#byTailscale.get(peer.tailscaleId);
+    if (prev && prev.ref !== key) {
+      prev._markLeft();
+      this.#byRef.delete(prev.ref);
+    }
     this.#byRef.set(key, peer);
     this.#byTailscale.set(peer.tailscaleId, peer);
     return peer;

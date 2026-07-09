@@ -709,7 +709,9 @@ async fn test_peer_left_closes_ws_connection() {
                 Ok(PeerEvent::WsDisconnected(id)) if id == "server" => {
                     got_disconnected = true;
                 }
-                Ok(PeerEvent::Left(id)) if id == "server" => {
+                Ok(PeerEvent::Left(state)) if state.id == "server" => {
+                    // Final state arrives offline with WS down (RFC 022 §16.4).
+                    assert!(!state.online && !state.ws_connected);
                     got_left = true;
                     return;
                 }

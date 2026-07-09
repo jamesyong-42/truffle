@@ -282,7 +282,7 @@ impl From<truffle_core::session::PeerEvent> for PeerEventJs {
         use truffle_core::session::PeerEvent;
         match e {
             PeerEvent::Joined(state) => PeerEventJs::Joined { peer: state.into() },
-            PeerEvent::Left(id) => PeerEventJs::Left { id },
+            PeerEvent::Left(state) => PeerEventJs::Left { id: state.id },
             PeerEvent::Updated(state) => PeerEventJs::Updated { peer: state.into() },
             PeerEvent::Identity(state) => PeerEventJs::Identity { peer: state.into() },
             PeerEvent::WsConnected(id) => PeerEventJs::WsConnected { id },
