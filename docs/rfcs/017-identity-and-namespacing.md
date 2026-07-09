@@ -587,3 +587,51 @@ Unchanged. Tailscale auth keys are orthogonal to `appId` / `deviceId` — they a
 ## 14. Acknowledgements
 
 This RFC emerged from a debugging session where the Electron playground rewrite was invisible to itself on the tailnet. The dig through `is_truffle_peer` and the realisation that the default `/tmp` state dir was silently rotating identity on every reboot surfaced both the immediate bug and the structural gap it implied.
+
+---
+
+## 15. Implementation deviation (as-built, v0.5.x)
+
+The design above presents `deviceId` as *the* peer identity — §7.3 calls `NapiPeer.deviceId` the "Primary key", and §7.4 has `send()` / routing take a `deviceId`. The shipped implementation only realises that once a peer's hello has been exchanged. This section records what `getPeers()` actually returns, why, and how consumers should key identity until the honest fix lands.
+
+### 15.1 What `getPeers()` actually returns
+
+A peer's ULID and human name travel **only over the envelope-bus WebSocket hello** (§8). That hello is exchanged the first time a WS session opens between two nodes — which happens lazily on the first `send()` / `broadcast()` / `on_message` traffic, not at peer discovery. Until it lands, the session layer holds `PeerState.identity == None`, and the projection to the app-facing peer falls back to the Tailscale layer:
+
+```rust
+// crates/truffle-core/src/node.rs — impl From<PeerState> for Peer
+let (device_id, device_name, os) = match s.identity.as_ref() {
+    Some(identity) => (identity.device_id.clone(), identity.device_name.clone(), Some(identity.os.clone())),
+    None            => (s.id.clone(),               s.name.clone(),               s.os.clone()),   // s.id == Tailscale stable id
+};
+```
+
+So **before the hello, `peer.deviceId == peer.tailscaleId`** (the Tailscale stable node id), and `peer.deviceName` is the Tailscale hostname/slug rather than the original name. For an app that uses **only the raw transports** (QUIC/TCP/UDP via RFC 021) and never touches the envelope bus, `wsConnected` stays `false` for the whole session and the ULID is *never* observed through `getPeers()` — the "Primary key" is permanently the Tailscale id.
+
+### 15.2 The flip: `deviceId` is not stable within a session
+
+Two same-host `tsnet` nodes (`appId: strata-collab`, `ephemeral: true`), talking over DERP, probed 2026-07-08 on published `@vibecook/truffle@0.5.0` (ids redacted head…tail):
+
+- Nodes A (`ulid=01KX21…0BGT`, `tsId=ngNqQe…NTRL`) and B (`ulid=01KX21…SEF3`, `tsId=nqw3mv…NTRL`); ULIDs and Tailscale ids all distinct. (The two ULIDs share the leading `01KX21…` timestamp prefix — they were generated seconds apart — but differ in the random tail.)
+- **Pre-send** (both mutually visible, no WS session): `A-sees-B → { wsConnected: false, deviceId: nqw3mv…NTRL }` — i.e. `deviceId === B.tailscaleId`, not the ULID. Symmetric for `B-sees-A`.
+- A `send()`s to B (which lazily opens the WS session and exchanges hellos).
+- **Post-send** (same tick the session comes up): `A-sees-B → { wsConnected: true, deviceId: 01KX21…SEF3 }` — i.e. `deviceId === B.deviceId (ULID)`. The `wsConnected` false→true transition and the `deviceId` tailscale-id→ULID flip are **simultaneous**, and the value does **not** regress to the Tailscale id for the rest of the session.
+
+**Verdict: FLIP, not stable-forever.** A peer's `deviceId` changes exactly once, from the Tailscale stable id to the ULID, at the instant its envelope-bus WS session connects. A consumer that keys a `Map` by `peer.deviceId` and adds entries both before and after that moment ends up with **two keys for one peer** (a Tailscale-id entry and a ULID entry) — this is the concrete failure mode that produced duplicate mesh links and a dead UDP inbound gate in a real integration.
+
+`send()` reference resolution was probed alongside: the **listed `deviceId`** resolves (pre-hello it is the Tailscale id, which `resolvePeerId` accepts); the bare **Tailscale id string** resolves as the same reference; a raw **tailnet IP** (`100.x`) does **not** resolve (`session error: unknown peer`). So there is no IP escape hatch for `send()` — only id / name / hostname / prefix forms.
+
+### 15.3 Guidance for consumers (until the fix lands)
+
+- **Raw-transport-only apps** (mesh built on QUIC/TCP/UDP, no envelope-bus messaging): key all identity — link maps, dial-direction tie-breaks, per-peer state, inbound gates — on **`tailscaleId`**, which is stable for the whole session and never flips. Treat `deviceId` as opaque/unreliable in this mode. (This is what `examples/canvas-desktop` does; see its `mesh.mjs` note.)
+- **Envelope-bus apps** (they call `send`/`broadcast`/`on_message`): `deviceId` is the ULID and is the correct portable, cross-restart identity — but only key on it for peers where `wsConnected === true`. Do not persist a `deviceId` captured while `wsConnected` was `false`; it is a Tailscale id in disguise and will rotate on the next `ephemeral` restart.
+- The **local** node's identity is not affected: `getLocalInfo().deviceId` is always the real ULID.
+
+### 15.4 Future work — an honest fix
+
+The root cause is that the ULID is bound to a channel (the envelope-bus WS) that raw-transport apps never open, so identity and reachability are coupled. Options, sketched only (no commitment here):
+
+- **Carry the ULID at the Tailscale layer** — stamp it into the node's tsnet *hostinfo* (or a service record) so it rides the netmap and is present on every peer at discovery time, before any truffle-level session. `getPeers()` could then return the ULID with `wsConnected === false`, eliminating the flip entirely.
+- **A raw-transport handshake** — exchange a minimal identity frame on the first QUIC/TCP stream (and a UDP identity datagram), mirroring the WS hello, so raw-transport peers learn each other's ULID without the envelope bus. This keeps the ULID out of the netmap but adds a per-transport handshake.
+
+Either way the target contract is: `getPeers()` never hands back a Tailscale id in the `deviceId` slot, and `deviceId` is stable from the first time a peer appears. Until then, `tailscaleId` is the canonical pre-hello key and this section is the source of truth over §7.3.

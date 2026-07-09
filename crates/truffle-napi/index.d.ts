@@ -114,7 +114,16 @@ export declare class NapiNode {
   stop(): Promise<void>
   /** Get the local node's identity. */
   getLocalInfo(): NapiNodeIdentity
-  /** Get all known peers. */
+  /**
+   * Get all known peers.
+   *
+   * Each peer's `deviceId` is the remote ULID only once that peer's hello
+   * has been received over the envelope-bus WebSocket (`wsConnected == true`);
+   * before then it falls back to the peer's Tailscale stable id (equal to
+   * `tailscaleId`) and flips to the ULID when the session connects.
+   * Raw-transport-only callers should key identity on `tailscaleId`. See
+   * `NapiPeer`.
+   */
   getPeers(): Promise<Array<NapiPeer>>
   /** Resolve a peer identifier (name or ID) to the canonical node ID. */
   resolvePeerId(peerId: string): Promise<string>
@@ -564,13 +573,23 @@ export interface NapiNodeConfig {
 export interface NapiNodeIdentity {
   /** Application namespace identifier. */
   appId: string
-  /** Stable per-device ULID. Primary key for device identity. */
+  /**
+   * This node's own stable ULID (RFC 017 §5.4). Primary key for device
+   * identity. Always the real ULID — unlike a *peer's* `deviceId` (see
+   * `NapiPeer`), which falls back to a Tailscale id until that peer's
+   * hello is seen. Persists across restarts, including with
+   * `ephemeral: true`.
+   */
   deviceId: string
   /** Original (unsanitised) device name, as passed by the application. */
   deviceName: string
-  /** The Tailscale hostname (`truffle-{app_id}-{slug}`). Debug use only. */
+  /** The Tailscale hostname (`truffle-{appId}-{slug}`). Debug use only. */
   tailscaleHostname: string
-  /** Tailscale stable node ID. Escape hatch for diagnostics. */
+  /**
+   * This node's Tailscale stable node ID. Escape hatch for diagnostics;
+   * with `ephemeral: true` it rotates on each restart while `deviceId`
+   * persists.
+   */
   tailscaleId: string
   /** DNS name on the tailnet, if available. */
   dnsName?: string
@@ -580,15 +599,38 @@ export interface NapiNodeIdentity {
 
 /** A peer as seen by application code (RFC 017 §7.3). */
 export interface NapiPeer {
-  /** Stable per-device ULID from the remote node. Primary key. */
+  /**
+   * Remote device identity. Equals the remote node's stable **ULID** only
+   * once its identity has been learned over the envelope-bus WebSocket hello
+   * (RFC 017 §8) — i.e. once `wsConnected` is `true`. Until then, and
+   * permanently for raw-transport-only apps that never open the bus, it
+   * falls back to the peer's **Tailscale stable node id** (the same value as
+   * `tailscaleId`). It therefore CHANGES from the Tailscale id to the ULID
+   * the moment the WS session connects (verified by probe: the flip is
+   * simultaneous with `wsConnected` going true, and does not regress) — do
+   * NOT treat it as stable within a session. Code that keys peers by
+   * identity while using only the raw transports (QUIC/TCP/UDP) should key
+   * on `tailscaleId` instead.
+   */
   deviceId: string
-  /** Human-readable device name from the remote node. */
+  /**
+   * Human-readable device name from the remote node's hello. Falls back to
+   * the Tailscale hostname (slug) until `wsConnected` is `true`, on the
+   * same rule as `deviceId`.
+   */
   deviceName: string
   /** Network IP address as a string. */
   ip: string
   /** Whether the peer is online (from Layer 3). */
   online: boolean
-  /** Whether there is an active WebSocket connection. */
+  /**
+   * Whether an envelope-bus WebSocket session is currently open to this
+   * peer. Also gates `deviceId` / `deviceName`: while `false` they are the
+   * Tailscale-stable-id / hostname fallback; the first time it becomes
+   * `true` the RFC 017 hello lands and both flip to the remote ULID / real
+   * name. Raw-transport-only apps (that never call `send`/`broadcast`/
+   * `onMessage`) keep this `false` and so never see the ULID here.
+   */
   wsConnected: boolean
   /** Connection type description (e.g., "direct" or "relay:ord"). */
   connectionType: string
@@ -596,7 +638,14 @@ export interface NapiPeer {
   os?: string
   /** Last time the peer was seen online (RFC 3339 string). */
   lastSeen?: string
-  /** Tailscale stable ID. Escape hatch; most code should use `deviceId`. */
+  /**
+   * Tailscale stable node id — the peer's transport routing key and the ONLY
+   * identity here that is stable for the whole session. Prefer this as the
+   * map key for raw-transport-only apps, where `deviceId` never becomes the
+   * ULID (no WS hello is exchanged) and would otherwise change under you. For
+   * apps on the envelope bus, `deviceId` (the ULID, once `wsConnected`) is
+   * the portable cross-restart identity.
+   */
   tailscaleId: string
 }
 
@@ -605,8 +654,11 @@ export interface NapiPeerEvent {
   /** Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required". */
   eventType: string
   /**
-   * Stable `device_id` (ULID) of the affected peer. Empty string for
-   * `auth_required` events (no associated peer).
+   * `device_id` of the affected peer — the ULID once the peer's hello has
+   * been seen, otherwise the Tailscale stable id fallback (same rule as
+   * `NapiPeer.deviceId`). `left` / `ws_disconnected` events in
+   * particular often carry the Tailscale id because the hello may already be
+   * gone. Empty string for `auth_required` events (no associated peer).
    */
   peerId: string
   /** Full peer info (present for joined/updated events). */

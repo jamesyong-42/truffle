@@ -187,6 +187,13 @@ impl NapiNode {
     }
 
     /// Get all known peers.
+    ///
+    /// Each peer's `deviceId` is the remote ULID only once that peer's hello
+    /// has been received over the envelope-bus WebSocket (`wsConnected == true`);
+    /// before then it falls back to the peer's Tailscale stable id (equal to
+    /// `tailscaleId`) and flips to the ULID when the session connects.
+    /// Raw-transport-only callers should key identity on `tailscaleId`. See
+    /// `NapiPeer`.
     #[napi]
     pub async fn get_peers(&self) -> Result<Vec<NapiPeer>> {
         let node = self.require_node()?;

@@ -5,9 +5,18 @@
 //! truffle-core but flatten/simplify for JS ergonomics.
 //!
 //! RFC 017 identity model: application code sees peers by `device_id`
-//! (stable ULID from the hello envelope) and `device_name` (human-readable
-//! Unicode). The Tailscale stable ID and hostname are still available as
-//! escape hatches for diagnostics.
+//! (the remote node's ULID) and `device_name` (human-readable Unicode).
+//!
+//! IMPORTANT as-built caveat (v0.5.x): a peer's `device_id` / `device_name`
+//! only carry the ULID / real name once that peer's hello has arrived over the
+//! envelope-bus WebSocket (i.e. once `ws_connected == true`). Before then — and
+//! permanently for raw-transport-only apps (QUIC/TCP/UDP) that never open the
+//! bus — they fall back to the peer's Tailscale stable node id / hostname. A
+//! peer's `device_id` therefore CHANGES from the Tailscale id to the ULID the
+//! moment the WS session connects; it is not stable within a session. Only the
+//! *local* node's `device_id` (see [`NapiNodeIdentity`]) is always the real
+//! ULID. The Tailscale stable id and hostname are also available as explicit
+//! escape hatches for diagnostics. See `NapiPeer` for the full contract.
 
 use napi_derive::napi;
 
@@ -50,13 +59,19 @@ pub struct NapiNodeConfig {
 pub struct NapiNodeIdentity {
     /// Application namespace identifier.
     pub app_id: String,
-    /// Stable per-device ULID. Primary key for device identity.
+    /// This node's own stable ULID (RFC 017 §5.4). Primary key for device
+    /// identity. Always the real ULID — unlike a *peer's* `deviceId` (see
+    /// `NapiPeer`), which falls back to a Tailscale id until that peer's
+    /// hello is seen. Persists across restarts, including with
+    /// `ephemeral: true`.
     pub device_id: String,
     /// Original (unsanitised) device name, as passed by the application.
     pub device_name: String,
-    /// The Tailscale hostname (`truffle-{app_id}-{slug}`). Debug use only.
+    /// The Tailscale hostname (`truffle-{appId}-{slug}`). Debug use only.
     pub tailscale_hostname: String,
-    /// Tailscale stable node ID. Escape hatch for diagnostics.
+    /// This node's Tailscale stable node ID. Escape hatch for diagnostics;
+    /// with `ephemeral: true` it rotates on each restart while `deviceId`
+    /// persists.
     pub tailscale_id: String,
     /// DNS name on the tailnet, if available.
     pub dns_name: Option<String>,
@@ -71,15 +86,32 @@ pub struct NapiNodeIdentity {
 /// A peer as seen by application code (RFC 017 §7.3).
 #[napi(object)]
 pub struct NapiPeer {
-    /// Stable per-device ULID from the remote node. Primary key.
+    /// Remote device identity. Equals the remote node's stable **ULID** only
+    /// once its identity has been learned over the envelope-bus WebSocket hello
+    /// (RFC 017 §8) — i.e. once `wsConnected` is `true`. Until then, and
+    /// permanently for raw-transport-only apps that never open the bus, it
+    /// falls back to the peer's **Tailscale stable node id** (the same value as
+    /// `tailscaleId`). It therefore CHANGES from the Tailscale id to the ULID
+    /// the moment the WS session connects (verified by probe: the flip is
+    /// simultaneous with `wsConnected` going true, and does not regress) — do
+    /// NOT treat it as stable within a session. Code that keys peers by
+    /// identity while using only the raw transports (QUIC/TCP/UDP) should key
+    /// on `tailscaleId` instead.
     pub device_id: String,
-    /// Human-readable device name from the remote node.
+    /// Human-readable device name from the remote node's hello. Falls back to
+    /// the Tailscale hostname (slug) until `wsConnected` is `true`, on the
+    /// same rule as `deviceId`.
     pub device_name: String,
     /// Network IP address as a string.
     pub ip: String,
     /// Whether the peer is online (from Layer 3).
     pub online: bool,
-    /// Whether there is an active WebSocket connection.
+    /// Whether an envelope-bus WebSocket session is currently open to this
+    /// peer. Also gates `deviceId` / `deviceName`: while `false` they are the
+    /// Tailscale-stable-id / hostname fallback; the first time it becomes
+    /// `true` the RFC 017 hello lands and both flip to the remote ULID / real
+    /// name. Raw-transport-only apps (that never call `send`/`broadcast`/
+    /// `onMessage`) keep this `false` and so never see the ULID here.
     pub ws_connected: bool,
     /// Connection type description (e.g., "direct" or "relay:ord").
     pub connection_type: String,
@@ -87,7 +119,12 @@ pub struct NapiPeer {
     pub os: Option<String>,
     /// Last time the peer was seen online (RFC 3339 string).
     pub last_seen: Option<String>,
-    /// Tailscale stable ID. Escape hatch; most code should use `deviceId`.
+    /// Tailscale stable node id — the peer's transport routing key and the ONLY
+    /// identity here that is stable for the whole session. Prefer this as the
+    /// map key for raw-transport-only apps, where `deviceId` never becomes the
+    /// ULID (no WS hello is exchanged) and would otherwise change under you. For
+    /// apps on the envelope bus, `deviceId` (the ULID, once `wsConnected`) is
+    /// the portable cross-restart identity.
     pub tailscale_id: String,
 }
 
@@ -132,8 +169,11 @@ pub struct NapiHealthInfo {
 pub struct NapiPeerEvent {
     /// Event type: "joined", "left", "updated", "ws_connected", "ws_disconnected", "auth_required".
     pub event_type: String,
-    /// Stable `device_id` (ULID) of the affected peer. Empty string for
-    /// `auth_required` events (no associated peer).
+    /// `device_id` of the affected peer — the ULID once the peer's hello has
+    /// been seen, otherwise the Tailscale stable id fallback (same rule as
+    /// `NapiPeer.deviceId`). `left` / `ws_disconnected` events in
+    /// particular often carry the Tailscale id because the hello may already be
+    /// gone. Empty string for `auth_required` events (no associated peer).
     pub peer_id: String,
     /// Full peer info (present for joined/updated events).
     pub peer: Option<NapiPeer>,

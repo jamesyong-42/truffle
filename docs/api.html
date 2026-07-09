@@ -770,7 +770,13 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
           <h2>Peers are app-scoped devices</h2>
           <p class="summary">
             Use stable <code>deviceId</code> values for identity and authorization. Names are
-            convenient for examples and user-facing selection.
+            convenient for examples and user-facing selection. Caveat: a <em>peer's</em>
+            <code>deviceId</code> is the remote ULID only once <code>wsConnected</code> is
+            <code>true</code> (its identity travels over the envelope-bus hello); before then, and
+            permanently for apps that use only the raw transports, it falls back to the peer's
+            <code>tailscaleId</code> and flips to the ULID when the session connects. Raw-transport
+            apps should key identity on <code>tailscaleId</code>, which is stable for the whole
+            session. Your own <code>getLocalInfo().deviceId</code> is always the real ULID.
           </p>
 
           <div class="method">
@@ -784,7 +790,11 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
             <p>
               Returns known peers with <code>deviceId</code>, <code>deviceName</code>,
               <code>ip</code>, <code>online</code>, <code>wsConnected</code>,
-              <code>connectionType</code>, optional OS and last-seen data.
+              <code>connectionType</code>, optional OS and last-seen data. For a peer with
+              <code>wsConnected: false</code>, <code>deviceId</code> is that peer's
+              <code>tailscaleId</code> rather than its ULID — it flips to the ULID the moment the
+              WebSocket session connects, so it is not stable within a session. Key raw-transport
+              identity on <code>tailscaleId</code>.
             </p>
           </div>
 

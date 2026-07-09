@@ -747,7 +747,10 @@ console.table(await mesh.getPeers());</code></pre>
         <div class="note">
           Peer references can be stable device IDs, unique device ID prefixes, device names,
           Tailscale hostnames, or Tailscale IPs. Names are convenient for examples; use device IDs
-          when your app needs stable identity.
+          when your app needs stable identity — but note a peer's <code>deviceId</code> is its ULID
+          only once <code>wsConnected</code> is true, and otherwise falls back to (and can flip from)
+          its <code>tailscaleId</code>. Apps built purely on the raw transports should key identity
+          on <code>tailscaleId</code>.
         </div>
       </section>
 
