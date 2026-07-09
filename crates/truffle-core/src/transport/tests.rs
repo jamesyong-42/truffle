@@ -40,11 +40,15 @@ impl MockNetworkProvider {
         Self {
             identity: NodeIdentity {
                 app_id: "test".to_string(),
-                // RFC 017: align `device_id` with the fixture input so
-                // transport-level peer ID assertions stay simple.
-                device_id: id.to_string(),
+                // RFC 022 I1: durable device_id must be non-empty and distinct
+                // from the Tailscale routing id. Hello validation rejects
+                // device_id == tailscale_id at the trust boundary; using the
+                // same string for both hangs loopback WS tests on accept()
+                // after the peer is closed for a malformed hello.
+                device_id: format!("dev-{id}"),
                 device_name: format!("Test Node {id}"),
                 tailscale_hostname: format!("truffle-test-{id}"),
+                // Routing / remote_peer_id still use the short fixture id.
                 tailscale_id: id.to_string(),
                 dns_name: None,
                 ip: Some("127.0.0.1".parse().unwrap()),
