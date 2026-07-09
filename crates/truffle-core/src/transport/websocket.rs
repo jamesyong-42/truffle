@@ -242,6 +242,19 @@ fn validate_hello(
             "identity field exceeds maximum allowed length".to_string(),
         ));
     }
+    // RFC 022 I1 at the trust boundary: the durable device_id must be
+    // non-empty and distinct from the Tailscale routing id. Without this, a
+    // remote hello could publish a Tailscale id (or nothing) as its durable
+    // identity — every consumer of the honest projection inherits the lie,
+    // and the projection's I1 debug_assert becomes a remote-triggered panic
+    // in debug builds.
+    if remote.identity.device_id.is_empty()
+        || remote.identity.device_id == remote.identity.tailscale_id
+    {
+        return Err(TransportError::HelloMalformed(
+            "identity device_id must be non-empty and distinct from tailscale_id".to_string(),
+        ));
+    }
     if remote.identity.app_id != local_app_id {
         return Err(TransportError::AppMismatch {
             local: local_app_id.to_string(),
@@ -1008,6 +1021,37 @@ mod unit_tests {
         let envelope = crate::session::hello::HelloEnvelope::new(valid_identity());
         let result = validate_hello(envelope, "playground");
         assert!(result.is_ok(), "baseline valid hello should validate");
+    }
+
+    #[test]
+    fn validate_hello_rejects_device_id_equal_to_tailscale_id() {
+        // RFC 022 I1 at the trust boundary: a hello claiming its Tailscale id
+        // as its durable device_id must be rejected before it can publish.
+        let mut identity = valid_identity();
+        identity.device_id = identity.tailscale_id.clone();
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        match validate_hello(envelope, "playground") {
+            Err(TransportError::HelloMalformed(msg)) => {
+                assert!(
+                    msg.contains("distinct from tailscale_id"),
+                    "unexpected error: {msg}"
+                );
+            }
+            other => panic!("expected HelloMalformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_hello_rejects_empty_device_id() {
+        let mut identity = valid_identity();
+        identity.device_id = String::new();
+        let envelope = crate::session::hello::HelloEnvelope::new(identity);
+        match validate_hello(envelope, "playground") {
+            Err(TransportError::HelloMalformed(msg)) => {
+                assert!(msg.contains("non-empty"), "unexpected error: {msg}");
+            }
+            other => panic!("expected HelloMalformed, got {other:?}"),
+        }
     }
 
     #[test]

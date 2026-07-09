@@ -834,9 +834,10 @@ async fn quic_connect_and_handshake() {
     let client_stream = client_result.expect("client connect should succeed");
     let server_stream = server_stream.expect("server should accept a connection");
 
-    // Verify peer IDs from handshake
-    assert_eq!(client_stream.remote_peer_id(), "quic-server");
-    assert_eq!(server_stream.remote_peer_id(), "quic-client");
+    // Verify peer IDs from handshake — the QUIC hello carries the durable
+    // device_id, which the mock prefixes with `dev-` (RFC 022 I1).
+    assert_eq!(client_stream.remote_peer_id(), "dev-quic-server");
+    assert_eq!(server_stream.remote_peer_id(), "dev-quic-client");
 
     // Verify peer addresses are non-empty
     assert!(!client_stream.peer_addr().is_empty());

@@ -119,9 +119,15 @@ export class Peer {
 
   // ── Networking sugar ───────────────────────────────────────────────────
 
-  /** String accepted by native `send` / `ping` (ULID if published, else TS id). */
+  /**
+   * Routing selector for native calls: the peer ref, so the core can
+   * generation-check the handle — a stale handle (peer left/rejoined)
+   * rejects with PeerGone instead of silently reaching the new generation
+   * (RFC 022 I5) — and routes by the authenticated Tailscale key rather
+   * than the self-declared ULID.
+   */
   get #routeId(): string {
-    return this.deviceId ?? this.tailscaleId;
+    return this.ref;
   }
 
   send(namespace: string, data: Buffer | Uint8Array): Promise<void> {
@@ -220,7 +226,10 @@ export function isPeer(value: unknown): value is Peer {
 /** Resolve PeerLike to a native route / query string. */
 export function peerLikeToQuery(to: PeerLike): string {
   if (isPeer(to)) {
-    return to.deviceId ?? to.tailscaleId;
+    // Route handles by ref: generation-checked (stale handle → PeerGone,
+    // RFC 022 I5) and keyed by the authenticated Tailscale id, not the
+    // self-declared ULID.
+    return to.ref;
   }
   return to;
 }

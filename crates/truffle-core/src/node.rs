@@ -618,6 +618,20 @@ impl<N: NetworkProvider + 'static> Node<N> {
         };
 
         let mut rx = self.session.on_peer_change();
+
+        // Re-check immediately after subscribing: an event landing between
+        // the initial miss above and the subscription would otherwise be
+        // lost, and the query would only re-resolve on the NEXT event (or
+        // never — burning the whole timeout on an already-resolvable peer).
+        match self.resolve_peer(query).await {
+            Ok(state) => {
+                let app_id = self.network.local_identity().app_id;
+                return Ok(Some(Self::project_peer(state, &app_id)));
+            }
+            Err(NodeError::PeerNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+
         let deadline = tokio::time::Instant::now() + Duration::from_millis(ms);
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -731,6 +745,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
             }
         }
 
+        // A well-formed peer ref that resolved nothing above refers to a
+        // departed or superseded generation (live refs exact-matched
+        // `p.peer_ref()` earlier) — surface PeerGone, not PeerNotFound, so
+        // stale handles fail loudly instead of looking like typos
+        // (RFC 022 I5). Checked last so colon-containing names still match.
+        if crate::session::parse_peer_ref(peer_ref).is_some() {
+            return Err(NodeError::PeerGone(peer_ref.to_string()));
+        }
+
         Err(NodeError::PeerNotFound(peer_ref.to_string()))
     }
 
@@ -797,6 +820,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
         Ok(())
     }
 
+    /// Map session send errors: a stale peer-ref selector surfaces as
+    /// [`NodeError::PeerGone`] (RFC 022 I5); everything else wraps as-is.
+    fn map_session_send_err(e: crate::session::SessionError) -> NodeError {
+        match e {
+            crate::session::SessionError::PeerGone(r) => NodeError::PeerGone(r),
+            e => NodeError::Session(e),
+        }
+    }
+
     /// Send a namespaced message to a specific peer.
     ///
     /// The data is wrapped in a Layer 6 [`Envelope`] with the given namespace
@@ -819,7 +851,10 @@ impl<N: NetworkProvider + 'static> Node<N> {
         let envelope = Envelope::new(namespace, "message", payload).with_timestamp();
 
         let encoded = self.codec.encode(&envelope)?;
-        self.session.send(peer_id, &encoded).await?;
+        self.session
+            .send(peer_id, &encoded)
+            .await
+            .map_err(Self::map_session_send_err)?;
         Ok(())
     }
 
@@ -840,7 +875,10 @@ impl<N: NetworkProvider + 'static> Node<N> {
         self.ensure_not_stopped()?;
         let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
         let encoded = self.codec.encode(&envelope)?;
-        self.session.send(peer_id, &encoded).await?;
+        self.session
+            .send(peer_id, &encoded)
+            .await
+            .map_err(Self::map_session_send_err)?;
         Ok(())
     }
 
@@ -2203,6 +2241,43 @@ mod tests {
         assert_eq!(peers[0].display_name, "ec2-smoke");
         assert_eq!(peers[0].hostname, "truffle-test-ec2-smoke");
         assert!(peers[0].device_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_peer_stale_ref_is_peer_gone() {
+        let ws_port = random_port().await;
+        let (node, event_tx, _net) = make_test_node("node-1", ws_port).await;
+
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-9")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let live_ref = node.peers().await[0].peer_ref.clone();
+        assert_eq!(node.resolve_peer(&live_ref).await.unwrap().id, "peer-9");
+
+        // Left + rejoin bumps the generation: the old handle's ref must fail
+        // with PeerGone (RFC 022 I5), never silently reach the new
+        // generation.
+        let _ = event_tx.send(NetworkPeerEvent::Left("peer-9".to_string()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = event_tx.send(NetworkPeerEvent::Joined(make_loopback_peer("peer-9")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(matches!(
+            node.resolve_peer(&live_ref).await,
+            Err(NodeError::PeerGone(_))
+        ));
+        // A ref for a fully departed peer is PeerGone too — not a typo-shaped
+        // PeerNotFound.
+        assert!(matches!(
+            node.resolve_peer("peer-9:99").await,
+            Err(NodeError::PeerGone(_))
+        ));
+        // peer() propagates PeerGone immediately instead of waiting out the
+        // timeout.
+        assert!(matches!(
+            node.peer(&live_ref, Some(2_000)).await,
+            Err(NodeError::PeerGone(_))
+        ));
     }
 
     #[tokio::test]

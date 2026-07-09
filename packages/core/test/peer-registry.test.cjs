@@ -14,7 +14,11 @@ const assert = require('node:assert/strict');
 async function load() {
   const peer = await import('../dist/peer.js');
   const cmn = await import('../dist/create-mesh-node.js');
-  return { PeerRegistry: peer.PeerRegistry, toMeshPeerEvent: cmn.toMeshPeerEvent };
+  return {
+    PeerRegistry: peer.PeerRegistry,
+    peerLikeToQuery: peer.peerLikeToQuery,
+    toMeshPeerEvent: cmn.toMeshPeerEvent,
+  };
 }
 
 const fakeNode = {}; // Peer networking sugar (send/ping) is not exercised here.
@@ -82,6 +86,16 @@ test('rejoin with a new generation supersedes the old handle without leaking', a
   assert.equal(gen1.online, false); // superseded handle pinned offline
   assert.equal(reg.get('ts-1:1'), undefined); // no leak across rejoins
   assert.strictEqual(reg.getByTailscaleId('ts-1'), gen2); // attribution → live generation
+});
+
+test('handles route by generation-checked ref; strings pass through', async () => {
+  const { PeerRegistry, peerLikeToQuery } = await load();
+  const reg = new PeerRegistry(fakeNode);
+  const peer = reg.upsert(snap({ deviceId: '01HZXK7Q2M' }));
+  // Ref (not ULID): the core generation-checks it and PeerGone-rejects
+  // stale handles (RFC 022 I5).
+  assert.equal(peerLikeToQuery(peer), 'ts-1:1');
+  assert.equal(peerLikeToQuery('Bob'), 'Bob');
 });
 
 test('left for an unknown peer yields no handle and does not throw', async () => {

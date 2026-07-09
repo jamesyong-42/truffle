@@ -15,7 +15,10 @@ use crate::transport::websocket::WebSocketTransport;
 use crate::transport::WsConfig;
 
 use super::reconnect::ReconnectBackoff;
-use super::{format_peer_ref, PeerEvent, PeerIdentity, PeerRegistry, PeerRegistryOptions};
+use super::{
+    format_peer_ref, parse_peer_ref, PeerEvent, PeerIdentity, PeerRegistry, PeerRegistryOptions,
+    SessionError,
+};
 
 // ---------------------------------------------------------------------------
 // Mock NetworkProvider for session tests
@@ -42,10 +45,10 @@ impl MockNetworkProvider {
         Self {
             identity: NodeIdentity {
                 app_id: app_id.to_string(),
-                // RFC 017: fixtures use the same string for both `device_id`
-                // and `tailscale_id` so tests that assert on the sender ID
-                // keep working without special-casing either form.
-                device_id: id.to_string(),
+                // RFC 022 I1: `device_id` must differ from `tailscale_id` or
+                // validate_hello rejects the exchange at the trust boundary,
+                // so fixtures prefix it with `dev-`.
+                device_id: format!("dev-{id}"),
                 device_name: format!("Test Node {id}"),
                 tailscale_hostname: format!("truffle-{app_id}-{id}"),
                 tailscale_id: id.to_string(),
@@ -861,7 +864,7 @@ async fn test_hello_exchange_populates_identity() {
         .as_ref()
         .expect("hello should have landed on the client side");
     assert_eq!(server_identity.app_id, "test");
-    assert_eq!(server_identity.device_id, "server");
+    assert_eq!(server_identity.device_id, "dev-server");
     assert_eq!(server_identity.device_name, "Test Node server");
     assert_eq!(server_identity.tailscale_id, "server");
     assert!(!server_identity.os.is_empty(), "os should be populated");
@@ -877,7 +880,7 @@ async fn test_hello_exchange_populates_identity() {
         .as_ref()
         .expect("hello should have landed on the server side");
     assert_eq!(client_identity.app_id, "test");
-    assert_eq!(client_identity.device_id, "client");
+    assert_eq!(client_identity.device_id, "dev-client");
     assert_eq!(client_identity.device_name, "Test Node client");
     assert_eq!(client_identity.tailscale_id, "client");
 }
@@ -1275,4 +1278,109 @@ async fn test_rfc022_eager_identity_disabled_no_auto_hello() {
         "with eager_identity=false, no auto hello"
     );
     assert!(!server.ws_connected);
+}
+
+#[test]
+fn test_parse_peer_ref_forms() {
+    assert_eq!(parse_peer_ref("nABC123:3"), Some(("nABC123", 3)));
+    assert_eq!(parse_peer_ref("nABC123"), None); // no generation
+    assert_eq!(parse_peer_ref("fd7a:115c::1"), None); // IPv6 — multiple colons
+    assert_eq!(parse_peer_ref(":3"), None); // empty id
+    assert_eq!(parse_peer_ref("nABC:"), None); // empty generation
+    assert_eq!(parse_peer_ref("nABC:3a"), None); // non-digit generation
+}
+
+/// RFC 022 §7.7 + I5: ULID routing goes through the first-wins `by_device`
+/// index (a suppressed duplicate never captures traffic), suppressed names do
+/// not resolve, and peer-ref selectors are generation-checked.
+#[tokio::test]
+async fn test_rfc022_routing_ignores_suppressed_and_checks_generation() {
+    let port = random_port().await;
+    let (registry, es) = build_registry("local", port);
+    registry.start().await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("a")))
+        .unwrap();
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("b")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let uid = "01J4K9M2Z8AB3RNYQPW6H5TC0X";
+    let ident = |ts: &str, name: &str| PeerIdentity {
+        app_id: "test".into(),
+        device_id: uid.into(),
+        device_name: name.into(),
+        os: "linux".into(),
+        tailscale_id: ts.into(),
+    };
+    assert!(
+        registry
+            .test_stamp_identity("a", ident("a", "Holder"))
+            .await
+    );
+    assert!(
+        registry
+            .test_stamp_identity("b", ident("b", "Claimant"))
+            .await
+    );
+
+    // ULID-addressed traffic routes to the first-wins holder, never the
+    // suppressed claimant — regardless of map iteration order.
+    assert_eq!(registry.resolve_routing_key(uid).await.unwrap(), "a");
+    // The suppressed claimant's identity is unpublished; its name must not
+    // resolve either.
+    assert!(matches!(
+        registry.resolve_routing_key("Claimant").await,
+        Err(SessionError::UnknownPeer(_))
+    ));
+    // Peer refs: live generation resolves; stale or departed → PeerGone.
+    assert_eq!(registry.resolve_routing_key("a:1").await.unwrap(), "a");
+    assert!(matches!(
+        registry.resolve_routing_key("a:9").await,
+        Err(SessionError::PeerGone(_))
+    ));
+    assert!(matches!(
+        registry.resolve_routing_key("gone:1").await,
+        Err(SessionError::PeerGone(_))
+    ));
+}
+
+/// RFC 022 §8: a re-hello with the identical identity emits no second
+/// `identity`; a changed device_name surfaces as `updated` instead.
+#[tokio::test]
+async fn test_rfc022_rehello_emits_no_duplicate_identity() {
+    let port = random_port().await;
+    let (registry, es) = build_registry("local", port);
+    let mut events = registry.on_peer_change();
+    registry.start().await;
+
+    es.send(NetworkPeerEvent::Joined(make_loopback_peer("a")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let ident = |name: &str| PeerIdentity {
+        app_id: "test".into(),
+        device_id: "01J4K9M2Z8AB3RNYQPW6H5TC0X".into(),
+        device_name: name.into(),
+        os: "linux".into(),
+        tailscale_id: "a".into(),
+    };
+
+    assert!(registry.test_stamp_identity("a", ident("Alice")).await);
+    // Reconnect re-hello with the identical identity: must be silent.
+    assert!(registry.test_stamp_identity("a", ident("Alice")).await);
+    // Renamed device on re-hello: surfaces as `updated`, not `identity`.
+    assert!(registry.test_stamp_identity("a", ident("Alice II")).await);
+
+    let mut identity_events = 0;
+    let mut updated_with_identity = 0;
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            PeerEvent::Identity(_) => identity_events += 1,
+            PeerEvent::Updated(s) if s.identity.is_some() => updated_with_identity += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(identity_events, 1, "re-hello must not re-emit identity");
+    assert_eq!(updated_with_identity, 1, "rename surfaces as updated");
 }

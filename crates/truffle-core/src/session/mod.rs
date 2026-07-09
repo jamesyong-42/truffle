@@ -105,6 +105,22 @@ pub fn format_peer_ref(tailscale_id: &str, generation: u64) -> String {
     format!("{tailscale_id}:{generation}")
 }
 
+/// Parse a `{tailscale_id}:{generation}` peer ref (RFC 022).
+///
+/// Returns `None` for anything else: exactly one `:`, non-empty id, all-digit
+/// generation. IPv6 literals (multiple colons) and colon-free identifiers
+/// never qualify, so query strings fall through to normal resolution.
+pub(crate) fn parse_peer_ref(s: &str) -> Option<(&str, u64)> {
+    let (ts, generation) = s.rsplit_once(':')?;
+    if ts.is_empty() || ts.contains(':') || generation.is_empty() {
+        return None;
+    }
+    if !generation.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((ts, generation.parse().ok()?))
+}
+
 /// Events emitted by the session layer when peer state changes.
 ///
 /// Subscribers receive these via [`PeerRegistry::on_peer_change`].
@@ -160,6 +176,11 @@ pub enum SessionError {
     /// The specified peer is not known to the registry.
     #[error("unknown peer: {0}")]
     UnknownPeer(String),
+
+    /// A peer-ref selector referenced a departed or superseded registry
+    /// entry generation (RFC 022 I5) — the handle it came from is stale.
+    #[error("peer gone: {0}")]
+    PeerGone(String),
 
     /// The specified peer is offline (Layer 3 reports not online).
     #[error("peer offline: {0}")]
@@ -855,16 +876,43 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         if map.contains_key(peer_id) {
             return Ok(peer_id.to_string());
         }
-        map.values()
-            .find(|p| {
-                p.name == peer_id
-                    || p.identity
+
+        // Published-ULID lookup goes through `by_device` — the first-wins
+        // authoritative index — so a suppressed duplicate claimant can never
+        // capture ULID-addressed traffic (RFC 022 §7.7). Never match a raw
+        // `identity.device_id` here: suppressed identities are unpublished.
+        {
+            let by_dev = self.by_device.read().await;
+            if let Some(ts) = by_dev.get(peer_id) {
+                return Ok(ts.clone());
+            }
+        }
+
+        if let Some(found) = map.values().find(|p| {
+            p.name == peer_id
+                || (!p.identity_suppressed
+                    && p.identity
                         .as_ref()
-                        .map(|i| i.device_id == peer_id || i.device_name == peer_id)
-                        .unwrap_or(false)
-            })
-            .map(|p| p.id.clone())
-            .ok_or_else(|| SessionError::UnknownPeer(peer_id.to_string()))
+                        .map(|i| i.device_name == peer_id)
+                        .unwrap_or(false))
+        }) {
+            return Ok(found.id.clone());
+        }
+
+        // Peer-ref selector `{tailscale_id}:{generation}` — generation-checked
+        // handle routing (RFC 022 I5). Checked last so identifiers that merely
+        // look ref-shaped can still resolve above; a real ref that reaches
+        // here is live (generation match), superseded, or departed — the
+        // latter two must fail with PeerGone, never silently reach a
+        // rejoined peer.
+        if let Some((ts, generation)) = parse_peer_ref(peer_id) {
+            return match map.get(ts) {
+                Some(p) if p.generation == generation => Ok(ts.to_string()),
+                _ => Err(SessionError::PeerGone(peer_id.to_string())),
+            };
+        }
+
+        Err(SessionError::UnknownPeer(peer_id.to_string()))
     }
 
     /// Broadcast data to all peers with active WebSocket connections.
@@ -1377,6 +1425,9 @@ enum IdentityOutcome {
     /// Retire a ghost entry (same ULID, offline holder) before the new claim.
     /// Carries the ghost's final state for the synthesized `Left` event.
     GhostLeft(PeerState),
+    /// Emit `PeerEvent::Updated` — identity metadata (name/os) changed on a
+    /// re-hello without the ULID changing (no second `identity`, RFC 022 §8).
+    Updated(PeerState),
 }
 
 /// Apply `identity` to the peer at `ts_id`, updating `by_device` under
@@ -1399,11 +1450,17 @@ fn apply_identity(
         if prev != uid.as_str() {
             by_device.remove(prev);
         } else if !state.identity_suppressed {
-            // Same ULID already published — refresh metadata only.
+            // Same ULID already published — refresh metadata silently:
+            // RFC 022 §8 says later confirmations emit no second `identity`
+            // (every WS reconnect re-hellos). A changed name/os surfaces as
+            // `updated` instead.
             if let Some(s) = peers.get_mut(ts_id) {
+                let changed = s.identity.as_ref() != Some(&identity);
                 s.identity = Some(identity);
                 s.identity_suppressed = false;
-                outcomes.push(IdentityOutcome::Identity(s.clone()));
+                if changed {
+                    outcomes.push(IdentityOutcome::Updated(s.clone()));
+                }
             }
             return outcomes;
         }
@@ -1469,6 +1526,9 @@ fn emit_identity_outcomes(event_tx: &broadcast::Sender<PeerEvent>, outcomes: Vec
             }
             IdentityOutcome::Identity(state) => {
                 let _ = event_tx.send(PeerEvent::Identity(state));
+            }
+            IdentityOutcome::Updated(state) => {
+                let _ = event_tx.send(PeerEvent::Updated(state));
             }
         }
     }
