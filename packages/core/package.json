@@ -1,6 +1,6 @@
 {
   "name": "@vibecook/truffle",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Mesh networking for local-first apps, built on Tailscale",
   "license": "MIT",
   "author": "James Yong",
@@ -62,11 +62,11 @@
     }
   },
   "optionalDependencies": {
-    "@vibecook/truffle-sidecar-darwin-arm64": "0.5.0",
-    "@vibecook/truffle-sidecar-darwin-x64": "0.5.0",
-    "@vibecook/truffle-sidecar-linux-x64": "0.5.0",
-    "@vibecook/truffle-sidecar-linux-arm64": "0.5.0",
-    "@vibecook/truffle-sidecar-win32-x64": "0.5.0"
+    "@vibecook/truffle-sidecar-darwin-arm64": "0.5.1",
+    "@vibecook/truffle-sidecar-darwin-x64": "0.5.1",
+    "@vibecook/truffle-sidecar-linux-x64": "0.5.1",
+    "@vibecook/truffle-sidecar-linux-arm64": "0.5.1",
+    "@vibecook/truffle-sidecar-win32-x64": "0.5.1"
   },
   "devDependencies": {
     "@types/ws": "^8.5.13",
