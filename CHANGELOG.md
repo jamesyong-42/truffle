@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.5.0...truffle-v0.5.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **napi:** document the real peer identity contract (deviceId fallback + flip) ([7da4dcd](https://github.com/jamesyong-42/truffle/commit/7da4dcd48e2d3181a351b0e9e6d92b6d5ecf6bab))
+* **sidecar:** quiet stderr by default; TRUFFLE_DEBUG restores verbose tracing ([2879ee1](https://github.com/jamesyong-42/truffle/commit/2879ee1e04556d09610222ba08c3a2508f7b09c4))
+
 ## [0.5.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.4.9...truffle-v0.5.0) (2026-07-08)
 
 
