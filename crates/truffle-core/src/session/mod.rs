@@ -56,7 +56,7 @@ pub struct PeerState {
     pub id: String,
     /// Generation counter for this `id` within this process (RFC 022 §7.7).
     /// Bumped each time the same Tailscale node re-joins after `Left`.
-    /// Combined with `id` to form [`peer_ref`].
+    /// Combined with `id` to form [`Self::peer_ref`].
     pub generation: u64,
     /// Tailscale hostname (as seen by Layer 3). This is the slugged form,
     /// NOT the user-facing `device_name`.
