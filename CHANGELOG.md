@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.5.1...truffle-v0.6.0) (2026-07-10)
+
+
+### Features
+
+* **core:** close out RFC 022 — configurable eager-dial jitter, eager-identity proof, Peer-first examples ([bc5ac78](https://github.com/jamesyong-42/truffle/commit/bc5ac781db8aad98e140d492e62f28bad4bdaa24))
+* RFC 022 Peer handle API with honest identity ([e67fbdd](https://github.com/jamesyong-42/truffle/commit/e67fbdd459d52ef07caaa17972046f3ec995dcba))
+
+
+### Bug Fixes
+
+* **bindings:** migrate RFC 022 consumers — react hook, Tauri guest types, NAPI attribution docs ([548b939](https://github.com/jamesyong-42/truffle/commit/548b939be4f016cd7e7df66ed01ce87a85265cfa))
+* **cli:** key TUI peers by Tailscale id for RFC 022 attribution ([f0bc4ff](https://github.com/jamesyong-42/truffle/commit/f0bc4fff63c0dedd041fcc07f10e4205bfc1a859))
+* **core:** enforce RFC 022 identity edge cases — impostor routing, I1 boundary, PeerGone ([e23d756](https://github.com/jamesyong-42/truffle/commit/e23d756326fad878b8b41e233c7bbfa538e249a5))
+* **core:** give transport mock distinct device_id for RFC 022 I1 ([ad3b0a6](https://github.com/jamesyong-42/truffle/commit/ad3b0a6f735ba6595a6c01f0febb7ebfa74fbdd0))
+* **core:** RFC 022 follow-up — restore build, file transfer, and the Peer handle contracts ([f1784a0](https://github.com/jamesyong-42/truffle/commit/f1784a017d7a92504ca021b42987da76b46a242c))
+
+
+### Miscellaneous Chores
+
+* release 0.6.0 ([efef307](https://github.com/jamesyong-42/truffle/commit/efef30752d4d2722a9aa570b866191e768f2f14f))
+
 ## [Unreleased]
 
 ### ⚠ BREAKING CHANGES (RFC 022 — Peer Handle API)
