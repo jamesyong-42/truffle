@@ -304,6 +304,9 @@ pub struct PeerRegistry<N: NetworkProvider + 'static> {
     /// Cap concurrent eager-identity dials (default 4).
     eager_identity_sem: Arc<Semaphore>,
 
+    /// Per-peer jitter window (ms) applied before an eager dial (RFC 022 §8.1).
+    eager_identity_jitter_ms: u64,
+
     /// Peer ids with an in-flight ensure_identity task (dedupe).
     identity_inflight: Arc<AsyncMutex<HashSet<String>>>,
 }
@@ -316,6 +319,14 @@ pub struct PeerRegistryOptions {
     pub eager_identity: bool,
     /// Max concurrent eager-identity dials. Default: 4.
     pub eager_identity_concurrency: usize,
+    /// Max per-peer delay (ms) applied *before* each EAGER identity dial to
+    /// stagger the first burst of hellos when a node joins a large mesh
+    /// (RFC 022 §8.1). The delay is a deterministic hash of the peer id in
+    /// `0..eager_identity_jitter_ms` (truffle-core has no `rand` dependency).
+    /// `0` disables jitter — tests set it for deterministic timing. Only the
+    /// eager path is delayed; app `send` / `ensure_ws_connected` never wait.
+    /// Default: 250.
+    pub eager_identity_jitter_ms: u64,
 }
 
 impl Default for PeerRegistryOptions {
@@ -323,6 +334,7 @@ impl Default for PeerRegistryOptions {
         Self {
             eager_identity: true,
             eager_identity_concurrency: 4,
+            eager_identity_jitter_ms: 250,
         }
     }
 }
@@ -362,6 +374,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             incoming_tx,
             eager_identity: options.eager_identity,
             eager_identity_sem: Arc::new(Semaphore::new(concurrency)),
+            eager_identity_jitter_ms: options.eager_identity_jitter_ms,
             identity_inflight: Arc::new(AsyncMutex::new(HashSet::new())),
         }
     }
@@ -405,6 +418,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             ws_transport: self.ws_transport.clone(),
             network: self.network.clone(),
             eager_identity_sem: self.eager_identity_sem.clone(),
+            eager_identity_jitter_ms: self.eager_identity_jitter_ms,
             identity_inflight: self.identity_inflight.clone(),
         };
 
@@ -526,7 +540,9 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                     }
                     Ok(NetworkPeerEvent::Updated(network_peer)) => {
                         let mut state = network_peer_to_state(&network_peer, 0);
-                        let mut became_online_without_identity = false;
+                        // Both branches below assign this before it is read;
+                        // no initializer keeps the unused-assignment lint quiet.
+                        let became_online_without_identity;
 
                         // Preserve Layer 5 state (ws_connected, identity,
                         // generation, suppression) from the existing entry —
@@ -1135,6 +1151,34 @@ fn spawn_connection_task(
 // Eager identity scheduling (RFC 022 Phase C)
 // ---------------------------------------------------------------------------
 
+/// Deterministic per-peer delay in `0..window_ms` for staggering eager dials
+/// (RFC 022 §8.1).
+///
+/// truffle-core carries no `rand` dependency, so the stagger is a hash of the
+/// peer id (`DefaultHasher`, fixed-seed SipHash) folded into the window rather
+/// than a random draw. The properties the eager scheduler relies on:
+///
+/// - **Bounded:** always `< window_ms`, and exactly `Duration::ZERO` when
+///   `window_ms == 0` — which both disables jitter (tests use it to keep eager
+///   timing deterministic) and avoids a `% 0` panic.
+/// - **Stable per peer:** one peer id always maps to the same delay for the
+///   life of the process, so a re-scheduled peer does not thrash.
+/// - **Spread across peers:** distinct ids land on different offsets, which is
+///   the whole point — it breaks up the synchronized first-dial burst when a
+///   node joins a large mesh. Decorrelating the *same* peer across different
+///   local nodes is out of scope (the herd this targets is one node's own
+///   outbound burst); the semaphore bounds concurrency regardless.
+fn eager_jitter_delay(peer_id: &str, window_ms: u64) -> Duration {
+    if window_ms == 0 {
+        return Duration::ZERO;
+    }
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    peer_id.hash(&mut h);
+    Duration::from_millis(h.finish() % window_ms)
+}
+
 /// Arcs needed to dial for identity without holding `&PeerRegistry`.
 struct EagerScheduleCtx<N: NetworkProvider + 'static> {
     eager_identity: bool,
@@ -1148,6 +1192,7 @@ struct EagerScheduleCtx<N: NetworkProvider + 'static> {
     ws_transport: Arc<WebSocketTransport<N>>,
     network: Arc<N>,
     eager_identity_sem: Arc<Semaphore>,
+    eager_identity_jitter_ms: u64,
     identity_inflight: Arc<AsyncMutex<HashSet<String>>>,
 }
 
@@ -1177,6 +1222,7 @@ impl<N: NetworkProvider + 'static> EagerScheduleCtx<N> {
         let ws_transport = self.ws_transport.clone();
         let _network = self.network.clone();
         let sem = self.eager_identity_sem.clone();
+        let jitter_ms = self.eager_identity_jitter_ms;
         let inflight = self.identity_inflight.clone();
 
         tokio::spawn(async move {
@@ -1186,15 +1232,19 @@ impl<N: NetworkProvider + 'static> EagerScheduleCtx<N> {
                 set.insert(peer_id.clone());
             }
 
-            // Per-peer jitter 0–400ms to avoid thundering herd.
-            let jitter_ms = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut h = DefaultHasher::new();
-                peer_id.hash(&mut h);
-                (h.finish() % 400) as u64
-            };
-            tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+            // RFC 022 §8.1: stagger the first burst of eager hellos with a
+            // bounded per-peer delay applied *before* acquiring the dial
+            // permit, so a node joining a large mesh does not fire its first
+            // `eager_identity_concurrency` hellos simultaneously. Waiting
+            // before the semaphore (not after) means we never hold a dial slot
+            // just to idle, and it spreads arrival at the semaphore so even the
+            // very first dials are staggered. The delay is derived from the
+            // peer id (no `rand` dependency); only this eager path waits — app
+            // `send` never does.
+            let delay = eager_jitter_delay(&peer_id, jitter_ms);
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
 
             let permit = match sem.acquire().await {
                 Ok(p) => p,

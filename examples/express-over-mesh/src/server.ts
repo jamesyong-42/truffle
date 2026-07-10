@@ -41,8 +41,19 @@ app.get('/api/status', (_req, res) => {
 });
 
 app.get('/api/peers', async (_req, res) => {
+  // getPeers() returns live Peer handles (class instances with getters), so
+  // project the fields we want to expose — a raw handle JSON-serialises to {}.
   const peers = await mesh.getPeers();
-  res.json({ count: peers.length, peers });
+  res.json({
+    count: peers.length,
+    peers: peers.map((p) => ({
+      displayName: p.displayName,
+      deviceId: p.deviceId, // durable ULID, or null until the peer's hello is seen
+      ip: p.ip,
+      os: p.os,
+      online: p.online,
+    })),
+  });
 });
 
 app.post('/api/echo', (req, res) => {

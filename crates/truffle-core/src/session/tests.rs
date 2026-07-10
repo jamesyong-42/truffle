@@ -1384,3 +1384,43 @@ async fn test_rfc022_rehello_emits_no_duplicate_identity() {
     assert_eq!(identity_events, 1, "re-hello must not re-emit identity");
     assert_eq!(updated_with_identity, 1, "rename surfaces as updated");
 }
+
+/// RFC 022 §8.1: the eager-dial stagger is bounded within the window, stable
+/// per peer, disabled at window 0, and spread across peers — all without a
+/// `rand` dependency (see `super::eager_jitter_delay`).
+#[test]
+fn test_eager_jitter_delay_bounded_and_stable() {
+    use super::eager_jitter_delay;
+
+    // Window 0 → no delay. Tests rely on this to disable eager jitter, and it
+    // guards the `% 0` panic.
+    assert_eq!(eager_jitter_delay("server", 0), Duration::ZERO);
+    assert_eq!(eager_jitter_delay("anything", 0), Duration::ZERO);
+
+    // Bounded strictly within the window, and stable for a given peer id.
+    let window = 250;
+    for id in ["server", "client", "peer-a", "peer-b", "01J4K9M2Z8AB"] {
+        let d = eager_jitter_delay(id, window);
+        assert!(
+            d < Duration::from_millis(window),
+            "delay {d:?} for {id} must be < {window}ms window"
+        );
+        assert_eq!(
+            d,
+            eager_jitter_delay(id, window),
+            "delay must be stable per peer id"
+        );
+    }
+
+    // Spread: across many ids the delays are not all identical — a degenerate
+    // constant jitter would defeat the purpose. Deterministic (DefaultHasher is
+    // fixed-seed), so this can never flake.
+    let distinct: std::collections::HashSet<Duration> = (0..32)
+        .map(|i| eager_jitter_delay(&format!("peer-{i}"), window))
+        .collect();
+    assert!(
+        distinct.len() > 1,
+        "jitter should spread peers across the window, got {} distinct value(s)",
+        distinct.len()
+    );
+}

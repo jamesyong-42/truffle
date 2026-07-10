@@ -139,9 +139,13 @@ async function runPeers(): Promise<void> {
     const peers = await mesh.getPeers();
     const row = (a: string, b: string, c: string, d: string): string =>
       `${a.padEnd(24)}${b.padEnd(28)}${c.padEnd(16)}${d}`;
-    console.log(row('deviceName', 'deviceId', 'ip', 'online'));
+    console.log(row('name', 'deviceId', 'ip', 'online'));
     for (const peer of peers) {
-      console.log(row(peer.deviceName, peer.deviceId, peer.ip, peer.online ? 'yes' : 'no'));
+      // displayName is always present; deviceId is the durable ULID — null
+      // until the peer's hello is seen (RFC 022).
+      console.log(
+        row(peer.displayName, peer.deviceId ?? '(pending)', peer.ip, peer.online ? 'yes' : 'no'),
+      );
     }
   } finally {
     await mesh.stop().catch(() => {});

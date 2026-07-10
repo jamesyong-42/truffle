@@ -3,7 +3,7 @@ import type { HealthInfo, PingResult } from '@shared/ipc';
 
 interface UseHealthResult {
   health: HealthInfo | null;
-  ping: (peerId: string) => Promise<PingResult>;
+  ping: (peerRef: string) => Promise<PingResult>;
 }
 
 /**
@@ -35,8 +35,8 @@ export function useHealth(): UseHealthResult {
     };
   }, []);
 
-  const ping = useCallback((peerId: string) => {
-    return window.truffle.ping(peerId);
+  const ping = useCallback((peerRef: string) => {
+    return window.truffle.ping(peerRef);
   }, []);
 
   return { health, ping };

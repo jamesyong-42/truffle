@@ -5,7 +5,7 @@ const MAX_MESSAGES = 500;
 
 interface UseChatResult {
   messages: ChatMessage[];
-  send: (peerId: string, text: string) => Promise<void>;
+  send: (peerRef: string, text: string) => Promise<void>;
   broadcast: (text: string) => Promise<void>;
   clear: () => void;
 }
@@ -45,8 +45,8 @@ export function useChat(): UseChatResult {
   }, []);
 
   const send = useCallback(
-    async (peerId: string, text: string) => {
-      await window.truffle.sendMessage(peerId, text);
+    async (peerRef: string, text: string) => {
+      await window.truffle.sendMessage(peerRef, text);
       appendLocal({
         from: '__self__',
         fromName: 'you',

@@ -16,7 +16,7 @@
 | C — Eager identity (default on, concurrency cap, one-shot) | **Done** |
 | PeerLike on net/quic/dgram/ws | **Done** |
 | D — Hostinfo advertisement | Not started |
-| E — Full docs site rewrite | `docs/index.html` + `docs/api.html` Peer-first rewrite done; examples TBD |
+| E — Full docs site rewrite | **Done** — `docs/index.html` + `docs/api.html` Peer-first rewrite; all 8 examples migrated |
 | Native NAPI `Reference<Peer>` table | Deferred; `===` via packages/core `PeerRegistry` |
 
 ---
@@ -753,7 +753,7 @@ Phases are sequential for release; work within a phase can parallelize.
 - [x] `===` same-instance guarantee — as-built via the packages/core `PeerRegistry` (one internal peer-change subscription maintains it, incl. receiver-only `msg.from`); the native NAPI `Reference` instance table is **deferred** (revisit if non-TS NAPI consumers need object identity)
 - [x] `Node::peer(query, wait_ms)`, `peers() -> Vec<Peer>` (projected views); ambiguity → `AmbiguousPeer` listing candidates
 - [x] Peer-selector sweep: core strings accept ULID / name / hostname / IP / tailscale id / generation-checked `{tsId}:{gen}` refs across `send` / `send_typed` / `ping` / `open_tcp` / `connect_quic` / `resolve_peer_ip` / file transfer; JS `PeerLike` on send/ping/openTcp/connectQuic/fileTransfer + net/quic/dgram/ws namespaces
-- [ ] `PeerLike` sugar on the HTTP **proxy** surface (core resolver already accepts refs/queries as strings; only the typed JS wrapper is missing)
+- [x] HTTP **proxy** surface: N/A — `NapiProxyConfig` carries no peer-addressed parameter (a proxy forwards a mesh TLS listen port to a *local* target), so there is nothing to sweep
 - [x] Events carry peer state/handles incl. final-state `left`; `identity` event added; `ws_connected` / `ws_disconnected` type strings kept (§6.4)
 - [x] Inbound messages: `from` is an interned `Peer` at the JS layer; core carries the WhoIs-verified tailscale id (§7.5)
 - [x] TS types for `MeshNode`; `resolvePeerId` marked `@deprecated`
@@ -761,14 +761,14 @@ Phases are sequential for release; work within a phase can parallelize.
 - [x] Tauri plugin: serializable peer views (`peerRef`/`generation`, honest nullability) + commands accept `ref` via the shared resolver; guest-js types mirror `PeerEventJs` incl. `identity`
 - [x] CLI + TUI migrated (resolve.rs query resolution; TUI peer tables keyed by tailscale id)
 
-### Phase C — Eager identity (default on) — **Done except jitter + integration test**
+### Phase C — Eager identity (default on) — **Done**
 
 - [x] On L3 joined + online: background `ensure_identity` (WS hello), one-shot per entry (§8.1)
 - [x] `eagerIdentity` option (default `true`; `eager_identity_concurrency` knob)
 - [x] Concurrency cap (semaphore, default 4) + reconnect backoff reuse
-- [ ] Per-peer **jitter** on eager dials (cap exists; no jitter yet — startup dials are staggered only by the semaphore)
+- [x] Per-peer jitter on eager dials — a hardcoded hash-based stagger already existed; now a configurable `PeerRegistryOptions.eager_identity_jitter_ms` knob (default 250, `0` disables), applied before semaphore acquire so idle waits never hold a dial slot, with a determinism unit test
 - [x] No redial after idle reap: identity survives WS close; re-hello emits no duplicate `identity` (unit-tested, e23d756)
-- [ ] Integration test: two real nodes, no app `send`, both observe non-null `deviceId` (unit tests cover eager on/off; no tsnet-level eager test — pair-harness `warm_up` sends traffic, so it does not prove eagerness)
+- [x] Integration test: `tests/integration_eager_identity.rs` — no-warm-up pair (`PairOpts.warm_up = false`), zero app sends, each side learns the counterpart's real ULID (asserted against the peer's actual local `device_id`, never the tailscale id) within 45s; `identity` fires ≤ 1 per side
 
 ### Phase D — Optional hostinfo advertisement — **Not started** (deliberately deferred; not required for 0.6, §16.5)
 
@@ -777,11 +777,11 @@ Phases are sequential for release; work within a phase can parallelize.
 - [ ] Registry adopts hint; hello confirms
 - [ ] Only if Phase C metrics still show long `deviceId === null` windows
 
-### Phase E — Docs & examples — **Partially done** (examples TBD)
+### Phase E — Docs & examples — **Done**
 
 - [x] Rewrite Getting Started around `Peer` only (`docs/index.html`)
 - [x] Move id fields to “Persistence & debugging” (`docs/index.html` Peers section + `docs/api.html`)
-- [ ] Update chat / playground / discovery / quic examples
+- [x] Update examples — all 8 audited: chat / discovery / netcat / quic-streams / ws-chat-over-mesh / express-over-mesh / playground migrated to Peer-first (also fixed two latent runtime bugs: `Peer` class handles JSON-serializing to `{}` in express-over-mesh's `/api/peers`, and playground's `deviceId`-keyed peer cache never matching the Tailscale-keyed `msg.from`); shared-state already clean
 - [x] CHANGELOG unreleased breaking notes (0.6.0 release notes at ship time)
 
 ---

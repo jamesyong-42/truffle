@@ -71,11 +71,23 @@ export interface NodeStateEvent {
 // ─── Peers ──────────────────────────────────────────────────────────────
 
 export interface Peer {
-  /** Stable per-device ULID from the remote node. Primary key (RFC 017). */
-  deviceId: string;
-  /** Human-readable device name from the remote node. */
-  deviceName: string;
-  /** Tailscale stable ID. Escape hatch; most code should use `deviceId`. */
+  /**
+   * Stable process-local handle token `{tailscaleId}:{generation}` (RFC 022).
+   * The renderer's primary key for peer lists and the routing token it passes
+   * back to ping / sendMessage / sendFile — never `deviceId`, which is a
+   * nullable ULID.
+   */
+  peerRef: string;
+  /** Best label for UI (identity name → hostname slug → short id). Always set. */
+  displayName: string;
+  /**
+   * Durable ULID once the peer's hello is seen; null until then (RFC 022).
+   * Persistence / debug only — not a routing key.
+   */
+  deviceId: string | null;
+  /** Human-readable device name from the peer's hello, if known. */
+  deviceName: string | null;
+  /** Tailscale stable ID. Advanced / diagnostics. */
   tailscaleId: string;
   ip: string;
   online: boolean;
@@ -90,11 +102,19 @@ export type PeerEventType =
   | 'left'
   | 'ws_connected'
   | 'ws_disconnected'
-  | 'updated';
+  | 'updated'
+  /** The peer's hello landed and its durable `deviceId` is now known (RFC 022). */
+  | 'identity';
 
 export interface PeerEvent {
   eventType: PeerEventType;
+  /**
+   * Tailscale routing key of the affected peer (RFC 022) — not a ULID.
+   * Prefer `peer.peerRef` for matching; this is the fallback when `peer` is
+   * absent.
+   */
   peerId: string;
+  /** Full peer view; present for every peer-scoped event, including `left`. */
   peer?: Peer;
 }
 
@@ -116,11 +136,14 @@ export interface HealthInfo {
 // ─── Messaging (chat namespace) ─────────────────────────────────────────
 
 export interface ChatMessage {
-  /** Sender's stable per-device ULID (RFC 017 `deviceId`). */
+  /**
+   * Sender key: the connection's WhoIs-verified Tailscale routing id
+   * (RFC 022 §7.5), or `'__self__'` for the local echo. Used only to tell
+   * self from others — not a durable ULID.
+   */
   from: string;
-  /** Human-readable sender `deviceName`, resolved by the main process
-   *  from the peer cache at receive time. Falls back to the raw
-   *  `deviceId` if the peer is not yet known. */
+  /** Human-readable sender label (the peer's `displayName`), resolved by the
+   *  main process from `msg.from`. Falls back to the routing id if unknown. */
   fromName: string;
   /** Message body. */
   text: string;

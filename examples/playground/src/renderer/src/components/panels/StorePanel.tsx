@@ -69,8 +69,11 @@ export function StorePanel() {
   };
 
   const peerName = (deviceId: string): string => {
+    // Store slices are keyed by durable ULID (RFC 022 §10), so matching a
+    // slice owner on the peer's deviceId is correct here — the one place a
+    // ULID is the right key. It may be null until that peer's hello lands.
     const match = peers.find((p) => p.deviceId === deviceId);
-    return match?.deviceName ?? deviceId.slice(0, 10);
+    return match?.displayName ?? deviceId.slice(0, 10);
   };
 
   const localUpdatedAgo = localSlice

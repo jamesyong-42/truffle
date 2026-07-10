@@ -155,6 +155,14 @@ pub struct PairOpts {
     pub app_id: String,
     pub rendezvous_timeout: Duration,
     pub sidecar_path: PathBuf,
+    /// When true (default), `make_truffle_pair*` fires `_pair_warmup` messages
+    /// after rendezvous to force a WS + hello exchange, so tests can address
+    /// peers by ULID immediately. Set false to observe RFC 022 §8 *eager*
+    /// identity: with warm-up off, no application traffic is sent at all, so a
+    /// non-null `device_id` can only come from the session dialing the bus on
+    /// its own. Ignored by the Layer-3-only [`make_pair_of_nodes_with`] path,
+    /// which never warms up.
+    pub warm_up: bool,
 }
 
 impl Default for PairOpts {
@@ -170,6 +178,7 @@ impl Default for PairOpts {
             app_id: format!("{TEST_APP_ID}-{short}"),
             rendezvous_timeout: RENDEZVOUS_TIMEOUT,
             sidecar_path: default_sidecar_path(),
+            warm_up: true,
         }
     }
 }
@@ -398,6 +407,26 @@ pub async fn make_truffle_pair(authkey: &str) -> TrufflePair {
     make_truffle_pair_with(authkey, PairOpts::default()).await
 }
 
+/// Create a TrufflePair that skips the post-rendezvous `_pair_warmup` message
+/// exchange (`warm_up: false`).
+///
+/// Rendezvous (Layer-3 mutual visibility) still runs, but **no application
+/// traffic is sent**, so any `device_id` a side later learns must come from
+/// RFC 022 §8 *eager identity* — the session dialing the envelope bus on its
+/// own to exchange the RFC 017 hello. Used by
+/// `tests/integration_eager_identity.rs` to prove eagerness end-to-end; the
+/// default [`make_truffle_pair`] warm-up would mask it by sending traffic.
+pub async fn make_truffle_pair_no_warmup(authkey: &str) -> TrufflePair {
+    make_truffle_pair_with(
+        authkey,
+        PairOpts {
+            warm_up: false,
+            ..PairOpts::default()
+        },
+    )
+    .await
+}
+
 /// Create a TrufflePair with custom options. Uses WS ports 9417/9418 by
 /// default — each Node listens on its own tailnet IP so there is no port
 /// conflict between the two.
@@ -465,18 +494,30 @@ pub async fn make_truffle_pair_with(authkey: &str, opts: PairOpts) -> TrufflePai
     // Layer-3 peers are visible, but the Session layer hasn't received the
     // other side's hello yet — so `resolve_peer_id(<ULID>)` would still fail.
     // Force a WS + hello exchange so tests can address each other by ULID.
-    warm_up_pair(
-        &alpha,
-        &beta,
-        &alpha_name,
-        &beta_name,
-        opts.rendezvous_timeout,
-    )
-    .await;
+    //
+    // Eager-identity tests (RFC 022 §8) turn this OFF via `warm_up: false`: a
+    // learned `device_id` must then come only from the session's own eager
+    // bus dial, never from warm-up app traffic. Rendezvous above still ran, so
+    // the peers are mutually visible at Layer 3 either way.
+    if opts.warm_up {
+        warm_up_pair(
+            &alpha,
+            &beta,
+            &alpha_name,
+            &beta_name,
+            opts.rendezvous_timeout,
+        )
+        .await;
 
-    eprintln!(
-        "[truffle-pair] warm-up complete — alpha_device_id={alpha_id} beta_device_id={beta_id}"
-    );
+        eprintln!(
+            "[truffle-pair] warm-up complete — alpha_device_id={alpha_id} beta_device_id={beta_id}"
+        );
+    } else {
+        eprintln!(
+            "[truffle-pair] warm-up SKIPPED (eager-identity mode, no app sends) — \
+             alpha_device_id={alpha_id} beta_device_id={beta_id}"
+        );
+    }
 
     TrufflePair {
         alpha,

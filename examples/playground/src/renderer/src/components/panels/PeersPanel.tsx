@@ -23,7 +23,7 @@ function connectionLabel(peer: Peer): string {
 export function PeersPanel() {
   const { peers, refresh } = usePeers();
   const { ping } = useHealth();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedRef, setSelectedRef] = useState<string | null>(null);
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pingError, setPingError] = useState<string | null>(null);
   const [pinging, setPinging] = useState(false);
@@ -34,12 +34,12 @@ export function PeersPanel() {
         const sa = peerSortKey(a);
         const sb = peerSortKey(b);
         if (sa !== sb) return sa - sb;
-        return a.deviceName.localeCompare(b.deviceName);
+        return a.displayName.localeCompare(b.displayName);
       }),
     [peers],
   );
 
-  const selected = sorted.find((p) => p.deviceId === selectedId) ?? null;
+  const selected = sorted.find((p) => p.peerRef === selectedRef) ?? null;
 
   const handlePing = async () => {
     if (!selected) return;
@@ -47,7 +47,7 @@ export function PeersPanel() {
     setPingError(null);
     setPinging(true);
     try {
-      const result = await ping(selected.deviceId);
+      const result = await ping(selected.peerRef);
       setPingResult(result);
     } catch (err) {
       setPingError(err instanceof Error ? err.message : String(err));
@@ -57,7 +57,7 @@ export function PeersPanel() {
   };
 
   const select = (peer: Peer) => {
-    setSelectedId(peer.deviceId);
+    setSelectedRef(peer.peerRef);
     setPingResult(null);
     setPingError(null);
   };
@@ -84,9 +84,9 @@ export function PeersPanel() {
         ) : (
           <ul className="divide-y divide-[var(--color-border-subtle)]">
             {sorted.map((peer) => {
-              const isSelected = peer.deviceId === selectedId;
+              const isSelected = peer.peerRef === selectedRef;
               return (
-                <li key={peer.deviceId}>
+                <li key={peer.peerRef}>
                   <button
                     type="button"
                     onClick={() => select(peer)}
@@ -115,12 +115,12 @@ export function PeersPanel() {
       {selected ? (
         <section
           className="border-t border-[var(--color-border-subtle)] bg-[var(--color-surface)] p-4"
-          aria-label={`Peer details: ${selected.deviceName}`}
+          aria-label={`Peer details: ${selected.displayName}`}
         >
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-baseline gap-2">
               <h3 className="text-[13px] font-semibold text-[var(--color-text-primary)]">
-                {selected.deviceName}
+                {selected.displayName}
               </h3>
               <Badge
                 variant={
@@ -147,7 +147,7 @@ export function PeersPanel() {
           <dl className="grid grid-cols-[90px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11.5px]">
             <dt className="text-[var(--color-text-muted)]">Device ID</dt>
             <dd className="mono truncate text-[var(--color-text-code)] selectable">
-              {selected.deviceId}
+              {selected.deviceId ?? '(identity pending)'}
             </dd>
             <dt className="text-[var(--color-text-muted)]">IP</dt>
             <dd className="mono text-[var(--color-text-code)]">

@@ -16,7 +16,7 @@
  * peers. Set NAME to pick your display name.
  */
 
-import { createMeshNode, type NapiNamespacedMessage, type NapiPeerEvent } from '@vibecook/truffle';
+import { createMeshNode, type MeshNamespacedMessage, type MeshPeerEvent } from '@vibecook/truffle';
 import { createInterface } from 'readline';
 
 const CHAT_NAMESPACE = 'chat';
@@ -36,24 +36,27 @@ const mesh = await createMeshNode({
   onAuthRequired: (url) => {
     console.log(`Auth required - visit: ${url}`);
   },
-  onPeerChange: (event: NapiPeerEvent) => {
-    switch (event.eventType) {
+  onPeerChange: (event: MeshPeerEvent) => {
+    switch (event.type) {
       case 'joined':
-        console.log(`* ${event.peer?.deviceName ?? event.peerId} joined`);
+        console.log(`* ${event.peer?.displayName ?? event.peerId} joined`);
         rl.prompt();
         break;
       case 'left':
-        console.log(`* ${event.peerId} left`);
+        console.log(`* ${event.peer?.displayName ?? event.peerId} left`);
         rl.prompt();
         break;
     }
   },
 });
 
-mesh.onMessage(CHAT_NAMESPACE, (msg: NapiNamespacedMessage) => {
+mesh.onMessage(CHAT_NAMESPACE, (msg: MeshNamespacedMessage) => {
   const payload = msg.payload as ChatPayload | null;
   if (!payload || typeof payload.text !== 'string') return;
-  console.log(`\n[${payload.name ?? msg.from}]: ${payload.text}`);
+  // `msg.from` is a Peer handle once the sender is known (hello precedes bus
+  // traffic) or the raw routing key string otherwise — guard before use.
+  const sender = typeof msg.from === 'string' ? msg.from : msg.from.displayName;
+  console.log(`\n[${payload.name ?? sender}]: ${payload.text}`);
   rl.prompt();
 });
 

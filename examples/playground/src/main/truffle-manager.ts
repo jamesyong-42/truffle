@@ -13,13 +13,12 @@ import { basename, join } from 'node:path';
 import { app, shell } from 'electron';
 import {
   createMeshNode,
-  type NapiNode,
+  type MeshNode,
+  type MeshPeerEvent,
+  type MeshNamespacedMessage,
+  type Peer as MeshPeer,
   type NapiNodeIdentity,
   type NapiSyncedStore,
-  type NapiFileTransfer,
-  type NapiPeer,
-  type NapiPeerEvent,
-  type NapiNamespacedMessage,
   type NapiFileOffer,
   type NapiOfferResponder,
   type NapiFileTransferEvent,
@@ -27,6 +26,13 @@ import {
   type NapiSlice,
   type NapiTransferResult,
 } from '@vibecook/truffle';
+
+/**
+ * The peer-taking file-transfer handle `createMeshNode()` returns: its
+ * `sendFile` / `pullFile` accept a `Peer` or query string (RFC 022 §6.3).
+ * Not exported by name, so derive it from the node type.
+ */
+type MeshFileTransfer = ReturnType<MeshNode['fileTransfer']>;
 
 import type {
   StartConfig,
@@ -100,13 +106,13 @@ const HEALTH_POLL_INTERVAL_MS = 30_000;
 
 export class TruffleManager extends EventEmitter {
   /** The underlying truffle node. Undefined until `start()` succeeds. */
-  private node: NapiNode | undefined;
+  private node: MeshNode | undefined;
 
   /** The playground SyncedStore. Undefined until `start()` succeeds. */
   private store: NapiSyncedStore | undefined;
 
   /** The file transfer handle. Undefined until `start()` succeeds. */
-  private fileTransfer: NapiFileTransfer | undefined;
+  private fileTransfer: MeshFileTransfer | undefined;
 
   /** Lifecycle state, mirrored on every transition to the renderer. */
   private state: NodeState = 'idle';
@@ -119,9 +125,6 @@ export class TruffleManager extends EventEmitter {
 
   /** Authoritative local slice of the playground SyncedStore. */
   private localKv: Record<string, string> = {};
-
-  /** Latest known peers, used to resolve `fromName` on incoming messages. */
-  private peerCache: Map<string, NapiPeer> = new Map();
 
   /** Interval handle for the periodic health poll. */
   private healthPollHandle: NodeJS.Timeout | undefined;
@@ -187,13 +190,6 @@ export class TruffleManager extends EventEmitter {
       // Seed the local identity.
       const localInfo = node.getLocalInfo();
       this.identity = toNodeIdentity(localInfo);
-
-      // Seed peer cache so `fromName` resolution works immediately.
-      // Key by RFC 017 `deviceId` (ULID), not the Tailscale stable ID.
-      const initialPeers = await node.getPeers();
-      for (const peer of initialPeers) {
-        this.peerCache.set(peer.deviceId, peer);
-      }
 
       // Subscribe to chat messages.
       node.onMessage(CHAT_NAMESPACE, (msg) => {
@@ -268,19 +264,12 @@ export class TruffleManager extends EventEmitter {
   async getPeers(): Promise<Peer[]> {
     const node = this.requireNode();
     const peers = await node.getPeers();
-    // Refresh the cache so the latest info is available for fromName lookups.
-    // Cache key is `deviceId` (RFC 017 ULID) — the same key used by
-    // `NapiNamespacedMessage.from` and incoming peer events.
-    this.peerCache.clear();
-    for (const peer of peers) {
-      this.peerCache.set(peer.deviceId, peer);
-    }
     return peers.map(toPeer);
   }
 
-  async ping(peerId: string): Promise<PingResult> {
+  async ping(peerRef: string): Promise<PingResult> {
     const node = this.requireNode();
-    const result = await node.ping(peerId);
+    const result = await node.ping(peerRef);
     const out: PingResult = {
       latencyMs: result.latencyMs,
       connection: result.connection,
@@ -297,21 +286,14 @@ export class TruffleManager extends EventEmitter {
     return toHealthInfo(info);
   }
 
-  async resolvePeerId(nameOrId: string): Promise<string> {
-    const node = this.requireNode();
-    return node.resolvePeerId(nameOrId);
-  }
-
   // ─── Chat ─────────────────────────────────────────────────────────────
 
-  async sendMessage(peerId: string, text: string): Promise<void> {
+  async sendMessage(peerRef: string, text: string): Promise<void> {
     const node = this.requireNode();
     const payload: ChatWirePayload = { text, ts: Date.now() };
-    await node.send(
-      peerId,
-      CHAT_NAMESPACE,
-      Buffer.from(JSON.stringify(payload)),
-    );
+    // `peerRef` is the handle token minted by getPeers()/peer events; send()
+    // takes it (or any peer query) as a PeerLike — no id-picking (RFC 022).
+    await node.send(peerRef, CHAT_NAMESPACE, Buffer.from(JSON.stringify(payload)));
   }
 
   async broadcast(text: string): Promise<void> {
@@ -359,9 +341,9 @@ export class TruffleManager extends EventEmitter {
 
   // ─── File Transfer ────────────────────────────────────────────────────
 
-  async sendFile(peerId: string, localPath: string): Promise<TransferResult> {
+  async sendFile(peerRef: string, localPath: string): Promise<TransferResult> {
     const ft = this.requireFileTransfer();
-    const result = await ft.sendFile(peerId, localPath, basename(localPath));
+    const result = await ft.sendFile(peerRef, localPath, basename(localPath));
     return toTransferResult(result);
   }
 
@@ -385,37 +367,29 @@ export class TruffleManager extends EventEmitter {
 
   // ─── Internal event handlers ──────────────────────────────────────────
 
-  private handlePeerChange(event: NapiPeerEvent): void {
+  private handlePeerChange(event: MeshPeerEvent): void {
     // `auth_required` is delivered separately via `onAuthRequired`. Skip it.
-    if (event.eventType === 'auth_required') {
+    if (event.type === 'auth_required') {
       return;
     }
-
-    // Maintain the peer cache so subsequent chat messages can resolve
-    // fromName without a round-trip to getPeers().
-    if (event.peer) {
-      this.peerCache.set(event.peerId, event.peer);
-    } else if (event.eventType === 'left') {
-      this.peerCache.delete(event.peerId);
-    }
-
     const mapped = toPeerEvent(event);
     if (!mapped) return;
     this.emit('peerEvent', mapped);
   }
 
-  private handleChatMessage(msg: NapiNamespacedMessage): void {
+  private handleChatMessage(msg: MeshNamespacedMessage): void {
     // Payload was JSON-encoded by the sender in `sendMessage()`/`broadcast()`.
     const payload = msg.payload as ChatWirePayload | null | undefined;
     if (!payload || typeof payload.text !== 'string') {
       return;
     }
-    // `msg.from` is the sender's `deviceId` (ULID). Resolve it to the
-    // human-readable `deviceName` via the peer cache; fall back to the
-    // raw ULID if we don't know the peer yet (first-ever hello race).
-    const fromName = this.peerCache.get(msg.from)?.deviceName ?? msg.from;
+    // `msg.from` is an interned Peer handle once the sender is known (hello
+    // precedes bus traffic, RFC 022 §6.5), else the raw routing key string.
+    // Read its displayName straight off the handle — no id-keyed cache.
+    const from = typeof msg.from === 'string' ? msg.from : msg.from.tailscaleId;
+    const fromName = typeof msg.from === 'string' ? msg.from : msg.from.displayName;
     const chat: ChatMessage = {
-      from: msg.from,
+      from,
       fromName,
       text: payload.text,
       ts: typeof payload.ts === 'number' ? payload.ts : (msg.timestamp ?? Date.now()),
@@ -559,7 +533,6 @@ export class TruffleManager extends EventEmitter {
     this.node = undefined;
     this.identity = undefined;
     this.offers.clear();
-    this.peerCache.clear();
     this.localKv = {};
 
     if (store) {
@@ -570,7 +543,7 @@ export class TruffleManager extends EventEmitter {
     }
   }
 
-  private requireNode(): NapiNode {
+  private requireNode(): MeshNode {
     if (!this.node) {
       throw new Error('Node not started');
     }
@@ -584,7 +557,7 @@ export class TruffleManager extends EventEmitter {
     return this.store;
   }
 
-  private requireFileTransfer(): NapiFileTransfer {
+  private requireFileTransfer(): MeshFileTransfer {
     if (!this.fileTransfer) {
       throw new Error('Node not started');
     }
@@ -614,8 +587,10 @@ function toNodeIdentity(info: NapiNodeIdentity): NodeIdentity {
   return out;
 }
 
-function toPeer(peer: NapiPeer): Peer {
+function toPeer(peer: MeshPeer): Peer {
   const out: Peer = {
+    peerRef: peer.ref,
+    displayName: peer.displayName,
     deviceId: peer.deviceId,
     deviceName: peer.deviceName,
     tailscaleId: peer.tailscaleId,
@@ -624,25 +599,30 @@ function toPeer(peer: NapiPeer): Peer {
     wsConnected: peer.wsConnected,
     connectionType: peer.connectionType,
   };
-  if (peer.os !== undefined) out.os = peer.os;
-  if (peer.lastSeen !== undefined) out.lastSeen = peer.lastSeen;
+  // The handle getters return `string | null | undefined`; keep the optional
+  // IPC fields absent rather than null.
+  if (peer.os != null) out.os = peer.os;
+  if (peer.lastSeen != null) out.lastSeen = peer.lastSeen;
   return out;
 }
 
-function toPeerEvent(event: NapiPeerEvent): PeerEvent | null {
-  // Narrow the stringly-typed NAPI `eventType` to our typed union.
+function toPeerEvent(event: MeshPeerEvent): PeerEvent | null {
+  // Narrow the stringly-typed event `type` to our typed union. `identity` is
+  // forwarded (as its own kind) so the renderer refreshes a peer's deviceId
+  // the moment its hello lands (RFC 022 §6.4); `auth` is handled elsewhere.
   const allowed: readonly PeerEventType[] = [
     'joined',
     'left',
     'ws_connected',
     'ws_disconnected',
     'updated',
+    'identity',
   ];
-  if (!allowed.includes(event.eventType as PeerEventType)) {
+  if (!allowed.includes(event.type as PeerEventType)) {
     return null;
   }
   const out: PeerEvent = {
-    eventType: event.eventType as PeerEventType,
+    eventType: event.type as PeerEventType,
     peerId: event.peerId,
   };
   if (event.peer) out.peer = toPeer(event.peer);

@@ -37,7 +37,7 @@ export interface TransferState {
 interface UseFileTransferResult {
   transfers: TransferState[];
   pendingOffers: FileOffer[];
-  sendFile: (peerId: string, localPath: string) => Promise<TransferResult>;
+  sendFile: (peerRef: string, localPath: string) => Promise<TransferResult>;
   accept: (token: string, savePath: string) => Promise<void>;
   reject: (token: string, reason?: string) => Promise<void>;
 }
@@ -153,8 +153,8 @@ export function useFileTransfer(): UseFileTransferResult {
   }, []);
 
   const sendFile = useCallback(
-    async (peerId: string, localPath: string): Promise<TransferResult> => {
-      return window.truffle.sendFile(peerId, localPath);
+    async (peerRef: string, localPath: string): Promise<TransferResult> => {
+      return window.truffle.sendFile(peerRef, localPath);
     },
     [],
   );
