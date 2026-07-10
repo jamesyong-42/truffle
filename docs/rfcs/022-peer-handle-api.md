@@ -737,45 +737,47 @@ Mixed-version meshes need no flag day.
 
 Phases are sequential for release; work within a phase can parallelize.
 
-### Phase A — Registry handles + honest projection
+### Phase A — Registry handles + honest projection — **Done** (e67fbdd + f1784a0 + e23d756)
 
-- [ ] `PeerInner` / dual-index (`by_tailscale`, `by_device`) in `PeerRegistry`
-- [ ] Stable `PeerHandle` per live entry; `generation` + `PeerRef`
-- [ ] §7.7 lifecycle: ghost retire, duplicate-ULID first-wins, rotation re-emit
-- [ ] Projection: `device_id: Option`; never fallback to Tailscale id; drop legacy `Peer.id`
-- [ ] `display_name` derivation (strip `truffle-{appId}-` prefix)
-- [ ] Message path: attribute `from` by connection `tailscale_id` (§7.5)
-- [ ] Unit tests for invariants I1–I7
+- [x] Dual-index (`peers` by tailscale id, `by_device`) in `PeerRegistry` — as-built: `PeerState` carries `generation`, no separate `PeerInner` struct
+- [x] Stable handle per live entry; `generation` + `peer_ref` — as-built: interned `Peer` instances live in the packages/core `PeerRegistry`; Rust core projects `peer_ref`/`generation` fields
+- [x] §7.7 lifecycle: ghost retire, duplicate-ULID first-wins, rotation re-emit (unit-tested)
+- [x] Projection: `device_id: Option`; never fallback to Tailscale id; legacy `Peer.id` dropped
+- [x] `display_name` derivation (strip `truffle-{appId}-` prefix)
+- [x] Message path: attribute `from` by connection `tailscale_id` (§7.5) — `by_device` never consulted for attribution; I1 also enforced in `validate_hello` (e23d756)
+- [x] Unit tests for invariants I1–I7 (incl. first-wins, ghost retire, generation bump, PeerGone)
 - [x] Update RFC 017 §15 note: “superseded by RFC 022” (done alongside this revision)
 
-### Phase B — Handle-first Node + bindings API
+### Phase B — Handle-first Node + bindings API — **Done with one deferral** (e67fbdd + f1784a0 + 548b939 + e23d756)
 
-- [ ] **Prototype first:** NAPI `Peer` class + `Reference` instance table with the `===` guarantee (§9.1 — riskiest item)
-- [ ] `Node::peer(query, wait)`, `get_peers() -> Vec<PeerHandle>`; ambiguity → error listing candidates
-- [ ] Sweep ALL `&str` peer params: `send` / `send_typed` / `ping` / `open_tcp` / `connect_quic` / `resolve_peer_ip`, `FileTransfer::send_file` / `offer_channel`, proxy target, UDP `send_to`
-- [ ] Events carry handles; add `identity` event; keep `ws_connected` / `ws_disconnected` type strings (§6.4)
-- [ ] Inbound messages: `from: PeerHandle`
-- [ ] TS types for `MeshNode`; deprecate `resolvePeerId`
-- [ ] RFC 021 wrappers where landed: `net.connect({ peer })`, `quic.connect(peer, port)` — if RFC 021 Phases 2–3 have not shipped yet, ship `PeerLike` on `openTcp` / `connectQuic` here and fold the `net.*` / `quic.*` sugar into RFC 021’s own plan
-- [ ] Tauri plugin: serializable peer views + `ref`-keyed commands (§9.3)
-- [ ] CLI + TUI: migrate the 13 commands and the TUI peer tables/maps to handles / `ref` (queries via `Node::peer`, §9.4)
+- [x] `===` same-instance guarantee — as-built via the packages/core `PeerRegistry` (one internal peer-change subscription maintains it, incl. receiver-only `msg.from`); the native NAPI `Reference` instance table is **deferred** (revisit if non-TS NAPI consumers need object identity)
+- [x] `Node::peer(query, wait_ms)`, `peers() -> Vec<Peer>` (projected views); ambiguity → `AmbiguousPeer` listing candidates
+- [x] Peer-selector sweep: core strings accept ULID / name / hostname / IP / tailscale id / generation-checked `{tsId}:{gen}` refs across `send` / `send_typed` / `ping` / `open_tcp` / `connect_quic` / `resolve_peer_ip` / file transfer; JS `PeerLike` on send/ping/openTcp/connectQuic/fileTransfer + net/quic/dgram/ws namespaces
+- [ ] `PeerLike` sugar on the HTTP **proxy** surface (core resolver already accepts refs/queries as strings; only the typed JS wrapper is missing)
+- [x] Events carry peer state/handles incl. final-state `left`; `identity` event added; `ws_connected` / `ws_disconnected` type strings kept (§6.4)
+- [x] Inbound messages: `from` is an interned `Peer` at the JS layer; core carries the WhoIs-verified tailscale id (§7.5)
+- [x] TS types for `MeshNode`; `resolvePeerId` marked `@deprecated`
+- [x] `PeerLike` on `net.connect({ peer })` / `quic.connect(peer, port)` wrappers
+- [x] Tauri plugin: serializable peer views (`peerRef`/`generation`, honest nullability) + commands accept `ref` via the shared resolver; guest-js types mirror `PeerEventJs` incl. `identity`
+- [x] CLI + TUI migrated (resolve.rs query resolution; TUI peer tables keyed by tailscale id)
 
-### Phase C — Eager identity (default on)
+### Phase C — Eager identity (default on) — **Done except jitter + integration test**
 
-- [ ] On L3 joined + online: background `ensure_identity` (WS hello), one-shot per entry (§8.1)
-- [ ] `eagerIdentity` option (default `true`)
-- [ ] Concurrency cap + per-peer jitter; reuse existing reconnect backoff for failures
-- [ ] No redial after idle reap: post-hello WS close keeps `deviceId`, fires no extra `identity`
-- [ ] Integration test: two nodes, no app `send`, both observe non-null `deviceId`
+- [x] On L3 joined + online: background `ensure_identity` (WS hello), one-shot per entry (§8.1)
+- [x] `eagerIdentity` option (default `true`; `eager_identity_concurrency` knob)
+- [x] Concurrency cap (semaphore, default 4) + reconnect backoff reuse
+- [ ] Per-peer **jitter** on eager dials (cap exists; no jitter yet — startup dials are staggered only by the semaphore)
+- [x] No redial after idle reap: identity survives WS close; re-hello emits no duplicate `identity` (unit-tested, e23d756)
+- [ ] Integration test: two real nodes, no app `send`, both observe non-null `deviceId` (unit tests cover eager on/off; no tsnet-level eager test — pair-harness `warm_up` sends traffic, so it does not prove eagerness)
 
-### Phase D — Optional hostinfo advertisement
+### Phase D — Optional hostinfo advertisement — **Not started** (deliberately deferred; not required for 0.6, §16.5)
 
 - [ ] Sidecar stamps versioned app identity into hostinfo/service metadata
 - [ ] L3 parse → identity **hint** on `NetworkPeer`
 - [ ] Registry adopts hint; hello confirms
 - [ ] Only if Phase C metrics still show long `deviceId === null` windows
 
-### Phase E — Docs & examples
+### Phase E — Docs & examples — **Partially done** (examples TBD)
 
 - [x] Rewrite Getting Started around `Peer` only (`docs/index.html`)
 - [x] Move id fields to “Persistence & debugging” (`docs/index.html` Peers section + `docs/api.html`)
