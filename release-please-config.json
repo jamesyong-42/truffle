@@ -64,31 +64,6 @@
         },
         {
           "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.optionalDependencies['@vibecook/truffle-sidecar-darwin-arm64']"
-        },
-        {
-          "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.optionalDependencies['@vibecook/truffle-sidecar-darwin-x64']"
-        },
-        {
-          "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.optionalDependencies['@vibecook/truffle-sidecar-linux-arm64']"
-        },
-        {
-          "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.optionalDependencies['@vibecook/truffle-sidecar-linux-x64']"
-        },
-        {
-          "type": "json",
-          "path": "packages/core/package.json",
-          "jsonpath": "$.optionalDependencies['@vibecook/truffle-sidecar-win32-x64']"
-        },
-        {
-          "type": "json",
           "path": "packages/react/package.json",
           "jsonpath": "$.version"
         },
