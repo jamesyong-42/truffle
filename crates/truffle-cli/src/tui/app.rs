@@ -14,27 +14,35 @@ use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
 use crate::config::TruffleConfig;
 use crate::output;
 
-/// Peer info cached for the device panel.
+/// Peer info cached for the device panel (RFC 022).
 ///
-/// `device_id` and `device_name` hold the RFC 017 primary identity (device_id
-/// ULID and user-facing device_name), populated from the remote's hello
-/// envelope. `tailscale_id` is kept as an escape hatch so session-layer events
-/// (`PeerEvent::WsConnected` / `WsDisconnected`) — which key by Tailscale
-/// stable ID — can still look up this cache entry.
+/// Cache rows are keyed by [`Self::tailscale_id`] — the only identifier present
+/// on every peer-scoped event and on message / file-offer attribution
+/// (`msg.from`, `offer.from_peer`). `device_id` is an honest ULID once
+/// identity is learned, otherwise `None` (never a Tailscale fallback).
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
-    /// RFC 017 device_id (ULID) if the hello has been received, otherwise
-    /// the Tailscale stable ID as a pre-hello fallback.
-    pub device_id: String,
-    /// Human-readable device_name from the hello envelope (NOT the
-    /// Tailscale hostname slug).
+    /// Durable ULID once known; `None` until identity is learned.
+    pub device_id: Option<String>,
+    /// Best UI label (`display_name` / device_name from hello).
     pub device_name: String,
-    /// Tailscale stable node ID — used to correlate session-layer
-    /// WsConnected/WsDisconnected events which carry this as their key.
+    /// Tailscale stable node ID — primary cache key and networking route.
     pub tailscale_id: String,
     pub ip: String,
     pub online: bool,
     pub connection: Option<String>,
+}
+
+impl PeerInfo {
+    /// Match an attribution / event id (Tailscale routing key, or ULID).
+    pub fn matches_id(&self, id: &str) -> bool {
+        self.tailscale_id == id || self.device_id.as_deref() == Some(id)
+    }
+
+    /// Selector for `Node::send` / file transfer (always the routing key).
+    pub fn route_id(&self) -> &str {
+        &self.tailscale_id
+    }
 }
 
 /// A single item in the activity feed.

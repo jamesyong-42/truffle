@@ -19,9 +19,9 @@ use truffle_core::Peer;
 /// A successfully resolved target.
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
-    /// The peer's stable device ID (RFC 017 §5.4 ULID), or the Tailscale
-    /// stable ID prior to hello completion. Callers should treat this as
-    /// the `device_id` for addressing purposes.
+    /// Networking route selector for `Node::send` / dial (RFC 022).
+    /// Prefer the Tailscale routing key so it matches message attribution
+    /// (`msg.from`); still accepts ULID queries at resolve time.
     pub peer_id: String,
     /// The display name for the node (the peer's human-readable
     /// `device_name`, NOT the Tailscale hostname slug).
@@ -236,11 +236,10 @@ fn peer_label(peer: &Peer) -> String {
         .unwrap_or_else(|| peer.display_name.clone())
 }
 
-/// String to feed into `Node::send` / dial (prefer published ULID).
+/// String to feed into `Node::send` / dial — Tailscale routing key (RFC 022).
+/// Matches `msg.from` / `offer.from_peer` attribution.
 fn peer_route_id(peer: &Peer) -> String {
-    peer.device_id
-        .clone()
-        .unwrap_or_else(|| peer.tailscale_id.clone())
+    peer.tailscale_id.clone()
 }
 
 #[cfg(test)]
@@ -287,7 +286,8 @@ mod tests {
     fn test_resolve_peer_name() {
         let resolver = NameResolver::new(HashMap::new(), make_peers());
         let result = resolver.resolve("Alice's MacBook").unwrap();
-        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+        // peer_id is the Tailscale routing key used for networking.
+        assert_eq!(result.peer_id, "laptop-ts-001");
         assert_eq!(result.display_name, "Alice's MacBook");
         assert_eq!(result.resolved_via, ResolvedVia::PeerName);
     }
@@ -296,14 +296,16 @@ mod tests {
     fn test_resolve_peer_name_case_insensitive() {
         let resolver = NameResolver::new(HashMap::new(), make_peers());
         let result = resolver.resolve("alice's macbook").unwrap();
-        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+        assert_eq!(result.peer_id, "laptop-ts-001");
     }
 
     #[test]
     fn test_resolve_peer_id() {
         let resolver = NameResolver::new(HashMap::new(), make_peers());
+        // ULID query still resolves; returned route id is Tailscale.
         let result = resolver.resolve("01J4K9M2Z8AB3RNYQPW6H5TC0Y").unwrap();
         assert_eq!(result.display_name, "Prod Server");
+        assert_eq!(result.peer_id, "server-ts-002");
         assert_eq!(result.resolved_via, ResolvedVia::PeerId);
     }
 
@@ -319,7 +321,7 @@ mod tests {
 
         // Tailscale id resolves via the peer-id path.
         let result = resolver.resolve("laptop-ts-001").unwrap();
-        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+        assert_eq!(result.peer_id, "laptop-ts-001");
     }
 
     #[test]
@@ -371,9 +373,8 @@ mod tests {
         });
         let resolver = NameResolver::new(HashMap::new(), peers);
         let result = resolver.resolve("Alice's MacBook").unwrap();
-        // The resolver returns the first match — same device_id as
-        // test_resolve_peer_name uses.
-        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0X");
+        // First match by scan order — routing key of the first peer.
+        assert_eq!(result.peer_id, "laptop-ts-001");
     }
 
     #[test]
@@ -399,8 +400,8 @@ mod tests {
         let resolver = NameResolver::new(HashMap::new(), peers);
         let result = resolver.resolve("01J4K9M2Z8AB3RNYQPW6H5TC0Z").unwrap();
         assert_eq!(result.display_name, "Alice's MacBook");
-        // Specifically the SECOND peer, not the first.
-        assert_eq!(result.peer_id, "01J4K9M2Z8AB3RNYQPW6H5TC0Z");
+        // Second peer's Tailscale routing key.
+        assert_eq!(result.peer_id, "duplicate-ts-003");
         assert_eq!(result.resolved_via, ResolvedVia::PeerId);
     }
 }

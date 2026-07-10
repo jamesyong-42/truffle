@@ -51,8 +51,8 @@ pub async fn execute(args: &str, app: &mut AppState) -> CommandResult {
         text: message.clone(),
     });
 
-    // Send via Node API
-    match messaging::send_message(&*app.node, &peer.device_id, &message).await {
+    // Route by Tailscale id (RFC 022 — matches msg.from attribution).
+    match messaging::send_message(&*app.node, peer.route_id(), &message).await {
         Ok(()) => CommandResult::Handled,
         Err(e) => {
             app.push_item(DisplayItem::System {

@@ -217,11 +217,12 @@ fn handle_event(app: &mut AppState, event: AppEvent) {
             from_name: _,
             text,
         } => {
-            // Resolve peer ID to display name from cache
+            // msg.from is the WhoIs Tailscale id (RFC 022 §7.5) — match cache
+            // by tailscale_id (or ULID if ever passed).
             let display_name = app
                 .peers
                 .iter()
-                .find(|p| p.device_id == from_id)
+                .find(|p| p.matches_id(&from_id))
                 .map(|p| p.device_name.clone())
                 .unwrap_or_else(|| from_id.clone());
 
@@ -602,23 +603,24 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
         PeerEvent::Joined(state) | PeerEvent::Identity(state) | PeerEvent::Updated(state) => {
             let peer_view: truffle_core::Peer = state.clone().into();
             let name = peer_view.display_name.clone();
-            let device_id = peer_view
-                .device_id
-                .clone()
-                .unwrap_or_else(|| peer_view.tailscale_id.clone());
+            // Honest Option — never stuff the Tailscale id into device_id.
+            let device_id = peer_view.device_id.clone();
             let tailscale_id = peer_view.tailscale_id.clone();
             let was_online = app
                 .peers
                 .iter()
-                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+                .find(|p| p.tailscale_id == tailscale_id)
                 .map(|p| p.online);
             if let Some(peer) = app
                 .peers
                 .iter_mut()
-                .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+                .find(|p| p.tailscale_id == tailscale_id)
             {
-                peer.device_id = device_id.clone();
-                peer.tailscale_id = tailscale_id.clone();
+                // Only overwrite device_id when we learned a real ULID; keep a
+                // previously known ULID if this event has no identity yet.
+                if device_id.is_some() {
+                    peer.device_id = device_id;
+                }
                 peer.online = state.online;
                 peer.ip = state.ip.to_string();
                 peer.device_name = name.clone();
@@ -722,14 +724,34 @@ fn handle_peer_event(app: &mut AppState, event: truffle_core::session::PeerEvent
     }
 }
 
+/// Whether this offer's sender is on the auto-accept list.
+///
+/// `offer.from_peer` is the WhoIs Tailscale id (RFC 022 §7.5). The list may
+/// also contain legacy ULID entries from pre-022 configs — accept those too.
+fn auto_accepts_offer(app: &AppState, from_peer: &str) -> bool {
+    if app
+        .config
+        .auto_accept_peers
+        .iter()
+        .any(|id| id == from_peer)
+    {
+        return true;
+    }
+    app.peers.iter().any(|p| {
+        p.tailscale_id == from_peer
+            && p.device_id
+                .as_ref()
+                .is_some_and(|uid| app.config.auto_accept_peers.iter().any(|id| id == uid))
+    })
+}
+
 /// Handle an incoming file offer: show dialog or queue it.
 fn handle_file_offer_received(
     app: &mut AppState,
     offer: truffle_core::file_transfer::types::FileOffer,
     responder: truffle_core::file_transfer::types::OfferResponder,
 ) {
-    // Check if this peer is in the auto-accept list
-    if app.config.auto_accept_peers.contains(&offer.from_peer) {
+    if auto_accepts_offer(app, &offer.from_peer) {
         let save_path = if offer.suggested_path.is_empty() || offer.suggested_path == "." {
             let output_dir = dirs::download_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
@@ -743,7 +765,7 @@ fn handle_file_offer_received(
         let _peer_name = app
             .peers
             .iter()
-            .find(|p| p.device_id == offer.from_peer)
+            .find(|p| p.matches_id(&offer.from_peer))
             .map(|p| p.device_name.clone())
             .unwrap_or_else(|| offer.from_name.clone());
         // Add FileTransfer item so receive progress can update it
@@ -864,11 +886,12 @@ fn handle_transfer_dialog_key(app: &mut AppState, key: KeyEvent) {
                         return;
                     };
                     let save_path = dialog.save_path_input.clone();
+                    // Store the Tailscale routing key (offer attribution).
                     let peer_id = dialog.offer.from_peer.clone();
                     let peer_name = app
                         .peers
                         .iter()
-                        .find(|p| p.device_id == peer_id)
+                        .find(|p| p.matches_id(&peer_id))
                         .map(|p| p.device_name.clone())
                         .unwrap_or_else(|| dialog.offer.from_name.clone());
 
@@ -1068,23 +1091,18 @@ async fn populate_peers(
 ) {
     let current_peers = node.peers().await;
     for peer in current_peers {
-        // RFC 017: prefer device_name / device_id from the hello
-        // RFC 022: device_id may be None until identity is learned.
+        // RFC 022: key by tailscale_id; device_id is honest Option.
         let name = peer.display_name.clone();
-        let device_id = peer
-            .device_id
-            .clone()
-            .unwrap_or_else(|| peer.tailscale_id.clone());
+        let device_id = peer.device_id.clone();
         let tailscale_id = peer.tailscale_id.clone();
-        // Update existing or insert new. Match by tailscale_id or
-        // device_id so pre-identity and post-identity entries reconcile.
         if let Some(existing) = app
             .peers
             .iter_mut()
-            .find(|p| p.tailscale_id == tailscale_id || p.device_id == device_id)
+            .find(|p| p.tailscale_id == tailscale_id)
         {
-            existing.device_id = device_id;
-            existing.tailscale_id = tailscale_id;
+            if device_id.is_some() {
+                existing.device_id = device_id;
+            }
             existing.online = peer.online;
             existing.ip = peer.ip.to_string();
             existing.device_name = name;

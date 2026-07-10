@@ -83,8 +83,9 @@ pub async fn execute(
     });
 
     // Spawn the upload in a background task using the core file transfer API.
+    // Route by Tailscale id (RFC 022 — matches offer.from_peer attribution).
     let node = app.node.clone();
-    let peer_id = peer.device_id.clone();
+    let peer_id = peer.route_id().to_string();
     let local = local_path.clone();
     let remote = remote_path.clone();
     let tx = event_tx.clone();

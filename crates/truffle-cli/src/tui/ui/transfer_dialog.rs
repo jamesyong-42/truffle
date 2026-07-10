@@ -260,11 +260,11 @@ fn render_overwrite_confirm(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(paragraph, dialog_area);
 }
 
-/// Resolve a peer ID to a display name, using the peer cache.
+/// Resolve a peer attribution id (Tailscale / ULID) to a display name.
 fn resolve_peer_name(app: &AppState, peer_id: &str, fallback: &str) -> String {
     app.peers
         .iter()
-        .find(|p| p.device_id == peer_id)
+        .find(|p| p.matches_id(peer_id))
         .map(|p| p.device_name.clone())
         .unwrap_or_else(|| {
             if fallback.is_empty() {

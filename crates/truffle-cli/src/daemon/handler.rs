@@ -548,9 +548,13 @@ async fn handle_peers(id: u64, node: &Arc<Node<TailscaleProvider>>) -> DaemonRes
         .iter()
         .map(|p| {
             serde_json::json!({
-                "device_id": p.device_id,
+                "device_id": p.device_id, // Option — null until identity (RFC 022)
                 "device_name": p.device_name,
+                "display_name": p.display_name,
+                "hostname": p.hostname,
                 "tailscale_id": p.tailscale_id,
+                "peer_ref": p.peer_ref,
+                "generation": p.generation,
                 "ip": p.ip.to_string(),
                 "online": p.online,
                 "ws_connected": p.ws_connected,
