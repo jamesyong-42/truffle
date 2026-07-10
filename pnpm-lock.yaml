@@ -231,6 +231,22 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.21.0
+    optionalDependencies:
+      '@vibecook/truffle-sidecar-darwin-arm64':
+        specifier: 0.6.0
+        version: link:../../npm/truffle-sidecar-darwin-arm64
+      '@vibecook/truffle-sidecar-darwin-x64':
+        specifier: 0.6.0
+        version: link:../../npm/truffle-sidecar-darwin-x64
+      '@vibecook/truffle-sidecar-linux-arm64':
+        specifier: 0.6.0
+        version: link:../../npm/truffle-sidecar-linux-arm64
+      '@vibecook/truffle-sidecar-linux-x64':
+        specifier: 0.6.0
+        version: link:../../npm/truffle-sidecar-linux-x64
+      '@vibecook/truffle-sidecar-win32-x64':
+        specifier: 0.6.0
+        version: link:../../npm/truffle-sidecar-win32-x64
 
   packages/react:
     dependencies:
