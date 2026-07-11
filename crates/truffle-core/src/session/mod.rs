@@ -958,6 +958,17 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
         self.incoming_tx.subscribe()
     }
 
+    /// Test-only: inject an incoming message as if received from a peer,
+    /// so tests can drive the envelope router without a real transport.
+    #[cfg(test)]
+    pub(crate) fn test_inject_incoming(&self, from: &str, data: Vec<u8>) {
+        let _ = self.incoming_tx.send(IncomingMessage {
+            from: from.to_string(),
+            data,
+            received_at: Instant::now(),
+        });
+    }
+
     /// Test-only: stamp a synthetic [`PeerIdentity`] onto an existing
     /// peer in the registry, simulating the effect of a completed hello
     /// exchange without running a real WebSocket handshake. Returns
