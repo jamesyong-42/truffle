@@ -85,6 +85,22 @@ pub struct NamespacedMessage {
     pub timestamp: Option<u64>,
 }
 
+impl NamespacedMessage {
+    /// Decode the payload of a [`send_bytes`](Node::send_bytes) /
+    /// [`broadcast_bytes`](Node::broadcast_bytes) message.
+    ///
+    /// Returns `None` unless `msg_type == "bytes"` with a valid base64
+    /// `data` field.
+    pub fn payload_bytes(&self) -> Option<Vec<u8>> {
+        if self.msg_type != "bytes" {
+            return None;
+        }
+        let s = self.payload.get("data")?.as_str()?;
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(s).ok()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Peer — simplified view for application code
 // ---------------------------------------------------------------------------
@@ -831,18 +847,23 @@ impl<N: NetworkProvider + 'static> Node<N> {
 
     /// Send a namespaced message to a specific peer.
     ///
-    /// The data is wrapped in a Layer 6 [`Envelope`] with the given namespace
-    /// and a `"message"` type, then serialized and sent via the session layer.
-    /// If no WebSocket connection exists, one is lazily established.
+    /// **Deprecated**: the wire representation depends on the *contents* of
+    /// `data` — bytes that parse as UTF-8 JSON are sent as that JSON value
+    /// (`b"123"` → number, `b"null"` → null), anything else becomes a JSON
+    /// array of byte values. Use [`send_json`](Self::send_json) for
+    /// structured payloads or [`send_bytes`](Self::send_bytes) for opaque
+    /// binary data instead.
     ///
     /// Returns [`NodeError::Stopped`] if [`stop`](Self::stop) has been called.
+    #[deprecated(
+        since = "0.7.0",
+        note = "wire type depends on data contents; use send_json or send_bytes"
+    )]
     pub async fn send(&self, peer_id: &str, namespace: &str, data: &[u8]) -> Result<(), NodeError> {
         self.ensure_not_stopped()?;
-        // If the data is valid UTF-8 JSON, parse it into a proper JSON value
-        // so the receiver gets a structured object rather than an array of
-        // byte values.  This is critical for the file transfer protocol and
-        // any other protocol that serializes structs to JSON bytes before
-        // calling send().
+        // Legacy content sniffing, kept for compatibility: if the data is
+        // valid UTF-8 JSON, parse it into a proper JSON value so the receiver
+        // gets a structured object rather than an array of byte values.
         let payload = std::str::from_utf8(data)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -856,6 +877,48 @@ impl<N: NetworkProvider + 'static> Node<N> {
             .await
             .map_err(Self::map_session_send_err)?;
         Ok(())
+    }
+
+    /// Send a JSON payload to a specific peer.
+    ///
+    /// The payload is wrapped in a Layer 6 [`Envelope`] with the given
+    /// namespace and a `"message"` type — subscribers observe it unchanged
+    /// as [`NamespacedMessage::payload`]. If no WebSocket connection
+    /// exists, one is lazily established.
+    pub async fn send_json(
+        &self,
+        peer_id: &str,
+        namespace: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), NodeError> {
+        self.send_typed(peer_id, namespace, "message", payload)
+            .await
+    }
+
+    /// Send opaque binary data to a specific peer.
+    ///
+    /// The bytes travel base64-encoded in a `"bytes"`-typed envelope with
+    /// payload shape `{"encoding":"base64","data":"…"}`; receivers decode
+    /// with [`NamespacedMessage::payload_bytes`]. Unlike the deprecated
+    /// [`send`](Self::send), the wire representation never depends on the
+    /// data's contents.
+    pub async fn send_bytes(
+        &self,
+        peer_id: &str,
+        namespace: &str,
+        data: &[u8],
+    ) -> Result<(), NodeError> {
+        let payload = Self::bytes_payload(data);
+        self.send_typed(peer_id, namespace, "bytes", &payload).await
+    }
+
+    /// Encode opaque bytes as the `"bytes"` envelope payload.
+    fn bytes_payload(data: &[u8]) -> serde_json::Value {
+        use base64::Engine as _;
+        serde_json::json!({
+            "encoding": "base64",
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+        })
     }
 
     /// Send a namespaced message with an explicit `msg_type` and JSON payload.
@@ -907,13 +970,22 @@ impl<N: NetworkProvider + 'static> Node<N> {
 
     /// Broadcast a namespaced message to all connected peers.
     ///
-    /// Only peers with active WebSocket connections receive the broadcast.
-    /// No lazy connections are established.
+    /// **Deprecated**: the wire representation depends on the contents of
+    /// `data` (see [`send`](Self::send)), and delivery failures are
+    /// silently discarded. Use [`broadcast_json`](Self::broadcast_json) or
+    /// [`broadcast_bytes`](Self::broadcast_bytes), which return a
+    /// [`BroadcastReport`](crate::session::BroadcastReport).
+    #[deprecated(
+        since = "0.7.0",
+        note = "wire type depends on data contents and failures are hidden; \
+                use broadcast_json or broadcast_bytes"
+    )]
     pub async fn broadcast(&self, namespace: &str, data: &[u8]) {
         if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
             tracing::debug!("node: broadcast after stop ignored");
             return;
         }
+        // Legacy content sniffing, kept for compatibility (see send()).
         let payload = std::str::from_utf8(data)
             .ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -929,6 +1001,48 @@ impl<N: NetworkProvider + 'static> Node<N> {
                 tracing::error!("node: failed to encode broadcast envelope: {e}");
             }
         }
+    }
+
+    /// Broadcast a JSON payload to all connected peers.
+    ///
+    /// Only peers with an active WebSocket connection receive the message —
+    /// no lazy connections are established. Returns a
+    /// [`BroadcastReport`](crate::session::BroadcastReport): "queued" means
+    /// handed to the peer's connection task, not confirmed delivery.
+    pub async fn broadcast_json(
+        &self,
+        namespace: &str,
+        payload: &serde_json::Value,
+    ) -> Result<crate::session::BroadcastReport, NodeError> {
+        self.broadcast_reported(namespace, "message", payload).await
+    }
+
+    /// Broadcast opaque binary data to all connected peers.
+    ///
+    /// Same wire shape as [`send_bytes`](Self::send_bytes); same report
+    /// semantics as [`broadcast_json`](Self::broadcast_json).
+    pub async fn broadcast_bytes(
+        &self,
+        namespace: &str,
+        data: &[u8],
+    ) -> Result<crate::session::BroadcastReport, NodeError> {
+        let payload = Self::bytes_payload(data);
+        self.broadcast_reported(namespace, "bytes", &payload).await
+    }
+
+    /// Shared broadcast implementation: encode once, report the outcome.
+    /// Unlike the deprecated fire-and-forget path, encode failures and
+    /// stopped-node calls surface as errors.
+    async fn broadcast_reported(
+        &self,
+        namespace: &str,
+        msg_type: &str,
+        payload: &serde_json::Value,
+    ) -> Result<crate::session::BroadcastReport, NodeError> {
+        self.ensure_not_stopped()?;
+        let envelope = Envelope::new(namespace, msg_type, payload.clone()).with_timestamp();
+        let encoded = self.codec.encode(&envelope)?;
+        Ok(self.session.broadcast(&encoded).await)
     }
 
     /// Subscribe to messages in a specific namespace.
@@ -1826,6 +1940,47 @@ mod tests {
 
     // ── Tests ────────────────────────────────────────────────────────
 
+    #[test]
+    fn bytes_payload_roundtrip() {
+        // Deliberately invalid UTF-8: the representation must not depend
+        // on the data's contents.
+        let data = vec![0u8, 159, 146, 150, 255];
+        let payload = Node::<MockNetworkProvider>::bytes_payload(&data);
+        assert_eq!(payload["encoding"], "base64");
+
+        let msg = NamespacedMessage {
+            from: "p".into(),
+            namespace: "ns".into(),
+            msg_type: "bytes".into(),
+            payload,
+            timestamp: None,
+        };
+        assert_eq!(msg.payload_bytes().unwrap(), data);
+    }
+
+    #[test]
+    fn payload_bytes_rejects_other_msg_types() {
+        let msg = NamespacedMessage {
+            from: "p".into(),
+            namespace: "ns".into(),
+            msg_type: "message".into(),
+            payload: json!({"data": "aGk="}),
+            timestamp: None,
+        };
+        assert!(msg.payload_bytes().is_none());
+    }
+
+    #[tokio::test]
+    async fn broadcast_json_reports_zero_peers() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-bj", ws_port).await;
+
+        let report = node.broadcast_json("ns", &json!({"a": 1})).await.unwrap();
+        assert_eq!(report.attempted, 0);
+        assert_eq!(report.queued, 0);
+        assert!(report.failed.is_empty());
+    }
+
     #[tokio::test]
     async fn test_node_builder_creates_node() {
         let ws_port = random_port().await;
@@ -1863,6 +2018,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the legacy send/broadcast contract
     async fn test_node_send_to_unknown_peer_errors() {
         let ws_port = random_port().await;
         let (node, _event_tx, _network) = make_test_node("node-1", ws_port).await;
@@ -1907,6 +2063,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the legacy send/broadcast contract
     async fn test_node_broadcast() {
         let ws_port = random_port().await;
         let (node, _event_tx, _network) = make_test_node("node-1", ws_port).await;
@@ -2046,6 +2203,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the legacy send/broadcast contract
     async fn test_node_send_and_receive_roundtrip() {
         // Set up two nodes that communicate via loopback WS.
         let port_a = random_port().await;
@@ -2112,6 +2270,7 @@ mod tests {
     // ── Lifecycle: stop() teardown ───────────────────────────────────
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the legacy send/broadcast contract
     async fn test_node_stop_shuts_down_provider_and_is_idempotent() {
         let ws_port = random_port().await;
         let (node, event_tx, network) = make_test_node("node-1", ws_port).await;
@@ -2137,6 +2296,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // exercises the legacy send/broadcast contract
     async fn test_node_stop_closes_ws_connections() {
         // A single node that discovers itself as a loopback peer. Under the
         // loopback mock every dial lands on the node's own listener, and the

@@ -1,7 +1,7 @@
 //! Messaging application — send/receive messages via Node API.
 //!
-//! Uses `node.send()` for one-shot messages and `node.subscribe()` for
-//! receiving. Pure Layer 7 — no protocol knowledge in truffle-core.
+//! Uses `node.send_json()` for one-shot messages and `node.subscribe()`
+//! for receiving. Pure Layer 7 — no protocol knowledge in truffle-core.
 
 use truffle_core::network::NetworkProvider;
 use truffle_core::node::Node;
@@ -18,10 +18,7 @@ pub async fn send_message<N: NetworkProvider + 'static>(
         "text": message,
     });
 
-    let data =
-        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize message: {e}"))?;
-
-    node.send(peer_id, "chat", &data)
+    node.send_json(peer_id, "chat", &payload)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -36,7 +33,5 @@ pub async fn broadcast_message<N: NetworkProvider + 'static>(node: &Node<N>, mes
         "text": message,
     });
 
-    if let Ok(data) = serde_json::to_vec(&payload) {
-        node.broadcast("chat", &data).await;
-    }
+    let _ = node.broadcast_json("chat", &payload).await;
 }

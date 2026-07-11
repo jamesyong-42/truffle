@@ -146,10 +146,41 @@ export declare class NapiNode {
   ping(peerId: string): Promise<NapiPingResult>
   /** Get health information from the network layer. */
   health(): Promise<NapiHealthInfo>
-  /** Send a namespaced message to a specific peer. */
+  /**
+   * Send a namespaced message to a specific peer.
+   *
+   * Legacy content-sniffing behavior: bytes that parse as UTF-8 JSON go
+   * on the wire as that JSON value, anything else as a byte array.
+   * Prefer `sendJson` / `sendBytes`, whose wire type never depends on
+   * the data's contents.
+   */
   send(peerId: string, namespace: string, data: Buffer): Promise<void>
-  /** Broadcast a namespaced message to all connected peers. */
+  /** Send a JSON payload to a specific peer (explicit wire type). */
+  sendJson(peerId: string, namespace: string, payload: any): Promise<void>
+  /**
+   * Send opaque binary data to a specific peer (explicit wire type).
+   *
+   * The bytes travel base64-encoded under the `"bytes"` msg_type — the
+   * wire representation never depends on the data's contents.
+   */
+  sendBytes(peerId: string, namespace: string, data: Buffer): Promise<void>
+  /**
+   * Broadcast a namespaced message to all connected peers.
+   *
+   * Legacy content-sniffing behavior — prefer `broadcastJson` /
+   * `broadcastBytes`, which also report queueing failures.
+   */
   broadcast(namespace: string, data: Buffer): Promise<void>
+  /**
+   * Broadcast a JSON payload to all connected peers, reporting how many
+   * peers it was queued to.
+   */
+  broadcastJson(namespace: string, payload: any): Promise<NapiBroadcastReport>
+  /**
+   * Broadcast opaque binary data to all connected peers, reporting how
+   * many peers it was queued to.
+   */
+  broadcastBytes(namespace: string, data: Buffer): Promise<NapiBroadcastReport>
   /**
    * Open a raw TCP connection to a peer on the given port (RFC 021).
    *
@@ -501,10 +532,36 @@ export declare class Peer {
   get lastSeen(): string | null
   /** Same registry entry generation (RFC 022 §7.7). */
   equals(other: Peer): boolean
-  /** Send a namespaced message to this peer. */
+  /**
+   * Send a namespaced message to this peer.
+   *
+   * Legacy content-sniffing behavior — prefer `sendJson` / `sendBytes`.
+   */
   send(namespace: string, data: Buffer): Promise<void>
+  /** Send a JSON payload to this peer (explicit wire type). */
+  sendJson(namespace: string, payload: any): Promise<void>
+  /**
+   * Send opaque binary data to this peer (explicit wire type; base64
+   * `"bytes"` envelope — never depends on the data's contents).
+   */
+  sendBytes(namespace: string, data: Buffer): Promise<void>
   /** Ping this peer. */
   ping(): Promise<NapiPingResult>
+}
+
+/**
+ * Outcome of a `broadcastJson` / `broadcastBytes` call.
+ *
+ * "Queued" means handed to a peer's connection task — not confirmed
+ * delivery. Broadcasts reach only currently connected peers.
+ */
+export interface NapiBroadcastReport {
+  /** Peers with an active WS connection at broadcast time. */
+  attempted: number
+  /** Messages successfully queued to a connection task. */
+  queued: number
+  /** Tailscale ids of peers whose connection task was already closed. */
+  failed: Array<string>
 }
 
 /** A datagram received from the mesh. */

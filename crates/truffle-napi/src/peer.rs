@@ -158,11 +158,37 @@ impl Peer {
     }
 
     /// Send a namespaced message to this peer.
+    ///
+    /// Legacy content-sniffing behavior — prefer `sendJson` / `sendBytes`.
     #[napi]
     pub async fn send(&self, namespace: String, data: Buffer) -> Result<()> {
         let route = self.route_id();
+        // Sniffing is deprecated in core but kept here: it is the documented
+        // contract of the JS send() API.
+        #[allow(deprecated)]
         self.node
             .send(&route, &namespace, data.as_ref())
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Send a JSON payload to this peer (explicit wire type).
+    #[napi]
+    pub async fn send_json(&self, namespace: String, payload: serde_json::Value) -> Result<()> {
+        let route = self.route_id();
+        self.node
+            .send_json(&route, &namespace, &payload)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Send opaque binary data to this peer (explicit wire type; base64
+    /// `"bytes"` envelope — never depends on the data's contents).
+    #[napi]
+    pub async fn send_bytes(&self, namespace: String, data: Buffer) -> Result<()> {
+        let route = self.route_id();
+        self.node
+            .send_bytes(&route, &namespace, data.as_ref())
             .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }

@@ -261,20 +261,91 @@ impl NapiNode {
     }
 
     /// Send a namespaced message to a specific peer.
+    ///
+    /// Legacy content-sniffing behavior: bytes that parse as UTF-8 JSON go
+    /// on the wire as that JSON value, anything else as a byte array.
+    /// Prefer `sendJson` / `sendBytes`, whose wire type never depends on
+    /// the data's contents.
     #[napi]
     pub async fn send(&self, peer_id: String, namespace: String, data: Buffer) -> Result<()> {
         let node = self.require_node()?;
+        // Sniffing is deprecated in core but kept here: it is the documented
+        // contract of the JS send() API.
+        #[allow(deprecated)]
         node.send(&peer_id, &namespace, data.as_ref())
             .await
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// Send a JSON payload to a specific peer (explicit wire type).
+    #[napi]
+    pub async fn send_json(
+        &self,
+        peer_id: String,
+        namespace: String,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        let node = self.require_node()?;
+        node.send_json(&peer_id, &namespace, &payload)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Send opaque binary data to a specific peer (explicit wire type).
+    ///
+    /// The bytes travel base64-encoded under the `"bytes"` msg_type — the
+    /// wire representation never depends on the data's contents.
+    #[napi]
+    pub async fn send_bytes(&self, peer_id: String, namespace: String, data: Buffer) -> Result<()> {
+        let node = self.require_node()?;
+        node.send_bytes(&peer_id, &namespace, data.as_ref())
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
     /// Broadcast a namespaced message to all connected peers.
+    ///
+    /// Legacy content-sniffing behavior — prefer `broadcastJson` /
+    /// `broadcastBytes`, which also report queueing failures.
     #[napi]
     pub async fn broadcast(&self, namespace: String, data: Buffer) -> Result<()> {
         let node = self.require_node()?;
+        // See send(): sniffing is the documented JS contract.
+        #[allow(deprecated)]
         node.broadcast(&namespace, data.as_ref()).await;
         Ok(())
+    }
+
+    /// Broadcast a JSON payload to all connected peers, reporting how many
+    /// peers it was queued to.
+    #[napi]
+    pub async fn broadcast_json(
+        &self,
+        namespace: String,
+        payload: serde_json::Value,
+    ) -> Result<crate::types::NapiBroadcastReport> {
+        let node = self.require_node()?;
+        let report = node
+            .broadcast_json(&namespace, &payload)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(report.into())
+    }
+
+    /// Broadcast opaque binary data to all connected peers, reporting how
+    /// many peers it was queued to.
+    #[napi]
+    pub async fn broadcast_bytes(
+        &self,
+        namespace: String,
+        data: Buffer,
+    ) -> Result<crate::types::NapiBroadcastReport> {
+        let node = self.require_node()?;
+        let report = node
+            .broadcast_bytes(&namespace, data.as_ref())
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(report.into())
     }
 
     /// Open a raw TCP connection to a peer on the given port (RFC 021).
