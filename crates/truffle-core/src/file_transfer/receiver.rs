@@ -18,9 +18,10 @@ use crate::network::NetworkProvider;
 use crate::node::Node;
 
 use super::types::{
-    FileOffer, FileTransferEvent, FtMessage, OfferDecision, OfferResponder, TransferDirection,
-    TransferError, TransferProgress,
+    FileOffer, FileTransferEvent, FtMessage, OfferDecision, OfferResponder, OverwritePolicy,
+    TransferDirection, TransferError, TransferProgress,
 };
+use super::MAX_PENDING_OFFERS_PER_PEER;
 
 /// Reduce a peer-supplied file name to a safe base name.
 ///
@@ -116,7 +117,7 @@ fn authorize_pull_path(
 /// - **ACCEPT / REJECT**: Ignored (handled by send/pull initiators).
 pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
     node: Arc<Node<N>>,
-    offer_tx: mpsc::UnboundedSender<(FileOffer, OfferResponder)>,
+    offer_tx: mpsc::Sender<(FileOffer, OfferResponder)>,
     event_tx: broadcast::Sender<FileTransferEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -158,8 +159,45 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                     token,
                     tcp_port: _,
                 } => {
+                    // Global cap: refuse new work instead of queueing it, so
+                    // an offer burst cannot pile up unbounded parked tasks.
+                    let permit = match node
+                        .file_transfer_state
+                        .incoming_ops
+                        .clone()
+                        .try_acquire_owned()
+                    {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!(
+                                from = from.as_str(),
+                                "Rejecting offer: incoming-operation limit reached"
+                            );
+                            spawn_reject(node, from, token, "receiver busy");
+                            continue;
+                        }
+                    };
+                    // Per-peer cap on offers parked awaiting a decision
+                    // (each waits up to 60s for the application).
+                    let pending_guard = match PeerPendingGuard::try_acquire(
+                        &node.file_transfer_state.pending_offers_per_peer,
+                        &from,
+                        MAX_PENDING_OFFERS_PER_PEER,
+                    ) {
+                        Some(g) => g,
+                        None => {
+                            warn!(
+                                from = from.as_str(),
+                                "Rejecting offer: per-peer pending-offer limit reached"
+                            );
+                            spawn_reject(node, from, token, "receiver busy");
+                            continue;
+                        }
+                    };
                     // Handle incoming OFFER (someone wants to push a file to us)
                     tokio::spawn(async move {
+                        let _permit = permit;
+                        let _pending = pending_guard;
                         if let Err(e) = handle_incoming_offer(
                             &node, &from, &file_name, size, &sha256, &save_path, &token, &offer_tx,
                             &event_tx,
@@ -202,8 +240,27 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                     requester_id: _,
                     token,
                 } => {
+                    // Global cap applies to pull serving too — each served
+                    // pull streams a file and holds a TCP connection.
+                    let permit = match node
+                        .file_transfer_state
+                        .incoming_ops
+                        .clone()
+                        .try_acquire_owned()
+                    {
+                        Ok(p) => p,
+                        Err(_) => {
+                            warn!(
+                                from = from.as_str(),
+                                "Rejecting pull: incoming-operation limit reached"
+                            );
+                            spawn_reject(node, from, token, "receiver busy");
+                            continue;
+                        }
+                    };
                     // Handle incoming PULL_REQUEST (someone wants to download from us)
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) =
                             handle_pull_request(&node, &from, &path, &token, &event_tx).await
                         {
@@ -234,7 +291,7 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
     sha256: &str,
     save_path: &str,
     token: &str,
-    offer_tx: &mpsc::UnboundedSender<(FileOffer, OfferResponder)>,
+    offer_tx: &mpsc::Sender<(FileOffer, OfferResponder)>,
     event_tx: &broadcast::Sender<FileTransferEvent>,
 ) -> Result<(), TransferError> {
     info!(
@@ -277,10 +334,17 @@ async fn handle_incoming_offer<N: NetworkProvider + 'static>(
     let (decision_tx, decision_rx) = oneshot::channel::<OfferDecision>();
     let responder = OfferResponder::new(decision_tx);
 
-    // Send offer + responder to the offer channel
-    offer_tx
-        .send((offer, responder))
-        .map_err(|_| TransferError::Protocol("Offer channel closed".to_string()))?;
+    // Send offer + responder to the offer channel. The channel is bounded:
+    // when the application stops draining it, further offers are rejected
+    // fail-fast instead of queueing without limit.
+    if let Err(e) = offer_tx.try_send((offer, responder)) {
+        let reason = match e {
+            mpsc::error::TrySendError::Full(_) => "receiver busy: offer queue full",
+            mpsc::error::TrySendError::Closed(_) => "receiver has no offer channel",
+        };
+        send_reject(node, from, token, reason).await;
+        return Err(TransferError::Rejected(reason.to_string()));
+    }
 
     // Wait for decision with 60s timeout
     let decision = tokio::time::timeout(tokio::time::Duration::from_secs(60), decision_rx)
@@ -337,6 +401,18 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
     // directory we append a sanitized base name from the peer's `file_name`,
     // blocking path-traversal / absolute-path escapes.
     let final_path = resolve_dest_path(save_path, file_name)?;
+
+    // Fail fast before receiving any bytes when the destination exists and
+    // the policy forbids replacing it. Racy against concurrent transfers,
+    // so `finalize_received_file` re-enforces the policy atomically.
+    let policy = node.file_transfer_state.overwrite_policy();
+    if policy == OverwritePolicy::Reject
+        && tokio::fs::try_exists(&final_path).await.unwrap_or(false)
+    {
+        let reason = "destination already exists";
+        send_reject(node, from, token, reason).await;
+        return Err(TransferError::Rejected(format!("{reason}: {final_path}")));
+    }
 
     // Create parent directories for the resolved destination.
     if let Some(parent) = std::path::Path::new(&final_path).parent() {
@@ -407,9 +483,16 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
         )));
     }
 
-    // Stream file data to disk (instead of memory buffer)
-    let temp_path = format!("{final_path}.truffle-tmp");
-    let mut temp_file = tokio::fs::File::create(&temp_path).await?;
+    // Stream file data to disk (instead of memory buffer). The temp name is
+    // uniqued locally (never from the peer-controlled token) + create_new,
+    // so concurrent transfers to the same destination each get their own
+    // temp file instead of truncating and interleaving with each other.
+    let temp_path = format!("{final_path}.{}.truffle-tmp", uuid::Uuid::new_v4());
+    let mut temp_file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await?;
     let mut hasher = Sha256::new();
     let mut bytes_received: u64 = 0;
     let progress_start = std::time::Instant::now();
@@ -469,26 +552,14 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
 
     // (final_path was resolved and its parent created before streaming.)
 
-    // Move temp file to final path. Use rename first (fast, atomic on same
-    // filesystem), fall back to copy+delete for cross-device moves.
+    // Publish the temp file to the final path per the overwrite policy.
     info!(
         temp = temp_path.as_str(),
         final_path = final_path.as_str(),
         "Moving temp file to final destination"
     );
-    if let Err(rename_err) = tokio::fs::rename(&temp_path, &final_path).await {
-        info!(
-            err = %rename_err,
-            "Rename failed, trying copy+delete fallback"
-        );
-        tokio::fs::copy(&temp_path, &final_path).await?;
-        tokio::fs::remove_file(&temp_path).await.ok();
-    }
-    info!(
-        final_path = final_path.as_str(),
-        exists = std::path::Path::new(&final_path).exists(),
-        "File save completed"
-    );
+    let placed_path = finalize_received_file(&temp_path, &final_path, policy).await?;
+    info!(final_path = placed_path.as_str(), "File save completed");
 
     // Send ACK and flush
     stream.write_all(&[0x01]).await?;
@@ -502,7 +573,7 @@ async fn accept_and_receive<N: NetworkProvider + 'static>(
 
     let elapsed = start.elapsed().as_secs_f64();
     info!(
-        file = final_path.as_str(),
+        file = placed_path.as_str(),
         bytes = file_size,
         elapsed_ms = (elapsed * 1000.0) as u64,
         "File received and verified"
@@ -558,15 +629,28 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
         }
     };
 
-    // Read and hash the file
-    let data = tokio::fs::read(&serve_path)
+    // Stream-hash the file in 64KB chunks (constant memory, mirrors
+    // sender::send_file). Reading the whole file into RAM let one permitted
+    // pull allocate up to max_transfer_size bytes.
+    let meta = tokio::fs::metadata(&serve_path)
         .await
         .map_err(TransferError::Io)?;
-    let size = data.len() as u64;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let sha256 = hex::encode(hasher.finalize());
+    let size = meta.len();
+    let sha256 = {
+        let mut hasher = Sha256::new();
+        let mut file = tokio::fs::File::open(&serve_path)
+            .await
+            .map_err(TransferError::Io)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hex::encode(hasher.finalize())
+    };
 
     let file_name = std::path::Path::new(path)
         .file_name()
@@ -633,36 +717,45 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
 
     let start = std::time::Instant::now();
 
-    // Write [size][sha256_hex][file_data]
+    // Write [size][sha256_hex] then stream the file in 64KB chunks
+    // (constant memory). If the file changes between the hash pass and
+    // this read, the requester's integrity check fails the transfer.
     stream.write_all(&size.to_be_bytes()).await?;
     stream.write_all(sha256.as_bytes()).await?;
 
-    let chunk_size = 64 * 1024;
-    let mut offset = 0;
+    let mut file = tokio::fs::File::open(&serve_path)
+        .await
+        .map_err(TransferError::Io)?;
+    let mut buf = vec![0u8; 64 * 1024];
     let mut bytes_sent: u64 = 0;
+    let mut last_progress = std::time::Instant::now();
 
-    while offset < data.len() {
-        let end = (offset + chunk_size).min(data.len());
-        stream.write_all(&data[offset..end]).await?;
-        bytes_sent += (end - offset) as u64;
-        offset = end;
+    loop {
+        let n = file.read(&mut buf).await.map_err(TransferError::Io)?;
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&buf[..n]).await?;
+        bytes_sent += n as u64;
 
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            bytes_sent as f64 / elapsed
-        } else {
-            0.0
-        };
-
-        // Emit progress event (best-effort)
-        let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
-            token: offer_token.clone(),
-            direction: TransferDirection::Send,
-            file_name: file_name.clone(),
-            bytes_transferred: bytes_sent,
-            total_bytes: size,
-            speed_bps: speed,
-        }));
+        // Throttle progress events to max 4/sec
+        if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
+            let elapsed = start.elapsed().as_secs_f64();
+            let speed = if elapsed > 0.0 {
+                bytes_sent as f64 / elapsed
+            } else {
+                0.0
+            };
+            let _ = event_tx.send(FileTransferEvent::Progress(TransferProgress {
+                token: offer_token.clone(),
+                direction: TransferDirection::Send,
+                file_name: file_name.clone(),
+                bytes_transferred: bytes_sent,
+                total_bytes: size,
+                speed_bps: speed,
+            }));
+            last_progress = std::time::Instant::now();
+        }
     }
 
     stream.flush().await?;
@@ -692,6 +785,189 @@ async fn handle_pull_request<N: NetworkProvider + 'static>(
     });
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Limits & finalize helpers
+// ---------------------------------------------------------------------------
+
+/// Send a best-effort REJECT for `token` so the sender fails fast instead of
+/// waiting out its accept timeout.
+async fn send_reject<N: NetworkProvider + 'static>(
+    node: &Node<N>,
+    from: &str,
+    token: &str,
+    reason: &str,
+) {
+    let reject = FtMessage::Reject {
+        token: token.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Ok(payload) = serde_json::to_value(&reject) {
+        if let Err(e) = node.send_typed(from, "ft", "reject", &payload).await {
+            warn!(from = from, "Failed to send REJECT: {e}");
+        }
+    }
+}
+
+/// Fire-and-forget [`send_reject`] from the dispatch loop (which must not
+/// block on network sends).
+fn spawn_reject<N: NetworkProvider + 'static>(
+    node: Arc<Node<N>>,
+    from: String,
+    token: String,
+    reason: &'static str,
+) {
+    tokio::spawn(async move {
+        send_reject(&node, &from, &token, reason).await;
+    });
+}
+
+/// RAII count of offers a peer has awaiting an accept/reject decision.
+/// Dropping the guard (offer handled, rejected, or timed out) releases the
+/// slot; the map entry is removed at zero so it cannot grow unbounded.
+struct PeerPendingGuard {
+    map: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    peer: String,
+}
+
+impl PeerPendingGuard {
+    fn try_acquire(
+        map: &Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+        peer: &str,
+        max: usize,
+    ) -> Option<Self> {
+        let mut m = map.lock().unwrap();
+        let count = m.entry(peer.to_string()).or_insert(0);
+        if *count >= max {
+            return None;
+        }
+        *count += 1;
+        Some(Self {
+            map: map.clone(),
+            peer: peer.to_string(),
+        })
+    }
+}
+
+impl Drop for PeerPendingGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap();
+        if let Some(c) = m.get_mut(&self.peer) {
+            *c = c.saturating_sub(1);
+            if *c == 0 {
+                m.remove(&self.peer);
+            }
+        }
+    }
+}
+
+/// Error shape for [`place_no_clobber`] so callers can tell "destination
+/// exists" apart from real I/O failures.
+enum PlaceError {
+    Exists,
+    Io(std::io::Error),
+}
+
+/// Publish `temp_path` at `dest` without replacing an existing file.
+///
+/// `hard_link` is an atomic no-clobber publish; the temp file is always a
+/// sibling of `dest`, so same-filesystem is guaranteed. Filesystems without
+/// hard-link support fall back to an exists-check + rename — a small race,
+/// but unique temp names already prevent concurrent transfers from
+/// corrupting each other's data.
+async fn place_no_clobber(temp_path: &str, dest: &str) -> Result<(), PlaceError> {
+    match tokio::fs::hard_link(temp_path, dest).await {
+        Ok(()) => {
+            tokio::fs::remove_file(temp_path).await.ok();
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(PlaceError::Exists),
+        Err(_) => {
+            if tokio::fs::try_exists(dest).await.unwrap_or(false) {
+                return Err(PlaceError::Exists);
+            }
+            tokio::fs::rename(temp_path, dest)
+                .await
+                .map_err(PlaceError::Io)
+        }
+    }
+}
+
+/// Deduplicated sibling name for [`OverwritePolicy::Rename`]:
+/// `report.pdf` → `report (1).pdf`, `Makefile` → `Makefile (1)`.
+fn dedup_candidate(path: &str, i: u32) -> String {
+    let p = std::path::Path::new(path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let new_name = match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem} ({i}).{ext}"),
+        None => format!("{stem} ({i})"),
+    };
+    p.with_file_name(new_name).to_string_lossy().into_owned()
+}
+
+/// Publish a fully received temp file to `final_path` per the overwrite
+/// policy. Returns the path actually used (differs from `final_path` only
+/// under [`OverwritePolicy::Rename`]). The temp file is consumed on success
+/// and removed on failure.
+pub(crate) async fn finalize_received_file(
+    temp_path: &str,
+    final_path: &str,
+    policy: OverwritePolicy,
+) -> Result<String, TransferError> {
+    match policy {
+        OverwritePolicy::Replace => {
+            // Rename first (atomic replace on POSIX), fall back to
+            // copy+delete — the pre-policy behavior.
+            if let Err(rename_err) = tokio::fs::rename(temp_path, final_path).await {
+                info!(err = %rename_err, "Rename failed, trying copy+delete fallback");
+                if let Err(e) = tokio::fs::copy(temp_path, final_path).await {
+                    tokio::fs::remove_file(temp_path).await.ok();
+                    return Err(TransferError::Io(e));
+                }
+                tokio::fs::remove_file(temp_path).await.ok();
+            }
+            Ok(final_path.to_string())
+        }
+        OverwritePolicy::Reject => match place_no_clobber(temp_path, final_path).await {
+            Ok(()) => Ok(final_path.to_string()),
+            Err(PlaceError::Exists) => {
+                tokio::fs::remove_file(temp_path).await.ok();
+                Err(TransferError::Protocol(format!(
+                    "destination already exists: {final_path} (OverwritePolicy::Reject)"
+                )))
+            }
+            Err(PlaceError::Io(e)) => {
+                tokio::fs::remove_file(temp_path).await.ok();
+                Err(TransferError::Io(e))
+            }
+        },
+        OverwritePolicy::Rename => {
+            match place_no_clobber(temp_path, final_path).await {
+                Ok(()) => return Ok(final_path.to_string()),
+                Err(PlaceError::Exists) => {}
+                Err(PlaceError::Io(e)) => {
+                    tokio::fs::remove_file(temp_path).await.ok();
+                    return Err(TransferError::Io(e));
+                }
+            }
+            for i in 1..=999u32 {
+                let candidate = dedup_candidate(final_path, i);
+                match place_no_clobber(temp_path, &candidate).await {
+                    Ok(()) => return Ok(candidate),
+                    Err(PlaceError::Exists) => continue,
+                    Err(PlaceError::Io(e)) => {
+                        tokio::fs::remove_file(temp_path).await.ok();
+                        return Err(TransferError::Io(e));
+                    }
+                }
+            }
+            tokio::fs::remove_file(temp_path).await.ok();
+            Err(TransferError::Protocol(format!(
+                "no free deduplicated name found for {final_path}"
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -992,5 +1268,130 @@ mod tests {
             matches!(err, TransferError::Rejected(_)),
             "expected Rejected, got {err}"
         );
+    }
+
+    // ── Overwrite policy / finalize helpers ────────────────────────────
+
+    #[test]
+    fn dedup_candidate_naming() {
+        // Assert on the file name only: `Path::with_file_name` joins with
+        // the platform separator, so exact-path equality fails on Windows.
+        let got = dedup_candidate("/d/report.pdf", 1);
+        assert!(got.ends_with("report (1).pdf"), "{got}");
+        let got = dedup_candidate("/d/Makefile", 2);
+        assert!(got.ends_with("Makefile (2)"), "{got}");
+    }
+
+    async fn write_file(dir: &std::path::Path, name: &str, content: &[u8]) -> String {
+        let p = dir.join(name);
+        tokio::fs::write(&p, content).await.unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn finalize_reject_errors_when_dest_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = write_file(dir.path(), "f.txt", b"old").await;
+        let temp = write_file(dir.path(), "f.txt.abc.truffle-tmp", b"new").await;
+
+        let err = finalize_received_file(&temp, &dest, OverwritePolicy::Reject)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        // Destination untouched, temp cleaned up.
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"old");
+        assert!(!tokio::fs::try_exists(&temp).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn finalize_reject_places_when_dest_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = write_file(dir.path(), "g.txt.abc.truffle-tmp", b"data").await;
+        let dest = dir.path().join("g.txt").to_str().unwrap().to_string();
+
+        let placed = finalize_received_file(&temp, &dest, OverwritePolicy::Reject)
+            .await
+            .unwrap();
+        assert_eq!(placed, dest);
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"data");
+        assert!(!tokio::fs::try_exists(&temp).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn finalize_replace_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = write_file(dir.path(), "h.txt", b"old").await;
+        let temp = write_file(dir.path(), "h.txt.abc.truffle-tmp", b"new").await;
+
+        let placed = finalize_received_file(&temp, &dest, OverwritePolicy::Replace)
+            .await
+            .unwrap();
+        assert_eq!(placed, dest);
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn finalize_rename_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = write_file(dir.path(), "i.txt", b"old").await;
+        let temp = write_file(dir.path(), "i.txt.abc.truffle-tmp", b"new").await;
+
+        let placed = finalize_received_file(&temp, &dest, OverwritePolicy::Rename)
+            .await
+            .unwrap();
+        assert!(placed.ends_with("i (1).txt"), "{placed}");
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), b"old");
+        assert_eq!(tokio::fs::read(&placed).await.unwrap(), b"new");
+    }
+
+    #[test]
+    fn peer_pending_guard_caps_and_releases() {
+        let map = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let g1 = PeerPendingGuard::try_acquire(&map, "p", 2).unwrap();
+        let _g2 = PeerPendingGuard::try_acquire(&map, "p", 2).unwrap();
+        assert!(PeerPendingGuard::try_acquire(&map, "p", 2).is_none());
+        // A different peer is unaffected by p's slots.
+        assert!(PeerPendingGuard::try_acquire(&map, "q", 2).is_some());
+        drop(g1);
+        assert!(PeerPendingGuard::try_acquire(&map, "p", 2).is_some());
+    }
+
+    #[tokio::test]
+    async fn offer_rejected_when_queue_full() {
+        let (node, _peer_events) = make_test_node("node-b", random_port().await).await;
+
+        // A capacity-1 offer channel with its only slot pre-filled.
+        let (offer_tx, _offer_rx) = mpsc::channel(1);
+        let (dtx, _drx) = tokio::sync::oneshot::channel();
+        offer_tx
+            .try_send((
+                FileOffer {
+                    from_peer: "x".into(),
+                    from_name: "x".into(),
+                    file_name: "a".into(),
+                    size: 1,
+                    sha256: "0".repeat(64),
+                    suggested_path: String::new(),
+                    token: "t0".into(),
+                },
+                OfferResponder::new(dtx),
+            ))
+            .unwrap();
+
+        let (event_tx, _rx) = tokio::sync::broadcast::channel(16);
+        let err = handle_incoming_offer(
+            &node,
+            "peer-x",
+            "b.txt",
+            1,
+            &"0".repeat(64),
+            "",
+            "t1",
+            &offer_tx,
+            &event_tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, TransferError::Rejected(_)), "{err}");
     }
 }

@@ -56,7 +56,7 @@ pub fn spawn_event_collectors(
     peer_rx: tokio::sync::broadcast::Receiver<PeerEvent>,
     chat_rx: tokio::sync::broadcast::Receiver<NamespacedMessage>,
     ft_rx: tokio::sync::broadcast::Receiver<FileTransferEvent>,
-    offer_rx: Option<mpsc::UnboundedReceiver<(FileOffer, OfferResponder)>>,
+    offer_rx: Option<mpsc::Receiver<(FileOffer, OfferResponder)>>,
 ) -> (
     mpsc::UnboundedSender<AppEvent>,
     mpsc::UnboundedReceiver<AppEvent>,
