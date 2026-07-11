@@ -16,7 +16,7 @@ use super::protocol::*;
 use crate::network::NetworkError;
 
 /// Configuration for spawning the Go sidecar.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct SidecarConfig {
     /// Path to the Go sidecar binary.
     pub binary_path: PathBuf,
@@ -37,6 +37,24 @@ pub(crate) struct SidecarConfig {
     /// Override the bridged-connection idle-reap deadline (seconds); `None`
     /// leaves the sidecar's 600s default (RFC 021 §6.5).
     pub idle_timeout_secs: Option<u64>,
+}
+
+/// Manual `Debug`: `auth_key` (tailnet credential) and `session_token_hex`
+/// (bridge auth secret) must never reach logs, so both are redacted.
+impl std::fmt::Debug for SidecarConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidecarConfig")
+            .field("binary_path", &self.binary_path)
+            .field("hostname", &self.hostname)
+            .field("state_dir", &self.state_dir)
+            .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
+            .field("bridge_port", &self.bridge_port)
+            .field("session_token_hex", &"[REDACTED]")
+            .field("ephemeral", &self.ephemeral)
+            .field("tags", &self.tags)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .finish()
+    }
 }
 
 /// Internal events from the sidecar event processing loop.
@@ -631,5 +649,29 @@ impl GoSidecar {
 impl Drop for GoSidecar {
     fn drop(&mut self) {
         self.shutdown.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod config_debug_tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_config_debug_redacts_secrets() {
+        let config = SidecarConfig {
+            binary_path: PathBuf::from("/opt/sidecar"),
+            hostname: "truffle-demo-dev".to_string(),
+            state_dir: "/tmp/state".to_string(),
+            auth_key: Some("dummy-auth-SECRET123".to_string()),
+            bridge_port: 12345,
+            session_token_hex: "deadbeef".repeat(8),
+            ephemeral: None,
+            tags: None,
+            idle_timeout_secs: None,
+        };
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(!dbg.contains("deadbeef"));
+        assert!(dbg.contains("[REDACTED]"));
     }
 }

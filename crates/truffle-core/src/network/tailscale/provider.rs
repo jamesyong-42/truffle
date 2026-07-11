@@ -24,7 +24,7 @@ use crate::network::{
 };
 
 /// Configuration for creating a TailscaleProvider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TailscaleConfig {
     /// Path to the Go sidecar binary.
     pub binary_path: PathBuf,
@@ -52,6 +52,25 @@ pub struct TailscaleConfig {
     /// Idle timeout for bridged connections in seconds (RFC 021 §6.5).
     /// `None` → the sidecar's 600s default.
     pub idle_timeout_secs: Option<u64>,
+}
+
+/// Manual `Debug`: `auth_key` is a tailnet credential and must never reach
+/// logs, so it is redacted while preserving presence (`Some`/`None`).
+impl std::fmt::Debug for TailscaleConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TailscaleConfig")
+            .field("binary_path", &self.binary_path)
+            .field("app_id", &self.app_id)
+            .field("device_id", &self.device_id)
+            .field("device_name", &self.device_name)
+            .field("hostname", &self.hostname)
+            .field("state_dir", &self.state_dir)
+            .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
+            .field("ephemeral", &self.ephemeral)
+            .field("tags", &self.tags)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .finish()
+    }
 }
 
 /// State of the provider.
@@ -1103,5 +1122,29 @@ impl TailscaleProvider {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod config_debug_tests {
+    use super::*;
+
+    #[test]
+    fn tailscale_config_debug_redacts_auth_key() {
+        let config = TailscaleConfig {
+            binary_path: PathBuf::from("/opt/sidecar"),
+            app_id: "demo".to_string(),
+            device_id: "01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+            device_name: "dev".to_string(),
+            hostname: "truffle-demo-dev".to_string(),
+            state_dir: "/tmp/state".to_string(),
+            auth_key: Some("dummy-auth-SECRET123".to_string()),
+            ephemeral: None,
+            tags: None,
+            idle_timeout_secs: None,
+        };
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(dbg.contains("[REDACTED]"));
     }
 }

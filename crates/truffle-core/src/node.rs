@@ -1107,7 +1107,7 @@ fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
 ///     .build()
 ///     .await?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeBuilder {
     app_id: Option<AppId>,
     device_name: Option<DeviceName>,
@@ -1120,6 +1120,25 @@ pub struct NodeBuilder {
     idle_timeout_secs: Option<u64>,
     /// RFC 022 Phase C: proactively exchange hello with online peers.
     eager_identity: bool,
+}
+
+/// Manual `Debug`: `auth_key` is a tailnet credential and must never reach
+/// logs, so it is redacted while preserving presence (`Some`/`None`).
+impl std::fmt::Debug for NodeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeBuilder")
+            .field("app_id", &self.app_id)
+            .field("device_name", &self.device_name)
+            .field("device_id", &self.device_id)
+            .field("sidecar_path", &self.sidecar_path)
+            .field("state_dir", &self.state_dir)
+            .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
+            .field("ephemeral", &self.ephemeral)
+            .field("ws_port", &self.ws_port)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("eager_identity", &self.eager_identity)
+            .finish()
+    }
 }
 
 /// Atomically write a string to `path` by writing to a sibling `.tmp`
@@ -1496,6 +1515,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::{broadcast, mpsc};
+
+    #[test]
+    fn node_builder_debug_redacts_auth_key() {
+        let builder = NodeBuilder::default().auth_key("dummy-auth-SECRET123");
+        let dbg = format!("{builder:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(dbg.contains("[REDACTED]"));
+    }
 
     // ── Mock NetworkProvider ──────────────────────────────────────────
 

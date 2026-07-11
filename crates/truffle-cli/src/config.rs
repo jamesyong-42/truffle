@@ -41,7 +41,7 @@ pub struct TruffleConfig {
 /// RFC 017 renamed `name` to `device_name` and introduced `app_id`. For
 /// back-compat with existing configs on disk, a deprecated `name` field is
 /// still accepted at deserialization time and is interpreted as `device_name`.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(from = "NodeConfigRaw", into = "NodeConfigRaw")]
 pub struct NodeConfig {
     /// Application identifier (RFC 017 §5.1). Defaults to `"cli"` — the
@@ -62,6 +62,28 @@ pub struct NodeConfig {
     pub auth_key: String,
 }
 
+/// Manual `Debug`: `auth_key` is a tailnet credential and must never reach
+/// logs. An empty key prints as `""` so presence is still visible.
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("app_id", &self.app_id)
+            .field("device_name", &self.device_name)
+            .field("auto_up", &self.auto_up)
+            .field("sidecar_path", &self.sidecar_path)
+            .field("state_dir", &self.state_dir)
+            .field(
+                "auth_key",
+                &if self.auth_key.is_empty() {
+                    ""
+                } else {
+                    "[REDACTED]"
+                },
+            )
+            .finish()
+    }
+}
+
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
@@ -77,7 +99,7 @@ impl Default for NodeConfig {
 
 /// Raw on-disk shape used for serde, with back-compat for the pre-RFC-017
 /// `name` field.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 struct NodeConfigRaw {
     #[serde(default = "default_app_id")]
     app_id: String,
@@ -441,6 +463,21 @@ fn config_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_config_debug_redacts_auth_key() {
+        let config = NodeConfig {
+            auth_key: "dummy-auth-SECRET123".to_string(),
+            ..Default::default()
+        };
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(dbg.contains("[REDACTED]"));
+
+        // Empty key renders as "" so presence is still visible.
+        let dbg = format!("{:?}", NodeConfig::default());
+        assert!(!dbg.contains("[REDACTED]"));
+    }
 
     #[test]
     fn test_config_load_defaults() {
