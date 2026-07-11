@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Configuration for starting a truffle node, received from the frontend.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     /// Application namespace identifier. Required. Matches
@@ -36,6 +36,23 @@ pub struct StartConfig {
     pub ephemeral: bool,
     /// WebSocket listen port (defaults to 9417 if not set).
     pub ws_port: Option<u16>,
+}
+
+/// Manual `Debug`: `auth_key` is a tailnet credential and must never reach
+/// logs, so it is redacted while preserving presence (`Some`/`None`).
+impl std::fmt::Debug for StartConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartConfig")
+            .field("app_id", &self.app_id)
+            .field("device_name", &self.device_name)
+            .field("device_id", &self.device_id)
+            .field("sidecar_path", &self.sidecar_path)
+            .field("state_dir", &self.state_dir)
+            .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
+            .field("ephemeral", &self.ephemeral)
+            .field("ws_port", &self.ws_port)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -510,5 +527,27 @@ impl From<truffle_core::FileTransferEvent> for FileTransferEventJs {
                 reason,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod start_config_debug_tests {
+    use super::*;
+
+    #[test]
+    fn start_config_debug_redacts_auth_key() {
+        let config = StartConfig {
+            app_id: "demo".to_string(),
+            device_name: None,
+            device_id: None,
+            sidecar_path: "/opt/sidecar".to_string(),
+            state_dir: None,
+            auth_key: Some("dummy-auth-SECRET123".to_string()),
+            ephemeral: false,
+            ws_port: None,
+        };
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(dbg.contains("[REDACTED]"));
     }
 }

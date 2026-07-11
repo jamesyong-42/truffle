@@ -12,15 +12,29 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Envelope for all commands sent to the Go sidecar.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct SidecarCommand {
     pub command: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
+/// Manual `Debug`: `data` can embed secrets (`tsnet:start` carries the auth
+/// key and session token as a JSON value), so its contents are redacted.
+impl std::fmt::Debug for SidecarCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SidecarCommand")
+            .field("command", &self.command)
+            .field("data", &self.data.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 /// Data payload for `tsnet:start`.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Serialize` intentionally emits the real `auth_key` and `session_token` —
+/// this is the wire payload the sidecar needs. Only `Debug` redacts.
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StartCommandData {
     pub hostname: String,
@@ -37,6 +51,24 @@ pub(crate) struct StartCommandData {
     /// when None so old sidecars ignore it (RFC 021 §6.5).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
+    // NOTE: keep the manual Debug impl below in sync when adding fields.
+}
+
+/// Manual `Debug`: `auth_key` (tailnet credential) and `session_token`
+/// (bridge auth secret) must never reach logs, so both are redacted.
+impl std::fmt::Debug for StartCommandData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartCommandData")
+            .field("hostname", &self.hostname)
+            .field("state_dir", &self.state_dir)
+            .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
+            .field("bridge_port", &self.bridge_port)
+            .field("session_token", &"[REDACTED]")
+            .field("ephemeral", &self.ephemeral)
+            .field("tags", &self.tags)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .finish()
+    }
 }
 
 /// Data payload for `bridge:dial`.
@@ -414,6 +446,40 @@ mod tests {
         };
         let json = serde_json::to_string(&data).unwrap();
         assert!(json.contains("\"idleTimeoutSecs\":300"));
+    }
+
+    #[test]
+    fn debug_redacts_start_command_secrets() {
+        let data = StartCommandData {
+            hostname: "my-node".to_string(),
+            state_dir: "/tmp/tsnet".to_string(),
+            auth_key: Some("dummy-auth-SECRET123".to_string()),
+            bridge_port: 12345,
+            session_token: "deadbeef".repeat(8),
+            ephemeral: None,
+            tags: None,
+            idle_timeout_secs: None,
+        };
+        let dbg = format!("{data:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(!dbg.contains("deadbeef"));
+        assert!(dbg.contains("[REDACTED]"));
+
+        // Serialization must still carry the real values — that's the wire
+        // payload the sidecar authenticates with.
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("dummy-auth-SECRET123"));
+        assert!(json.contains("deadbeef"));
+
+        // The command envelope embeds the payload as a JSON value; Debug on
+        // the envelope must not leak it either.
+        let cmd = SidecarCommand {
+            command: command_type::START,
+            data: Some(serde_json::to_value(&data).unwrap()),
+        };
+        let dbg = format!("{cmd:?}");
+        assert!(!dbg.contains("SECRET123"));
+        assert!(!dbg.contains("deadbeef"));
     }
 
     #[test]
