@@ -54,6 +54,19 @@ use crate::node::Node;
 /// Default maximum transfer size: 1 GB.
 const DEFAULT_MAX_TRANSFER_SIZE: u64 = 1_073_741_824;
 
+/// Maximum incoming operations (offer handling + pull serving) in flight at
+/// once. Work beyond this is rejected immediately instead of queued, so a
+/// burst of offers from the tailnet cannot pile up unbounded tasks.
+pub(crate) const MAX_CONCURRENT_INCOMING: usize = 32;
+
+/// Maximum offers from a single peer that may sit awaiting an accept/reject
+/// decision (each parks a task for up to 60 s).
+pub(crate) const MAX_PENDING_OFFERS_PER_PEER: usize = 4;
+
+/// Capacity of the offer channel handed to the application. When the app
+/// falls behind, further offers are rejected (fail-fast) instead of queued.
+const OFFER_CHANNEL_CAPACITY: usize = 32;
+
 /// File transfer manager (internal state).
 ///
 /// This struct holds the channels and configuration for the file transfer
@@ -64,13 +77,20 @@ pub(crate) struct FileTransferState {
     /// Broadcast sender for file transfer events.
     pub(crate) event_tx: broadcast::Sender<FileTransferEvent>,
     /// Sender side of the offer channel (held to clone for new receivers).
-    pub(crate) offer_tx: Mutex<Option<mpsc::UnboundedSender<(FileOffer, OfferResponder)>>>,
+    pub(crate) offer_tx: Mutex<Option<mpsc::Sender<(FileOffer, OfferResponder)>>>,
     /// Maximum allowed transfer size in bytes.
     pub(crate) max_transfer_size: AtomicU64,
     /// Canonicalized roots that PULL_REQUESTs may be served from. Empty = deny all pulls.
     pub(crate) pull_roots: std::sync::RwLock<Vec<std::path::PathBuf>>,
     /// Handle to the background receiver task (lazy-started).
     pub(crate) receiver_handle: Mutex<Option<JoinHandle<()>>>,
+    /// What to do when a received file's destination already exists.
+    pub(crate) overwrite_policy: std::sync::RwLock<OverwritePolicy>,
+    /// Global cap on in-flight incoming operations (offers + pull serving).
+    pub(crate) incoming_ops: Arc<tokio::sync::Semaphore>,
+    /// Offers per peer currently awaiting an accept/reject decision.
+    pub(crate) pending_offers_per_peer:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
 }
 
 impl FileTransferState {
@@ -83,7 +103,17 @@ impl FileTransferState {
             max_transfer_size: AtomicU64::new(DEFAULT_MAX_TRANSFER_SIZE),
             pull_roots: std::sync::RwLock::new(Vec::new()),
             receiver_handle: Mutex::new(None),
+            overwrite_policy: std::sync::RwLock::new(OverwritePolicy::default()),
+            incoming_ops: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_INCOMING)),
+            pending_offers_per_peer: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
+    }
+
+    /// Current overwrite policy.
+    pub(crate) fn overwrite_policy(&self) -> OverwritePolicy {
+        *self.overwrite_policy.read().unwrap()
     }
 }
 
@@ -131,6 +161,19 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
         self.state().max_transfer_size.load(Ordering::Relaxed)
     }
 
+    /// Set the policy for destinations that already exist.
+    ///
+    /// Default is [`OverwritePolicy::Reject`]: a transfer to an existing
+    /// path fails instead of silently replacing the file.
+    pub fn set_overwrite_policy(&self, policy: OverwritePolicy) {
+        *self.state().overwrite_policy.write().unwrap() = policy;
+    }
+
+    /// Get the current overwrite policy.
+    pub fn overwrite_policy(&self) -> OverwritePolicy {
+        self.state().overwrite_policy()
+    }
+
     /// Register a directory that incoming PULL_REQUESTs may be served from.
     ///
     /// Pull serving is **deny-by-default**: with no roots registered every
@@ -167,14 +210,18 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     /// Only one offer channel can be active at a time. Calling this again
     /// replaces the previous channel (the old receiver will stop getting offers).
     ///
+    /// The channel is bounded: when the application stops polling and the
+    /// queue fills, further incoming offers are rejected (the sender gets a
+    /// fail-fast REJECT) rather than buffered without limit.
+    ///
     /// **Important**: The returned receiver must be polled. The `node` reference
     /// used here must remain valid — store the `Node` in an `Arc` and pass it
     /// to spawned tasks as needed.
     pub async fn offer_channel(
         &self,
         node: Arc<Node<N>>,
-    ) -> mpsc::UnboundedReceiver<(FileOffer, OfferResponder)> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    ) -> mpsc::Receiver<(FileOffer, OfferResponder)> {
+        let (tx, rx) = mpsc::channel(OFFER_CHANNEL_CAPACITY);
         {
             let mut offer_tx = self.state().offer_tx.lock().await;
             *offer_tx = Some(tx.clone());
@@ -284,7 +331,7 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     async fn ensure_receiver_started(
         &self,
         node: Arc<Node<N>>,
-        offer_tx: mpsc::UnboundedSender<(FileOffer, OfferResponder)>,
+        offer_tx: mpsc::Sender<(FileOffer, OfferResponder)>,
     ) {
         let mut handle = self.state().receiver_handle.lock().await;
         // If there's an existing handle, abort it (we're replacing the offer channel)
@@ -322,6 +369,17 @@ async fn pull_file<N: NetworkProvider + 'static>(
 
     let start = Instant::now();
     let token = uuid::Uuid::new_v4().to_string();
+
+    // Fail fast before any network round-trip when the destination exists
+    // and the policy forbids replacing it.
+    let policy = node.file_transfer_state.overwrite_policy();
+    if policy == OverwritePolicy::Reject && tokio::fs::try_exists(local_path).await.unwrap_or(false)
+    {
+        return Err(TransferError::Protocol(format!(
+            "destination already exists: {local_path} (OverwritePolicy::Reject)"
+        )));
+    }
+
     // RFC 017 §8: use the stable `device_id` (ULID) as the requester
     // identifier. The hello handshake now carries this between peers so
     // the receiving side can match requester to sender.
@@ -459,8 +517,15 @@ async fn pull_file<N: NetworkProvider + 'static>(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let temp_path = format!("{local_path}.truffle-tmp");
-    let mut temp_file = tokio::fs::File::create(&temp_path).await?;
+    // Token-suffixed temp name + create_new: concurrent transfers to the
+    // same destination each get their own temp file instead of truncating
+    // and interleaving with each other.
+    let temp_path = format!("{local_path}.{token}.truffle-tmp");
+    let mut temp_file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await?;
     let mut hasher = Sha256::new();
     let mut bytes_received: u64 = 0;
     let progress_start = Instant::now();
@@ -514,8 +579,8 @@ async fn pull_file<N: NetworkProvider + 'static>(
         });
     }
 
-    // Rename temp to final
-    tokio::fs::rename(&temp_path, local_path).await?;
+    // Publish temp to the final path per the overwrite policy.
+    let placed_path = receiver::finalize_received_file(&temp_path, local_path, policy).await?;
 
     // 7. Send ACK
     stream.write_all(&[0x01]).await?;
@@ -524,7 +589,7 @@ async fn pull_file<N: NetworkProvider + 'static>(
     tracing::info!(
         bytes = file_size,
         elapsed_ms = (elapsed * 1000.0) as u64,
-        path = local_path,
+        path = placed_path.as_str(),
         "Download complete"
     );
 

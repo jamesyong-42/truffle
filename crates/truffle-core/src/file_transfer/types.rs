@@ -109,6 +109,26 @@ impl From<std::io::Error> for TransferError {
 }
 
 // ---------------------------------------------------------------------------
+// Overwrite policy
+// ---------------------------------------------------------------------------
+
+/// What to do when a received file's destination path already exists.
+///
+/// Applies to both incoming pushes (offers we accept) and
+/// [`pull_file`](super::FileTransfer::pull_file) downloads. Set via
+/// [`set_overwrite_policy`](super::FileTransfer::set_overwrite_policy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverwritePolicy {
+    /// Fail the transfer if the destination already exists (default).
+    #[default]
+    Reject,
+    /// Replace the existing file (the pre-0.7 behavior).
+    Replace,
+    /// Save under a deduplicated name like `file (1).txt`.
+    Rename,
+}
+
+// ---------------------------------------------------------------------------
 // Offer API — accept/reject workflow
 // ---------------------------------------------------------------------------
 
