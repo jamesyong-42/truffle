@@ -1274,8 +1274,12 @@ mod tests {
 
     #[test]
     fn dedup_candidate_naming() {
-        assert_eq!(dedup_candidate("/d/report.pdf", 1), "/d/report (1).pdf");
-        assert_eq!(dedup_candidate("/d/Makefile", 2), "/d/Makefile (2)");
+        // Assert on the file name only: `Path::with_file_name` joins with
+        // the platform separator, so exact-path equality fails on Windows.
+        let got = dedup_candidate("/d/report.pdf", 1);
+        assert!(got.ends_with("report (1).pdf"), "{got}");
+        let got = dedup_candidate("/d/Makefile", 2);
+        assert!(got.ends_with("Makefile (2)"), "{got}");
     }
 
     async fn write_file(dir: &std::path::Path, name: &str, content: &[u8]) -> String {
