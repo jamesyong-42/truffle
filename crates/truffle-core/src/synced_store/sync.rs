@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, watch};
 
 use crate::network::NetworkProvider;
 use crate::node::Node;
@@ -24,7 +24,7 @@ use super::StoreInner;
 pub(super) fn spawn_sync_task<N, T>(
     node: Arc<Node<N>>,
     inner: Arc<StoreInner<T>>,
-    mut broadcast_rx: mpsc::UnboundedReceiver<SyncMessage>,
+    mut broadcast_rx: watch::Receiver<Option<SyncMessage>>,
 ) -> tokio::task::JoinHandle<()>
 where
     N: NetworkProvider + 'static,
@@ -88,15 +88,35 @@ where
                 }
 
                 // ── Source 3: outbound broadcast requests from set() ──
-                Some(sync_msg) = broadcast_rx.recv() => {
-                    let msg_type = match &sync_msg {
-                        SyncMessage::Update { .. } => "update",
-                        SyncMessage::Full { .. } => "full",
-                        SyncMessage::Request { .. } => "request",
-                        SyncMessage::Clear { .. } => "clear",
-                    };
-                    if let Ok(payload) = serde_json::to_value(&sync_msg) {
-                        node.broadcast_typed(&namespace, msg_type, &payload).await;
+                // The watch channel coalesces: if set() ran several times
+                // while a broadcast was in flight, only the newest pending
+                // update is observed here — intermediate versions are
+                // superseded and never hit the wire.
+                result = broadcast_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let pending = broadcast_rx.borrow_and_update().clone();
+                            if let Some(sync_msg) = pending {
+                                let msg_type = match &sync_msg {
+                                    SyncMessage::Update { .. } => "update",
+                                    SyncMessage::Full { .. } => "full",
+                                    SyncMessage::Request { .. } => "request",
+                                    SyncMessage::Clear { .. } => "clear",
+                                };
+                                if let Ok(payload) = serde_json::to_value(&sync_msg) {
+                                    node.broadcast_typed(&namespace, msg_type, &payload).await;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // The store (sender side) was dropped — no more
+                            // outbound updates will ever arrive.
+                            tracing::debug!(
+                                store = inner.store_id.as_str(),
+                                "synced_store: broadcast channel closed"
+                            );
+                            break;
+                        }
                     }
                 }
             }

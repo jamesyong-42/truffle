@@ -35,7 +35,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, watch, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::network::NetworkProvider;
@@ -77,8 +77,12 @@ pub(crate) struct StoreInner<T> {
 /// Created via [`SyncedStore::new`] or [`Node::synced_store`].
 pub struct SyncedStore<T> {
     pub(crate) inner: Arc<StoreInner<T>>,
-    /// Channel to request outbound broadcasts from the sync task.
-    broadcast_tx: mpsc::UnboundedSender<SyncMessage>,
+    /// Latest pending outbound update for the sync task. A `watch` channel
+    /// coalesces: the store has last-write-wins state semantics, so when
+    /// `set()` outpaces the network only the newest version needs to go on
+    /// the wire — intermediate versions carry no information and an
+    /// unbounded queue of them would just grow memory.
+    broadcast_tx: watch::Sender<Option<SyncMessage>>,
     /// Handle to the background sync task.
     task_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
@@ -111,7 +115,7 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
         // WebSocket hello handshake.
         let device_id = node.local_info().device_id;
         let (event_tx, _) = broadcast::channel(256);
-        let (broadcast_tx, broadcast_rx) = mpsc::unbounded_channel();
+        let (broadcast_tx, broadcast_rx) = watch::channel(None);
 
         // Attempt to restore persisted local slice.
         let (local, initial_version) = match backend.load(store_id, &device_id) {
@@ -167,6 +171,10 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
     // ── Write ───────────────────────────────────────────────────────
 
     /// Update this device's data. Increments version and broadcasts.
+    ///
+    /// Rapid successive calls coalesce on the wire: peers are guaranteed to
+    /// observe the newest version, not every intermediate one (the store is
+    /// last-write-wins state, not an event log).
     pub async fn set(&self, data: T) {
         let version = self.inner.version.fetch_add(1, Ordering::SeqCst) + 1;
         let now = SystemTime::now()
@@ -196,7 +204,8 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
             );
         }
 
-        // Request the sync task to broadcast.
+        // Request the sync task to broadcast. `send_replace` drops any
+        // not-yet-sent older version — only the newest matters.
         if let Ok(serialized) = serde_json::to_value(&data) {
             let msg = SyncMessage::Update {
                 device_id: self.inner.device_id.clone(),
@@ -204,7 +213,7 @@ impl<T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static> SyncedStor
                 version,
                 updated_at: now,
             };
-            let _ = self.broadcast_tx.send(msg);
+            self.broadcast_tx.send_replace(Some(msg));
         }
 
         let _ = self.inner.event_tx.send(StoreEvent::LocalChanged(data));
