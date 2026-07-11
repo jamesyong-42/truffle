@@ -38,6 +38,7 @@ tokio = { version = "1" }
 tokio-tungstenite = "0.29"
 futures = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
