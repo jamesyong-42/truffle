@@ -1141,16 +1141,20 @@ impl std::fmt::Debug for NodeBuilder {
     }
 }
 
-/// Atomically write a string to `path` by writing to a sibling `.tmp`
-/// file first and then renaming it over the destination.
+/// Atomically and durably write a string to `path` by writing to a sibling
+/// `.tmp` file first and then renaming it over the destination.
 ///
-/// On POSIX, `rename(2)` is atomic and replaces an existing destination
-/// in-place. On Windows, `std::fs::rename` refuses to overwrite, so we
-/// explicitly remove the destination first — the window between remove
-/// and rename is acceptable here because the caller (device-id.txt
-/// persistence) runs once at startup and is not racing itself.
+/// The caller persists the durable device ULID (RFC 017 §5.4), so a crash
+/// mid-write must never lose or truncate an existing identity file:
+/// - the temp file is fsynced before the rename publishes it, so the
+///   destination can never be observed empty or truncated;
+/// - on POSIX, `rename(2)` atomically replaces the destination and the
+///   parent directory is fsynced so the rename itself survives power loss;
+/// - on Windows, `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` replaces
+///   the destination without the delete-then-rename gap that could drop
+///   the file entirely if the process died between the two steps.
 fn atomic_write_string(path: &Path, content: &str) -> std::io::Result<()> {
-    let _parent = path.parent().ok_or_else(|| {
+    let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "path has no parent directory",
@@ -1158,17 +1162,64 @@ fn atomic_write_string(path: &Path, content: &str) -> std::io::Result<()> {
     })?;
     let mut tmp = path.to_path_buf();
     tmp.set_extension("tmp");
-    std::fs::write(&tmp, content)?;
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
     #[cfg(unix)]
     {
         std::fs::rename(&tmp, path)?;
+        // Best-effort: some filesystems refuse opening a directory for
+        // fsync; the rename is still atomic without it, just not yet
+        // guaranteed on disk.
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
     }
     #[cfg(windows)]
     {
-        // Windows: std::fs::rename errors if the destination exists, so
-        // remove the old file first. Best-effort — missing file is fine.
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path)?;
+        let _ = parent; // only needed for the unix dir-fsync path
+        replace_file_windows(&tmp, path)?;
+    }
+    Ok(())
+}
+
+/// Replace `dest` with `tmp` in one step via `MoveFileExW`.
+///
+/// `MOVEFILE_REPLACE_EXISTING` avoids the non-atomic remove-then-rename
+/// dance (`std::fs::rename` errors on an existing destination on Windows);
+/// `MOVEFILE_WRITE_THROUGH` blocks until the move is flushed to disk.
+#[cfg(windows)]
+fn replace_file_windows(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let (from, to) = (wide(tmp), wide(dest));
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -1313,19 +1364,26 @@ impl NodeBuilder {
 
         // 5. Resolve state_dir. Default:
         //    `{dirs::data_dir}/truffle/{app_id}/{slug(device_name)}`.
-        let state_dir = self.state_dir.clone().unwrap_or_else(|| {
-            let base = dirs::data_dir().unwrap_or_else(|| {
-                tracing::warn!(
-                    "dirs::data_dir() returned None, falling back to std::env::temp_dir()"
-                );
-                std::env::temp_dir()
-            });
-            base.join("truffle")
-                .join(app_id.as_str())
-                .join(identity::slug(device_name.as_str(), 255))
-                .to_string_lossy()
-                .into_owned()
-        });
+        //    No temp-dir fallback: state_dir holds the durable device ULID
+        //    and tsnet keys, and a temp directory silently resets both on
+        //    reboot. Platforms without a data dir must opt in explicitly.
+        let state_dir = match self.state_dir.clone() {
+            Some(dir) => dir,
+            None => {
+                let base = dirs::data_dir().ok_or_else(|| {
+                    NodeError::BuildError(
+                        "no platform data directory available (dirs::data_dir() returned None); \
+                         set state_dir explicitly to a durable location"
+                            .into(),
+                    )
+                })?;
+                base.join("truffle")
+                    .join(app_id.as_str())
+                    .join(identity::slug(device_name.as_str(), 255))
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
 
         // 6. Ensure the state directory exists before Tailscale starts.
         std::fs::create_dir_all(&state_dir)?;
@@ -1522,6 +1580,30 @@ mod tests {
         let dbg = format!("{builder:?}");
         assert!(!dbg.contains("SECRET123"));
         assert!(dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn atomic_write_string_creates_and_replaces() {
+        let dir =
+            std::env::temp_dir().join(format!("truffle-atomic-write-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("device-id.txt");
+
+        atomic_write_string(&path, "01AAAAAAAAAAAAAAAAAAAAAAAA").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "01AAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+
+        // Replacing an existing destination must succeed on every platform
+        // (exercises the MoveFileExW REPLACE_EXISTING path on Windows CI).
+        atomic_write_string(&path, "01BBBBBBBBBBBBBBBBBBBBBBBB").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "01BBBBBBBBBBBBBBBBBBBBBBBB"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── Mock NetworkProvider ──────────────────────────────────────────
