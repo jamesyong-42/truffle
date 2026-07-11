@@ -76,6 +76,7 @@ pub use file_transfer::{
 pub use identity::{slug, tailscale_hostname, AppId, DeviceId, DeviceName, IdentityError};
 pub use node::{NamespacedMessage, Node, NodeBuilder, NodeError, Peer};
 pub use request_reply::{send_and_wait, RequestError};
+pub use session::BroadcastReport;
 pub use synced_store::{
     FileBackend, MemoryBackend, Slice, StoreBackend, StoreEvent, SyncMessage, SyncedStore,
 };

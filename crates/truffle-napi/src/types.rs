@@ -193,6 +193,30 @@ pub struct NapiNamespacedMessage {
     pub timestamp: Option<f64>,
 }
 
+/// Outcome of a `broadcastJson` / `broadcastBytes` call.
+///
+/// "Queued" means handed to a peer's connection task — not confirmed
+/// delivery. Broadcasts reach only currently connected peers.
+#[napi(object)]
+pub struct NapiBroadcastReport {
+    /// Peers with an active WS connection at broadcast time.
+    pub attempted: u32,
+    /// Messages successfully queued to a connection task.
+    pub queued: u32,
+    /// Tailscale ids of peers whose connection task was already closed.
+    pub failed: Vec<String>,
+}
+
+impl From<truffle_core::BroadcastReport> for NapiBroadcastReport {
+    fn from(r: truffle_core::BroadcastReport) -> Self {
+        Self {
+            attempted: r.attempted as u32,
+            queued: r.queued as u32,
+            failed: r.failed,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // File transfer types
 // ---------------------------------------------------------------------------

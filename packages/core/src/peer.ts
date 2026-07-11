@@ -130,9 +130,29 @@ export class Peer {
     return this.ref;
   }
 
+  /**
+   * Send raw bytes with the legacy content-sniffing wire behavior: data
+   * that parses as UTF-8 JSON travels as that JSON value, anything else
+   * as a byte array. Prefer {@link sendJson} / {@link sendBytes}, whose
+   * wire type never depends on the data's contents.
+   */
   send(namespace: string, data: Buffer | Uint8Array): Promise<void> {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
     return this.#node.send(this.#routeId, namespace, buf);
+  }
+
+  /** Send a JSON payload (explicit wire type). */
+  sendJson(namespace: string, payload: unknown): Promise<void> {
+    return this.#node.sendJson(this.#routeId, namespace, payload);
+  }
+
+  /**
+   * Send opaque binary data (explicit wire type; base64 `"bytes"`
+   * envelope — receivers see `msgType === "bytes"`).
+   */
+  sendBytes(namespace: string, data: Buffer | Uint8Array): Promise<void> {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    return this.#node.sendBytes(this.#routeId, namespace, buf);
   }
 
   ping(): Promise<NapiPingResult> {

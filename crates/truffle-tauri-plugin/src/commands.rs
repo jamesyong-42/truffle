@@ -156,7 +156,12 @@ pub async fn health(state: State<'_, TruffleState>) -> Result<HealthInfoJs, Stri
 // ---------------------------------------------------------------------------
 
 /// Send a namespaced message to a specific peer.
+///
+/// Content-sniffing (deprecated in core) is kept here: it is the documented
+/// contract of the guest-js `send()` API. Explicit sendJson/sendBytes
+/// parity commands are a follow-up.
 #[command]
+#[allow(deprecated)]
 pub async fn send_message(
     state: State<'_, TruffleState>,
     peer_id: String,
@@ -170,7 +175,10 @@ pub async fn send_message(
 }
 
 /// Broadcast a namespaced message to all connected peers.
+///
+/// See [`send_message`] on the deliberate use of the deprecated core API.
 #[command]
+#[allow(deprecated)]
 pub async fn broadcast(
     state: State<'_, TruffleState>,
     namespace: String,

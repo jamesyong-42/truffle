@@ -26,7 +26,8 @@
 //!     .await?;
 //!
 //! // Send a message to all peers
-//! node.broadcast("chat", b"hello!").await;
+//! node.broadcast_json("chat", &serde_json::json!({ "text": "hello!" }))
+//!     .await?;
 //!
 //! // Subscribe to messages
 //! let mut rx = node.subscribe("chat");

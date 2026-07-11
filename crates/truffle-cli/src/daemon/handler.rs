@@ -627,7 +627,13 @@ async fn handle_send_message(
         .or(params["payload"].as_str())
         .unwrap_or("");
 
-    match node.send(peer_id, namespace, message.as_bytes()).await {
+    // Daemon wire contract (pre-0.7 sniffing, now explicit): a message
+    // string that parses as JSON is sent as that JSON value; anything else
+    // keeps the legacy byte-array representation.
+    let payload = serde_json::from_str::<serde_json::Value>(message)
+        .unwrap_or_else(|_| serde_json::Value::from(message.as_bytes().to_vec()));
+
+    match node.send_json(peer_id, namespace, &payload).await {
         Ok(()) => DaemonResponse::success(id, serde_json::json!({ "sent": true })),
         Err(e) => DaemonResponse::error(id, error_code::INTERNAL_ERROR, e.to_string()),
     }

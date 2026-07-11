@@ -5864,6 +5864,7 @@ dependencies = [
 name = "truffle"
 version = "0.6.0"
 dependencies = [
+ "serde_json",
  "truffle-core",
  "truffle-sidecar",
 ]
@@ -5926,6 +5927,7 @@ dependencies = [
 name = "truffle-core"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "criterion",
  "deunicode",

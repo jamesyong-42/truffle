@@ -150,6 +150,21 @@ pub enum PeerEvent {
     AuthRequired { url: String },
 }
 
+/// Outcome of a broadcast.
+///
+/// "Queued" means the bytes were handed to a peer's connection task —
+/// delivery is not confirmed at this layer. Broadcasts reach only peers
+/// with an active WebSocket connection; no lazy connections are made.
+#[derive(Debug, Clone, Default)]
+pub struct BroadcastReport {
+    /// Peers with an active WS connection at broadcast time.
+    pub attempted: usize,
+    /// Messages successfully queued to a connection task.
+    pub queued: usize,
+    /// Tailscale ids of peers whose connection task was already closed.
+    pub failed: Vec<String>,
+}
+
 /// An incoming message received from a peer via WebSocket.
 ///
 /// Layer 5 does not inspect or interpret the data — it simply delivers
@@ -936,8 +951,12 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// Sends to all currently connected peers. Peers with no active
     /// connection are skipped (no lazy connect on broadcast).
     /// Errors from individual sends are logged but do not fail the broadcast.
-    pub async fn broadcast(&self, data: &[u8]) {
+    pub async fn broadcast(&self, data: &[u8]) -> BroadcastReport {
         let conns = self.ws_connections.read().await;
+        let mut report = BroadcastReport {
+            attempted: conns.len(),
+            ..Default::default()
+        };
 
         for (peer_id, handle) in conns.iter() {
             if handle.send_tx.send(data.to_vec()).await.is_err() {
@@ -945,8 +964,12 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                     peer_id = %peer_id,
                     "session: broadcast send failed (connection task closed)"
                 );
+                report.failed.push(peer_id.clone());
+            } else {
+                report.queued += 1;
             }
         }
+        report
     }
 
     /// Subscribe to incoming messages from any connected peer.
