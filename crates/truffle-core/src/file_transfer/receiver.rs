@@ -120,12 +120,21 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
     offer_tx: mpsc::Sender<(FileOffer, OfferResponder)>,
     event_tx: broadcast::Sender<FileTransferEvent>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    let cancel = node.tasks.cancel.clone();
+    let tracker = node.tasks.tracker.clone();
+    tracker.spawn(async move {
         let mut rx = node.subscribe("ft");
         info!("File transfer receive handler started");
 
         loop {
-            let msg = match rx.recv().await {
+            let recv = tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("FT receive handler: node stopping, exiting");
+                    break;
+                }
+                result = rx.recv() => result,
+            };
+            let msg = match recv {
                 Ok(m) => m,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!("FT receive handler lagged, missed {n} messages");
@@ -194,10 +203,17 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                             continue;
                         }
                     };
-                    // Handle incoming OFFER (someone wants to push a file to us)
-                    tokio::spawn(async move {
+                    // Handle incoming OFFER (someone wants to push a file to us).
+                    // Tracked + cancellable: stop() drains these instead of
+                    // leaving up-to-60s parked tasks behind.
+                    let cancel = node.tasks.cancel.clone();
+                    let tracker = node.tasks.tracker.clone();
+                    tracker.spawn(async move {
                         let _permit = permit;
                         let _pending = pending_guard;
+                        tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        _ = async {
                         if let Err(e) = handle_incoming_offer(
                             &node, &from, &file_name, size, &sha256, &save_path, &token, &offer_tx,
                             &event_tx,
@@ -233,6 +249,8 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                                 }
                             }
                         }
+                        } => {}
+                        }
                     });
                 }
                 FtMessage::PullRequest {
@@ -258,9 +276,15 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                             continue;
                         }
                     };
-                    // Handle incoming PULL_REQUEST (someone wants to download from us)
-                    tokio::spawn(async move {
+                    // Handle incoming PULL_REQUEST (someone wants to download
+                    // from us). Tracked + cancellable like offers.
+                    let cancel = node.tasks.cancel.clone();
+                    let tracker = node.tasks.tracker.clone();
+                    tracker.spawn(async move {
                         let _permit = permit;
+                        tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        _ = async {
                         if let Err(e) =
                             handle_pull_request(&node, &from, &path, &token, &event_tx).await
                         {
@@ -269,6 +293,8 @@ pub fn spawn_receive_handler<N: NetworkProvider + 'static>(
                                 path = path.as_str(),
                                 "Failed to serve file: {e}"
                             );
+                        }
+                        } => {}
                         }
                     });
                 }
@@ -818,7 +844,8 @@ fn spawn_reject<N: NetworkProvider + 'static>(
     token: String,
     reason: &'static str,
 ) {
-    tokio::spawn(async move {
+    let tracker = node.tasks.tracker.clone();
+    tracker.spawn(async move {
         send_reject(&node, &from, &token, reason).await;
     });
 }

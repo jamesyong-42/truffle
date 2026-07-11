@@ -313,6 +313,11 @@ pub struct PeerRegistry<N: NetworkProvider + 'static> {
     /// Channel for incoming messages from any connected peer.
     incoming_tx: broadcast::Sender<IncomingMessage>,
 
+    /// Handles to the registry's background loops (peer-event + WS accept),
+    /// retained so [`Self::shutdown`] can abort them instead of leaving
+    /// them running until every Arc clone drops.
+    background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+
     /// RFC 022 Phase C: proactively exchange hello with online peers.
     eager_identity: bool,
 
@@ -387,6 +392,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             connecting: Arc::new(RwLock::new(HashSet::new())),
             event_tx,
             incoming_tx,
+            background_tasks: std::sync::Mutex::new(Vec::new()),
             eager_identity: options.eager_identity,
             eager_identity_sem: Arc::new(Semaphore::new(concurrency)),
             eager_identity_jitter_ms: options.eager_identity_jitter_ms,
@@ -437,7 +443,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             identity_inflight: self.identity_inflight.clone(),
         };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(NetworkPeerEvent::Joined(network_peer)) => {
@@ -611,6 +617,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                 }
             }
         });
+        self.background_tasks.lock().unwrap().push(handle);
     }
 
     /// Spawn a task that accepts incoming WebSocket connections from peers.
@@ -631,7 +638,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
             }
         };
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Some(stream) => {
@@ -682,6 +689,7 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
                 }
             }
         });
+        self.background_tasks.lock().unwrap().push(handle);
     }
 
     /// Return all known peers.
@@ -1048,6 +1056,13 @@ impl<N: NetworkProvider + 'static> PeerRegistry<N> {
     /// disconnected. Called by `Node::stop()` during teardown. Safe to call
     /// multiple times — with no active connections it is a no-op.
     pub async fn shutdown(&self) {
+        // Stop the background loops first (peer-event + WS accept) so no
+        // new connections or peer updates arrive mid-teardown. Abort is
+        // safe: both loops only await channel/accept operations.
+        for handle in self.background_tasks.lock().unwrap().drain(..) {
+            handle.abort();
+        }
+
         let handles: Vec<(String, WsConnectionHandle)> = {
             let mut conns = self.ws_connections.write().await;
             conns.drain().collect()

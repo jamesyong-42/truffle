@@ -237,6 +237,9 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     /// that automatically accepts every offer with the save path set to
     /// `{output_dir}/{file_name}`.
     pub async fn auto_accept(&self, node: Arc<Node<N>>, output_dir: &str) {
+        // Tracked + cancellable so stop() drains this loop too.
+        let cancel = node.tasks.cancel.clone();
+        let tracker = node.tasks.tracker.clone();
         let mut rx = self.offer_channel(node).await;
         // Normalize to a directory path (trailing separator) so the receiver
         // treats it as a directory and appends a *sanitized* base name derived
@@ -246,8 +249,15 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
         // overwrite). See `receiver::resolve_dest_path`.
         let output_dir = format!("{}/", output_dir.trim_end_matches(['/', '\\']));
 
-        tokio::spawn(async move {
-            while let Some((offer, responder)) = rx.recv().await {
+        tracker.spawn(async move {
+            loop {
+                let recv = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    r = rx.recv() => r,
+                };
+                let Some((offer, responder)) = recv else {
+                    break;
+                };
                 info!(
                     file = offer.file_name.as_str(),
                     dir = output_dir.as_str(),
@@ -263,10 +273,19 @@ impl<'a, N: NetworkProvider + 'static> FileTransfer<'a, N> {
     /// This starts the receiver listener (lazy start) and spawns a task
     /// that automatically rejects every offer.
     pub async fn auto_reject(&self, node: Arc<Node<N>>) {
+        let cancel = node.tasks.cancel.clone();
+        let tracker = node.tasks.tracker.clone();
         let mut rx = self.offer_channel(node).await;
 
-        tokio::spawn(async move {
-            while let Some((_offer, responder)) = rx.recv().await {
+        tracker.spawn(async move {
+            loop {
+                let recv = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    r = rx.recv() => r,
+                };
+                let Some((_offer, responder)) = recv else {
+                    break;
+                };
                 responder.reject("auto-rejected");
             }
         });

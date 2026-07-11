@@ -27,6 +27,7 @@ uuid.workspace = true
 thiserror.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+tokio-util.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true

@@ -336,6 +336,55 @@ pub struct Node<N: NetworkProvider + 'static> {
     /// `stop()` calls no-ops and causes the send paths to fail fast with
     /// [`NodeError::Stopped`].
     stopped: std::sync::atomic::AtomicBool,
+    /// Structured ownership of node-scoped background tasks.
+    pub(crate) tasks: NodeTasks,
+}
+
+/// Structured ownership of the node's background tasks.
+///
+/// Every node-scoped task (envelope router, file-transfer dispatch and
+/// per-transfer work) is spawned on the [`TaskTracker`] and watches the
+/// [`CancellationToken`]. [`Node::stop`] cancels the token, then waits for
+/// the tracker to drain with a bounded timeout, hard-aborting the retained
+/// long-lived handles as a last resort — so `stop()` deterministically
+/// means "all node work has stopped" and can never hang.
+pub(crate) struct NodeTasks {
+    /// Cooperative cancellation signal for every node-scoped task.
+    pub(crate) cancel: tokio_util::sync::CancellationToken,
+    /// Tracks all node-scoped tasks so stop() can await their completion.
+    pub(crate) tracker: tokio_util::task::TaskTracker,
+    /// Handles to long-lived tasks, retained for hard-abort if the
+    /// cooperative drain times out. Ephemeral tasks (per-transfer work) are
+    /// tracked but not retained here — holding a handle per completed
+    /// transfer would itself grow without bound.
+    long_lived: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl NodeTasks {
+    fn new() -> Self {
+        Self {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            tracker: tokio_util::task::TaskTracker::new(),
+            long_lived: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Spawn a long-lived node task: tracked for the stop() drain AND
+    /// retained for hard-abort if that drain times out.
+    fn spawn_long_lived<F>(&self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = self.tracker.spawn(fut);
+        self.long_lived.lock().unwrap().push(handle);
+    }
+
+    /// Abort every retained long-lived task (drain-timeout fallback).
+    fn abort_long_lived(&self) {
+        for h in self.long_lived.lock().unwrap().drain(..) {
+            h.abort();
+        }
+    }
 }
 
 impl<N: NetworkProvider + 'static> Node<N> {
@@ -365,6 +414,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             ws_port: 9417,
             proxy_state: crate::proxy::ProxyState::new(),
             stopped: std::sync::atomic::AtomicBool::new(false),
+            tasks: NodeTasks::new(),
         };
 
         // Spawn the envelope router task.
@@ -384,10 +434,18 @@ impl<N: NetworkProvider + 'static> Node<N> {
         namespace_filters: Arc<StdRwLock<HashMap<String, broadcast::Sender<NamespacedMessage>>>>,
     ) {
         let mut rx = session.subscribe();
+        let cancel = self.tasks.cancel.clone();
 
-        tokio::spawn(async move {
+        self.tasks.spawn_long_lived(async move {
             loop {
-                match rx.recv().await {
+                let recv = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::debug!("envelope router: cancelled by stop()");
+                        break;
+                    }
+                    result = rx.recv() => result,
+                };
+                match recv {
                     Ok(msg) => {
                         if let Ok(envelope) = codec.decode(&msg.data) {
                             let namespaced = NamespacedMessage {
@@ -581,20 +639,50 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Idempotent: calling `stop()` more than once is safe — subsequent calls
     /// return immediately without repeating teardown.
     ///
-    /// The envelope-router and peer-event background tasks are not aborted
-    /// here; they exit on their own once the `Node` is dropped and their
-    /// broadcast channels close. They sit idle after `stop()`.
+    /// When `stop()` returns, all node-scoped background work has stopped:
+    /// the envelope router, the file-transfer dispatch task, and in-flight
+    /// per-transfer tasks are cancelled and drained (with a bounded wait
+    /// that hard-aborts stragglers, so `stop()` cannot hang). Session and
+    /// provider background loops are torn down by their own layers.
     pub async fn stop(&self) {
         if self.stopped.swap(true, std::sync::atomic::Ordering::SeqCst) {
             tracing::debug!("node: stop() called on already-stopped node");
             return;
         }
         tracing::info!("node: stopping");
-        // Layer 5: close all active WebSocket connections.
+
+        // 1. Cancel every node-scoped background task (envelope router,
+        //    file-transfer dispatch + per-transfer work). Cooperative: each
+        //    task exits at its next await point.
+        self.tasks.cancel.cancel();
+
+        // 2. Drop the file-transfer dispatch handle so a later
+        //    offer_channel() replace cannot race a half-stopped task.
+        if let Some(h) = self.file_transfer_state.receiver_handle.lock().await.take() {
+            h.abort();
+        }
+
+        // 3. Layer 5: close all active WebSocket connections and stop the
+        //    session's background loops (peer-event + accept).
         self.session.shutdown().await;
-        // Layer 3: shut down the network provider (sidecar + bridge).
+
+        // 4. Layer 3: shut down the network provider (sidecar + bridge).
         if let Err(e) = self.network.stop().await {
             tracing::warn!(error = %e, "node: network provider stop failed");
+        }
+
+        // 5. Deterministically drain node tasks. The token already fired,
+        //    so this normally completes immediately; the timeout guards
+        //    against a task stuck in an await that never resolves.
+        self.tasks.tracker.close();
+        let drain =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.tasks.tracker.wait());
+        if drain.await.is_err() {
+            tracing::warn!("node: background tasks did not drain in 5s; aborting stragglers");
+            self.tasks.abort_long_lived();
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(1), self.tasks.tracker.wait())
+                    .await;
         }
         tracing::info!("node: stopped");
     }
@@ -812,6 +900,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// [`resolve_peer_id`](Self::resolve_peer_id). Used by the FFI layers
     /// to address datagram sends by peer name.
     pub async fn resolve_peer_ip(&self, peer_ref: &str) -> Result<IpAddr, NodeError> {
+        self.ensure_not_stopped()?;
         Ok(self.resolve_peer(peer_ref).await?.ip)
     }
 
@@ -833,6 +922,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// - the Tailscale stable ID
     /// - the Tailscale IP address (e.g. `100.x.x.x`)
     pub async fn resolve_peer_id(&self, peer_id: &str) -> Result<String, NodeError> {
+        self.ensure_not_stopped()?;
         let p = self.resolve_peer(peer_id).await?;
         Ok(p.published_device_id()
             .map(|s| s.to_string())
@@ -846,6 +936,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Resolves the peer ID to an IP address and pings via Layer 3. Accepts
     /// the same identifier forms as [`resolve_peer_id`](Self::resolve_peer_id).
     pub async fn ping(&self, peer_id: &str) -> Result<PingResult, NodeError> {
+        self.ensure_not_stopped()?;
         let peer = self.resolve_peer(peer_id).await?;
         let addr = peer.ip.to_string();
         self.network.ping(&addr).await.map_err(NodeError::Network)
@@ -1127,6 +1218,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// The stream is raw even on port 443 — the sidecar's legacy auto-TLS
     /// wrap for 443 dials is disabled on this path.
     pub async fn open_tcp(&self, peer_id: &str, port: u16) -> Result<TcpStream, NodeError> {
+        self.ensure_not_stopped()?;
         let peer = self.resolve_peer(peer_id).await?;
         let addr = peer.ip.to_string();
         self.network
@@ -1143,6 +1235,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// like the file transfer subsystem does). Ports 443 and 9417 are
     /// reserved by truffle's own listeners.
     pub async fn listen_tcp(&self, port: u16) -> Result<RawListener, NodeError> {
+        self.ensure_not_stopped()?;
         use crate::transport::tcp::TcpTransport;
         use crate::transport::RawTransport;
 
@@ -1156,6 +1249,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Dropping the [`RawListener`] alone stops local delivery but leaves
     /// the tsnet port bound in the sidecar; this releases it.
     pub async fn unlisten_tcp(&self, port: u16) -> Result<(), NodeError> {
+        self.ensure_not_stopped()?;
         self.network
             .unlisten_tcp(port)
             .await
@@ -1175,6 +1269,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
         peer_id: &str,
         port: u16,
     ) -> Result<QuicConnection, NodeError> {
+        self.ensure_not_stopped()?;
         let peer = self.resolve_peer(peer_id).await?;
         let alpn = crate::transport::quic::raw_alpn(&self.network.local_identity().app_id);
         crate::transport::quic::connect_raw(&self.network, &peer.ip.to_string(), port, &alpn)
@@ -1190,6 +1285,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// tsnet relay (the relay cannot report the actual ephemeral port
     /// back).
     pub async fn listen_quic(&self, port: u16) -> Result<QuicListener, NodeError> {
+        self.ensure_not_stopped()?;
         ensure_port_unreserved(port, self.ws_port)?;
         if port == 0 {
             return Err(NodeError::NotImplemented(
@@ -1213,11 +1309,21 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// to stay under the tailnet MTU. Port 0 binds an ephemeral relay
     /// port — suitable for client-style sockets that send first.
     pub async fn bind_udp(&self, port: u16) -> Result<DatagramSocket, NodeError> {
+        self.ensure_not_stopped()?;
         use crate::transport::udp::{UdpConfig, UdpTransport};
         use crate::transport::DatagramTransport;
 
         let udp = UdpTransport::new(self.network.clone(), UdpConfig::default());
         udp.bind(port).await.map_err(NodeError::Transport)
+    }
+}
+
+impl<N: NetworkProvider + 'static> Drop for Node<N> {
+    fn drop(&mut self) {
+        // Insurance for nodes dropped without stop(): cancelling is cheap,
+        // synchronous, and lets background tasks exit instead of idling on
+        // channels that may never close.
+        self.tasks.cancel.cancel();
     }
 }
 
@@ -1978,6 +2084,69 @@ mod tests {
     }
 
     // ── Tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_drains_all_background_tasks() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-drain", ws_port).await;
+        let node = Arc::new(node);
+
+        // Router is running; also start the FT dispatch task.
+        let _offers = node.file_transfer().offer_channel(node.clone()).await;
+        assert!(!node.tasks.tracker.is_empty(), "tasks should be running");
+
+        node.stop().await;
+
+        // stop() returns only after every node-scoped task has finished.
+        assert!(
+            node.tasks.tracker.is_empty(),
+            "background tasks still alive after stop()"
+        );
+        assert!(
+            node.file_transfer_state
+                .receiver_handle
+                .lock()
+                .await
+                .is_none(),
+            "FT receiver handle not cleared by stop()"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_node_fails_raw_and_resolution_apis_fast() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-guards", ws_port).await;
+        node.stop().await;
+
+        assert!(matches!(
+            node.open_tcp("nobody", 4242).await.unwrap_err(),
+            NodeError::Stopped
+        ));
+        assert!(matches!(
+            node.listen_tcp(4242).await.unwrap_err(),
+            NodeError::Stopped
+        ));
+        assert!(matches!(
+            node.connect_quic("nobody", 4242).await.unwrap_err(),
+            NodeError::Stopped
+        ));
+        assert!(matches!(
+            node.listen_quic(4242).await.unwrap_err(),
+            NodeError::Stopped
+        ));
+        assert!(matches!(
+            node.bind_udp(4242).await.err(),
+            Some(NodeError::Stopped)
+        ));
+        assert!(matches!(
+            node.ping("nobody").await.unwrap_err(),
+            NodeError::Stopped
+        ));
+        assert!(matches!(
+            node.resolve_peer_id("nobody").await.unwrap_err(),
+            NodeError::Stopped
+        ));
+    }
 
     #[test]
     fn bytes_payload_roundtrip() {
