@@ -395,23 +395,56 @@ impl<N: NetworkProvider + 'static> Node<N> {
                             // Route to namespace-specific subscriber if present.
                             // Sync read on the std RwLock: the critical section
                             // is a HashMap lookup with no `.await` points.
-                            let filters = namespace_filters
-                                .read()
-                                .expect("namespace_filters std RwLock poisoned");
-                            let _has_subscriber = filters.contains_key(&namespaced.namespace);
-                            if let Some(tx) = filters.get(&namespaced.namespace) {
-                                let send_result = tx.send(namespaced);
-                                tracing::debug!(
-                                    namespace = %envelope.namespace,
-                                    subscriber_count = tx.receiver_count(),
-                                    sent = send_result.is_ok(),
-                                    "envelope router: sent to namespace subscriber"
-                                );
-                            } else {
-                                tracing::debug!(
-                                    namespace = %envelope.namespace,
-                                    "envelope router: no subscriber for namespace"
-                                );
+                            // Poisoning is recovered (into_inner) instead of
+                            // panicking: the map stays structurally valid after
+                            // any panic, and a panic here would kill routing
+                            // for the lifetime of the node.
+                            let namespace = namespaced.namespace.clone();
+                            let dead_subscriber = {
+                                let filters = namespace_filters
+                                    .read()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                match filters.get(&namespace) {
+                                    Some(tx) => {
+                                        let send_result = tx.send(namespaced);
+                                        tracing::debug!(
+                                            namespace = %namespace,
+                                            subscriber_count = tx.receiver_count(),
+                                            sent = send_result.is_ok(),
+                                            "envelope router: sent to namespace subscriber"
+                                        );
+                                        send_result.is_err()
+                                    }
+                                    None => {
+                                        tracing::debug!(
+                                            namespace = %namespace,
+                                            "envelope router: no subscriber for namespace"
+                                        );
+                                        false
+                                    }
+                                }
+                            };
+
+                            // A failed send means every receiver was dropped:
+                            // prune the entry so dynamic namespaces don't grow
+                            // the map forever. Re-checked under the write lock —
+                            // subscribe() adds receivers while holding the read
+                            // lock, so a zero count here cannot race with a new
+                            // subscriber.
+                            if dead_subscriber {
+                                let mut filters = namespace_filters
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if filters
+                                    .get(&namespace)
+                                    .is_some_and(|tx| tx.receiver_count() == 0)
+                                {
+                                    filters.remove(&namespace);
+                                    tracing::debug!(
+                                        namespace = %namespace,
+                                        "envelope router: pruned dead namespace subscriber"
+                                    );
+                                }
                             }
                         } else {
                             tracing::warn!(
@@ -938,11 +971,13 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// namespace share the same underlying channel.
     pub fn subscribe(&self, namespace: &str) -> broadcast::Receiver<NamespacedMessage> {
         // Fast path: check if subscriber already exists (read lock).
+        // Poisoning is recovered (into_inner), not propagated — see the
+        // envelope router for the rationale.
         {
             let filters = self
                 .namespace_filters
                 .read()
-                .expect("namespace_filters std RwLock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(tx) = filters.get(namespace) {
                 return tx.subscribe();
             }
@@ -952,11 +987,15 @@ impl<N: NetworkProvider + 'static> Node<N> {
         let mut filters = self
             .namespace_filters
             .write()
-            .expect("namespace_filters std RwLock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Double-check after acquiring write lock.
         if let Some(tx) = filters.get(namespace) {
             return tx.subscribe();
         }
+        // Opportunistic sweep: drop entries whose receivers are all gone.
+        // The router prunes on send failure, but only for namespaces that
+        // still receive traffic — this catches the silent ones.
+        filters.retain(|_, tx| tx.receiver_count() > 0);
         let (tx, rx) = broadcast::channel(256);
         filters.insert(namespace.to_string(), tx);
         rx
@@ -1743,6 +1782,48 @@ mod tests {
     }
 
     // ── Tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subscribe_slow_path_sweeps_dead_namespaces() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-sweep", ws_port).await;
+
+        let rx = node.subscribe("dyn-a");
+        drop(rx);
+        // Creating a NEW namespace takes the slow path, which sweeps
+        // entries with no live receivers.
+        let _rx_b = node.subscribe("dyn-b");
+
+        let filters = node.namespace_filters.read().unwrap();
+        assert!(!filters.contains_key("dyn-a"), "dead entry not swept");
+        assert!(filters.contains_key("dyn-b"));
+    }
+
+    #[tokio::test]
+    async fn router_prunes_namespace_after_receivers_drop() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-prune", ws_port).await;
+
+        let rx = node.subscribe("dyn-c");
+        drop(rx);
+
+        // Drive the router with a message for the now-dead namespace.
+        let envelope = Envelope::new("dyn-c", "message", json!({"x": 1})).with_timestamp();
+        let data = JsonCodec.encode(&envelope).unwrap();
+        node.session.test_inject_incoming("peer-x", data);
+
+        // The router runs on a background task; poll for the prune.
+        for _ in 0..50 {
+            {
+                let filters = node.namespace_filters.read().unwrap();
+                if !filters.contains_key("dyn-c") {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("dead namespace entry was not pruned by the router");
+    }
 
     #[tokio::test]
     async fn test_node_builder_creates_node() {
