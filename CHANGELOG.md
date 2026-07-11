@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.6.0...truffle-v0.7.0) (2026-07-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core:** explicit send_json/send_bytes APIs and broadcast reports ([#146](https://github.com/jamesyong-42/truffle/issues/146))
+* **core:** bound file-transfer work, unique temp files, overwrite policy ([#142](https://github.com/jamesyong-42/truffle/issues/142))
+
+### Features
+
+* **core:** explicit send_json/send_bytes APIs and broadcast reports ([#146](https://github.com/jamesyong-42/truffle/issues/146)) ([9b9478e](https://github.com/jamesyong-42/truffle/commit/9b9478ede0ed8954d8b4449dac7ab08d53de5226))
+* **core:** structured shutdown — stop() drains all node-scoped tasks ([#147](https://github.com/jamesyong-42/truffle/issues/147)) ([eeb2667](https://github.com/jamesyong-42/truffle/commit/eeb266759073996a131d6d4f091961db01585f5d))
+
+
+### Bug Fixes
+
+* **core:** bound file-transfer work, unique temp files, overwrite policy ([#142](https://github.com/jamesyong-42/truffle/issues/142)) ([ba42168](https://github.com/jamesyong-42/truffle/commit/ba42168eeb1700f8e97340d309531047d418d105))
+* **core:** coalesce SyncedStore broadcasts with a watch channel ([#144](https://github.com/jamesyong-42/truffle/issues/144)) ([a5075cd](https://github.com/jamesyong-42/truffle/commit/a5075cd7842004b8334df8b88acce8c82ec44330))
+* **core:** make device-ID persistence crash-safe and durable ([#141](https://github.com/jamesyong-42/truffle/issues/141)) ([eddca58](https://github.com/jamesyong-42/truffle/commit/eddca5839c4589ddf098382efd10e481904fa87a))
+* **core:** prune dead namespace subscriptions, recover poisoned locks ([#145](https://github.com/jamesyong-42/truffle/issues/145)) ([370c3a8](https://github.com/jamesyong-42/truffle/commit/370c3a80fed21c2c43cc59168d1735665f482ac9))
+* redact auth keys and session tokens from Debug output ([#140](https://github.com/jamesyong-42/truffle/issues/140)) ([081a12d](https://github.com/jamesyong-42/truffle/commit/081a12d717da1c4e44615472bf0f849f4e064677))
+
 ## [0.6.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.5.1...truffle-v0.6.0) (2026-07-10)
 
 
