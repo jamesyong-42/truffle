@@ -819,6 +819,26 @@ export interface NapiProxyConfig {
   targetScheme?: string
   /** Whether to announce this proxy on the mesh for discovery (default: true). */
   announce?: boolean
+  /**
+   * Terminate TLS on the tailnet listener (default: true — the v1
+   * always-TLS behavior). `false` = plain HTTP; requires a v2 sidecar.
+   */
+  tls?: boolean
+  /**
+   * Permit non-loopback targets (default: false — deny). A LAN target
+   * turns this node into a pivot into its network (RFC 023 §9.3).
+   */
+  allowNonLoopback?: boolean
+  /**
+   * loginName allow globs, e.g. `["*@corp.com"]` (default: none = the
+   * whole tailnet). Non-matching callers get a bare 403 (RFC 023 §9.7).
+   */
+  allow?: Array<string>
+  /**
+   * Path-prefix routes (RFC 023 §7). When non-empty they replace the
+   * single `targetHost`/`targetPort`/`targetScheme` target.
+   */
+  routes?: Array<NapiProxyRoute>
 }
 
 /** A proxy lifecycle event delivered to JavaScript. */
@@ -848,6 +868,41 @@ export interface NapiProxyInfo {
   url: string
   /** Status: "starting", "running", "stopped", or "error: <message>". */
   status: string
+}
+
+/**
+ * One path-prefix route of a v2 proxy (RFC 023 §7). Exactly one of
+ * `targetUrl` / `dir` is set; longest prefix wins. Validation lives in
+ * core `validate_config`, not here.
+ */
+export interface NapiProxyRoute {
+  /** Path prefix to match (must start with "/"). */
+  prefix: string
+  /**
+   * Proxy target URL, e.g. "http://localhost:8000". Mutually exclusive
+   * with `dir`.
+   */
+  targetUrl?: string
+  /**
+   * Static directory to serve (absolute path on the serving machine).
+   * Mutually exclusive with `targetUrl`.
+   */
+  dir?: string
+  /**
+   * SPA fallback rewritten on static misses, e.g. "/index.html". Only
+   * meaningful with `dir`.
+   */
+  fallback?: string
+  /**
+   * Strip the matched prefix before proxying (default: false). Only
+   * meaningful with `targetUrl`.
+   */
+  stripPrefix?: boolean
+  /**
+   * Per-route loginName globs; overrides the config-level `allow`
+   * (default: none = inherit).
+   */
+  allow?: Array<string>
 }
 
 /** A versioned slice of data owned by a single device. */

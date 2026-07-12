@@ -412,6 +412,56 @@ pub struct ProxyConfigJs {
     pub target_scheme: Option<String>,
     /// Whether to announce this proxy on the mesh for discovery (default: true).
     pub announce: Option<bool>,
+    /// Terminate TLS on the tailnet listener (default: true — the v1
+    /// always-TLS behavior). `false` = plain HTTP; requires a v2 sidecar.
+    pub tls: Option<bool>,
+    /// Permit non-loopback targets (default: false — deny). A LAN target
+    /// turns this node into a pivot into its network (RFC 023 §9.3).
+    pub allow_non_loopback: Option<bool>,
+    /// loginName allow globs, e.g. `["*@corp.com"]` (default: none = the
+    /// whole tailnet). Non-matching callers get a bare 403 (RFC 023 §9.7).
+    pub allow: Option<Vec<String>>,
+    /// Path-prefix routes (RFC 023 §7). When non-empty they replace the
+    /// single `targetHost`/`targetPort`/`targetScheme` target.
+    pub routes: Option<Vec<ProxyRouteJs>>,
+}
+
+/// One path-prefix route of a v2 proxy (RFC 023 §7). Exactly one of
+/// `targetUrl` / `dir` is set; longest prefix wins. Validation lives in
+/// core `validate_config`, not here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRouteJs {
+    /// Path prefix to match (must start with "/").
+    pub prefix: String,
+    /// Proxy target URL, e.g. "http://localhost:8000". Mutually exclusive
+    /// with `dir`.
+    pub target_url: Option<String>,
+    /// Static directory to serve (absolute path on the serving machine).
+    /// Mutually exclusive with `targetUrl`.
+    pub dir: Option<String>,
+    /// SPA fallback rewritten on static misses, e.g. "/index.html". Only
+    /// meaningful with `dir`.
+    pub fallback: Option<String>,
+    /// Strip the matched prefix before proxying (default: false). Only
+    /// meaningful with `targetUrl`.
+    pub strip_prefix: Option<bool>,
+    /// Per-route loginName globs; overrides the config-level `allow`
+    /// (default: none = inherit).
+    pub allow: Option<Vec<String>>,
+}
+
+impl From<ProxyRouteJs> for truffle_core::network::ProxyRoute {
+    fn from(r: ProxyRouteJs) -> Self {
+        Self {
+            prefix: r.prefix,
+            target_url: r.target_url,
+            dir: r.dir,
+            fallback: r.fallback,
+            strip_prefix: r.strip_prefix.unwrap_or(false),
+            allow: r.allow.unwrap_or_default(),
+        }
+    }
 }
 
 /// Information about a running or configured proxy, serialized for the frontend.
@@ -573,5 +623,62 @@ mod start_config_debug_tests {
         let dbg = format!("{config:?}");
         assert!(!dbg.contains("SECRET123"));
         assert!(dbg.contains("[REDACTED]"));
+    }
+}
+
+#[cfg(test)]
+mod proxy_route_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn absent_strip_prefix_and_allow_map_to_core_defaults() {
+        // A dir route with stripPrefix / allow omitted must reach core as
+        // `strip_prefix: false` / `allow: []` (the v1-equivalent defaults),
+        // not as anything the engine would treat as set.
+        let route = ProxyRouteJs {
+            prefix: "/".to_string(),
+            target_url: None,
+            dir: Some("/srv/public".to_string()),
+            fallback: Some("/index.html".to_string()),
+            strip_prefix: None,
+            allow: None,
+        };
+        let mapped: truffle_core::network::ProxyRoute = route.into();
+        assert_eq!(
+            mapped,
+            truffle_core::network::ProxyRoute {
+                prefix: "/".to_string(),
+                target_url: None,
+                dir: Some("/srv/public".to_string()),
+                fallback: Some("/index.html".to_string()),
+                strip_prefix: false,
+                allow: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn camel_case_wire_keys_deserialize_and_set_values_pass_through() {
+        // The frontend speaks camelCase (targetUrl / stripPrefix); confirm
+        // serde renames them and every set value survives the mapping.
+        let route: ProxyRouteJs = serde_json::from_value(serde_json::json!({
+            "prefix": "/api",
+            "targetUrl": "http://localhost:8000",
+            "stripPrefix": true,
+            "allow": ["ops@corp.com"],
+        }))
+        .unwrap();
+        let mapped: truffle_core::network::ProxyRoute = route.into();
+        assert_eq!(
+            mapped,
+            truffle_core::network::ProxyRoute {
+                prefix: "/api".to_string(),
+                target_url: Some("http://localhost:8000".to_string()),
+                dir: None,
+                fallback: None,
+                strip_prefix: true,
+                allow: vec!["ops@corp.com".to_string()],
+            }
+        );
     }
 }
