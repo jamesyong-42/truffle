@@ -1,17 +1,17 @@
-// Express, served over the mesh (RFC 021 Phase 2).
+// Express, served over the mesh (RFC 023 §6.1 — mesh.http.createServer).
 //
-// This is a perfectly ordinary Express app. The only mesh-specific line is
-// how connections reach Node's http.Server: instead of binding a host TCP
-// port with `httpServer.listen(port)`, we take connections from `mesh.net`
-// and feed them in with `httpServer.emit('connection', socket)`. Every
-// request then arrives over the tailnet — WireGuard-encrypted and reachable
-// only by other devices running this app.
+// This is a perfectly ordinary Express app. The only mesh-specific line is how
+// it starts: instead of `app.listen(port)` on a host TCP port, we hand the app
+// to `mesh.http.createServer` and call `.listen(port)` on that. It returns a
+// real node:http.Server whose listener is the mesh, so every request arrives
+// over the tailnet — WireGuard-encrypted, reachable by any Tailscale device
+// (browsers included), and carrying the caller's verified identity on
+// `req.socket` (see the /api/whoami route).
 //
 // Run this on one device, then run src/client.ts on another (see README.md).
 
-import http from 'node:http';
 import express from 'express';
-import { createMeshNode } from '@vibecook/truffle';
+import { createMeshNode, type TruffleSocket } from '@vibecook/truffle';
 
 const PORT = 8080;
 
@@ -56,25 +56,40 @@ app.get('/api/peers', async (_req, res) => {
   });
 });
 
+// Identity on the request: req.socket is a mesh TruffleSocket carrying the
+// caller's verified Tailscale WhoIs identity (spoof-proof — it comes from the
+// WireGuard tunnel, not a client header). Frameworks type it as a net.Socket,
+// so cast to read the mesh fields.
+app.get('/api/whoami', (req, res) => {
+  const sock = req.socket as unknown as TruffleSocket;
+  res.json({
+    // remotePeer is the RFC 022 handle (null until the caller is interned);
+    // remotePeerName is the WhoIs display name, always set for a tailnet caller.
+    youAre: sock.remotePeer?.displayName ?? sock.remotePeerName ?? null,
+    yourDeviceId: sock.remotePeer?.deviceId ?? null,
+    seenBy: me.deviceName,
+  });
+});
+
 app.post('/api/echo', (req, res) => {
   res.json({ echoedBy: me.deviceName, body: req.body });
 });
 
-const httpServer = http.createServer(app);
+// The one mesh-specific line: serve the Express app over the mesh. createServer
+// returns a real http.Server whose listen() binds a mesh listener instead of a
+// host TCP port. (The older, more manual form still works too —
+// `mesh.net.createServer((s) => httpServer.emit('connection', s)).listen(PORT)`
+// — but createServer is the front door and also gives you req.socket identity.)
+const server = mesh.http.createServer(app);
 
-// The one mesh-specific line: serve the Express app over the mesh. Each mesh
-// TCP connection becomes an http.Server 'connection' — exactly what a real
-// listening socket would emit.
-mesh.net
-  .createServer((socket) => httpServer.emit('connection', socket))
-  .listen(PORT, () => {
-    console.log(`Express is live over the mesh on port ${PORT}`);
-    console.log(`  device: "${me.deviceName}"   ip: ${me.ip ?? '(pending Tailscale)'}`);
-    console.log('From another device running this app, in the repo root:');
-    console.log(
-      `  pnpm --filter @vibecook/example-express-over-mesh exec tsx src/client.ts "${me.deviceName}"`,
-    );
-  });
+server.listen(PORT, () => {
+  console.log(`Express is live over the mesh on port ${PORT}`);
+  console.log(`  device: "${me.deviceName}"   ip: ${me.ip ?? '(pending Tailscale)'}`);
+  console.log('From another device running this app, in the repo root:');
+  console.log(
+    `  pnpm --filter @vibecook/example-express-over-mesh exec tsx src/client.ts "${me.deviceName}"`,
+  );
+});
 
 process.on('SIGINT', async () => {
   console.log('\nStopping...');

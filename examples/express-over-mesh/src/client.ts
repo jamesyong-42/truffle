@@ -47,7 +47,14 @@ try {
     req.on('error', reject);
   });
 
-  // (c) And the peer list the server sees, for good measure.
+  // (c) Ask the server who it thinks WE are. On the other side, createServer
+  //     attaches our verified Tailscale identity to req.socket — no auth
+  //     token, nothing we sent; it comes from the WireGuard tunnel.
+  const whoami = await mesh.http.fetchText(peer, port, '/api/whoami');
+  console.log(`\n[fetchText] GET /api/whoami -> ${whoami.status}`);
+  console.log(whoami.body);
+
+  // (d) And the peer list the server sees, for good measure.
   const peers = await mesh.http.fetchText(peer, port, '/api/peers');
   console.log(`\n[fetchText] GET /api/peers -> ${peers.status}`);
   console.log(peers.body);

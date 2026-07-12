@@ -5,11 +5,22 @@ device over the mesh — no ports opened on the public internet, no reverse
 proxy. Every request travels the tailnet, WireGuard-encrypted, and only other
 devices running this app can connect.
 
-The trick is a single line. Instead of `httpServer.listen(port)` on a host TCP
-port, connections come from `mesh.net` and are handed to Node's `http.Server`:
+The trick is a single line. Instead of `app.listen(port)` on a host TCP port,
+hand the app to `mesh.http.createServer` and listen on that — it returns a real
+`http.Server` whose listener is the mesh:
 
 ```ts
-const httpServer = http.createServer(app); // a plain Express app
+const app = express(); // a plain Express app
+mesh.http.createServer(app).listen(8080);
+```
+
+Both forms work — the older, more manual wiring feeds mesh connections into an
+`http.Server` you build yourself — but `createServer` is the front door, and it
+also attaches the caller's verified identity to `req.socket` (see `/api/whoami`):
+
+```ts
+// still valid, if you want the http.Server in hand:
+const httpServer = http.createServer(app);
 mesh.net.createServer((socket) => httpServer.emit('connection', socket)).listen(8080);
 ```
 
@@ -61,15 +72,16 @@ pnpm --filter @vibecook/example-express-over-mesh run client "Device A name"
 ```
 
 The client hits `/api/status` twice (via `fetchText` and raw `http.get`), then
-`/api/peers`, prints each response, and stops its node.
+`/api/whoami` and `/api/peers`, prints each response, and stops its node.
 
 ## Routes
 
-| Method | Path          | Returns                                    |
-| ------ | ------------- | ------------------------------------------ |
-| GET    | `/api/status` | This device's identity, IP, uptime         |
-| GET    | `/api/peers`  | Peers this node currently sees on the mesh |
-| POST   | `/api/echo`   | Echoes the posted JSON body back           |
+| Method | Path          | Returns                                             |
+| ------ | ------------- | --------------------------------------------------- |
+| GET    | `/api/status` | This device's identity, IP, uptime                  |
+| GET    | `/api/whoami` | Who the server sees you as (verified `req.socket`)  |
+| GET    | `/api/peers`  | Peers this node currently sees on the mesh          |
+| POST   | `/api/echo`   | Echoes the posted JSON body back                    |
 
 ## Notes
 
@@ -79,6 +91,11 @@ The client hits `/api/status` twice (via `fetchText` and raw `http.get`), then
   URL form needs a Tailscale IP or a space-free name. `fetchText` always works.
 - **Same `appId`:** both devices must use the same `appId`
   (`'express-over-mesh'` here) to see each other as peers.
+- **Verified identity:** served with `mesh.http.createServer`, every request's
+  `req.socket` carries the caller's Tailscale identity (`remotePeer`,
+  `remotePeerName`) — see `/api/whoami`. It's spoof-proof (from the WireGuard
+  tunnel, not a client header) and makes a real access gate. See the
+  [Serving HTTP guide](../../docs/guide/serving-http.md).
 - **Not line-rate:** traffic crosses the userspace tailnet netstack plus a
   loopback hop. Great for APIs, control traffic, and app data; not for bulk
   throughput.
