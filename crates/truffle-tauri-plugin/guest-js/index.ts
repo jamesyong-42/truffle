@@ -251,6 +251,63 @@ export async function broadcast(
   });
 }
 
+/** Outcome of a broadcastJson / broadcastBytes call. "Queued" means handed
+ *  to a peer's connection task — delivery is not confirmed. Broadcasts
+ *  reach only currently connected peers. */
+export interface BroadcastReport {
+  /** Peers with an active WS connection at broadcast time. */
+  attempted: number;
+  /** Messages successfully queued to a connection task. */
+  queued: number;
+  /** Tailscale ids of peers whose connection task was already closed. */
+  failed: string[];
+}
+
+/** Send a JSON payload to a peer (explicit wire type — unlike sendMessage,
+ *  the representation never depends on the data's contents). */
+export async function sendJson(
+  peerId: string,
+  namespace: string,
+  payload: unknown,
+): Promise<void> {
+  return invoke('plugin:truffle|send_json', { peerId, namespace, payload });
+}
+
+/** Send opaque binary data to a peer (explicit wire type; base64 "bytes"
+ *  envelope — receivers see msgType === "bytes"). */
+export async function sendBytes(
+  peerId: string,
+  namespace: string,
+  data: Uint8Array | number[],
+): Promise<void> {
+  return invoke('plugin:truffle|send_bytes', {
+    peerId,
+    namespace,
+    data: Array.from(data),
+  });
+}
+
+/** Broadcast a JSON payload to all connected peers, reporting how many
+ *  peers it was queued to. */
+export async function broadcastJson(
+  namespace: string,
+  payload: unknown,
+): Promise<BroadcastReport> {
+  return invoke('plugin:truffle|broadcast_json', { namespace, payload });
+}
+
+/** Broadcast opaque binary data to all connected peers, reporting how many
+ *  peers it was queued to. */
+export async function broadcastBytes(
+  namespace: string,
+  data: Uint8Array | number[],
+): Promise<BroadcastReport> {
+  return invoke('plugin:truffle|broadcast_bytes', {
+    namespace,
+    data: Array.from(data),
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // File transfer
 // ═══════════════════════════════════════════════════════════════════════════
