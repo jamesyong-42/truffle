@@ -85,6 +85,21 @@ export {
   type WsLoader,
 } from './ws.js';
 
+// Declarative HTTP serving over the tailnet (RFC 023 §6.2)
+export {
+  ServeHandle,
+  createServeNamespace,
+  normalizeServeConfig,
+  type TruffleServe,
+  type ServeConfig,
+  type ServeOptions,
+  type ServeTargetConfig,
+  type ServeStaticConfig,
+  type ServeRoutesConfig,
+  type ServeRouteValue,
+  type ServeErrorInfo,
+} from './serve.js';
+
 // High-level API
 export {
   createMeshNode,
