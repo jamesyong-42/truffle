@@ -327,11 +327,12 @@ pub struct Node<N: NetworkProvider + 'static> {
     /// State directory for persistence (e.g., synced store backends). Empty
     /// path when constructed via `from_parts` (tests); set by the builder.
     state_dir: PathBuf,
-    /// The session WebSocket listen port (reserved against raw listeners).
+    /// The session WebSocket listen port (reserved against raw listeners
+    /// and proxy listeners alike — RFC 023 G4).
     /// Defaults to 9417 in `from_parts`; set by the builder.
-    ws_port: u16,
+    pub(crate) ws_port: u16,
     /// Reverse proxy subsystem state.
-    pub(crate) proxy_state: crate::proxy::ProxyState,
+    pub(crate) proxy_state: Arc<crate::proxy::ProxyState>,
     /// Set once [`stop`](Self::stop) has completed teardown. Makes further
     /// `stop()` calls no-ops and causes the send paths to fail fast with
     /// [`NodeError::Stopped`].
@@ -412,7 +413,7 @@ impl<N: NetworkProvider + 'static> Node<N> {
             file_transfer_state: FileTransferState::new(),
             state_dir: PathBuf::new(),
             ws_port: 9417,
-            proxy_state: crate::proxy::ProxyState::new(),
+            proxy_state: Arc::new(crate::proxy::ProxyState::new()),
             stopped: std::sync::atomic::AtomicBool::new(false),
             tasks: NodeTasks::new(),
         };
@@ -420,7 +421,41 @@ impl<N: NetworkProvider + 'static> Node<N> {
         // Spawn the envelope router task.
         node.spawn_envelope_router(session, codec, incoming_tx, namespace_filters);
 
+        // Forward runtime proxy-engine errors into the proxy event channel
+        // (RFC 023 G5). Providers without a proxy engine return None and
+        // the task is skipped entirely.
+        node.spawn_proxy_error_forwarder();
+
         node
+    }
+
+    /// Spawn the node-scoped task that turns provider
+    /// [`ProxyRuntimeError`](crate::network::ProxyRuntimeError)s into
+    /// [`ProxyEvent::Error`](crate::proxy::ProxyEvent) broadcasts and
+    /// `ProxyStatus::Error` state.
+    fn spawn_proxy_error_forwarder(&self) {
+        let Some(mut rx) = self.network.proxy_runtime_errors() else {
+            return;
+        };
+        let proxy_state = self.proxy_state.clone();
+        let cancel = self.tasks.cancel.clone();
+        self.tasks.spawn_long_lived(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::debug!("proxy error forwarder: cancelled by stop()");
+                        return;
+                    }
+                    event = rx.recv() => match event {
+                        Ok(e) => proxy_state.record_runtime_error(e.id, e.code, e.message),
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("proxy error forwarder lagged by {n} events");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+        });
     }
 
     /// Spawn a background task that reads incoming raw messages from the
@@ -1383,7 +1418,7 @@ fn validate_hostname_label(s: &str) -> Result<(), String> {
 /// session WebSocket port (default 9417). Port 443 is deliberately NOT
 /// reserved anymore — RFC 023 removed the sidecar's legacy TLS listener so
 /// users can serve HTTPS on the default port.
-fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
+pub(crate) fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
     if port == ws_port {
         Err(NodeError::ReservedPort(port))
     } else {

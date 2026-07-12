@@ -958,6 +958,11 @@ async fn handle_proxy_add(
             scheme: target_scheme,
         },
         announce,
+        // v1 defaults; `truffle serve` (RFC 023 P3) exposes the v2 fields.
+        tls: true,
+        allow_non_loopback: false,
+        allow: vec![],
+        routes: vec![],
     };
 
     match node.proxy().add(config).await {

@@ -166,6 +166,13 @@ impl NapiProxy {
                 scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
             },
             announce: config.announce.unwrap_or(true),
+            // v1 defaults; the RFC 023 v2 fields (tls off, routes, allow,
+            // non-loopback targets) are exposed by the binding update that
+            // accompanies engine v2.
+            tls: true,
+            allow_non_loopback: false,
+            allow: vec![],
+            routes: vec![],
         };
         let info = proxy
             .add(core_config)

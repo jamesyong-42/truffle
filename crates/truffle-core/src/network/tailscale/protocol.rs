@@ -126,6 +126,10 @@ pub(crate) struct ListenPacketCommandData {
 }
 
 /// Data payload for `proxy:add`.
+///
+/// v2 fields (RFC 023) ride the same command; sidecars predating them
+/// ignore unknown JSON fields, which is why the provider version-gates
+/// v2-only requests instead of trusting the wire (§8.1).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProxyAddCommandData {
@@ -135,6 +139,15 @@ pub(crate) struct ProxyAddCommandData {
     pub target_host: String,
     pub target_port: u16,
     pub target_scheme: String,
+    /// TLS on the tailnet listener. Serialized always so a v2 sidecar never
+    /// guesses; v1 sidecars ignore it (and are gated off `false`).
+    pub tls: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_non_loopback: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<crate::network::ProxyRoute>,
 }
 
 /// Data payload for `proxy:remove`.
@@ -222,6 +235,11 @@ pub(crate) struct StatusEventData {
     pub node_id: String,
     #[serde(default)]
     pub error: String,
+    /// Sidecar control-protocol version (RFC 023: `2` = proxy engine v2 +
+    /// 443-free). Absent on older sidecars → treated as v1; the provider
+    /// rejects v2-only features rather than let them be silently ignored.
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
 }
 
 /// Data from `tsnet:authRequired` event.
@@ -707,6 +725,10 @@ mod tests {
             target_host: "localhost".to_string(),
             target_port: 3000,
             target_scheme: "http".to_string(),
+            tls: true,
+            allow_non_loopback: false,
+            allow: vec![],
+            routes: vec![],
         };
         let cmd = SidecarCommand {
             command: command_type::PROXY_ADD,
@@ -717,6 +739,68 @@ mod tests {
         assert!(json.contains("\"listenPort\":3001"));
         assert!(json.contains("\"targetHost\":\"localhost\""));
         assert!(json.contains("\"targetPort\":3000"));
+        // v1-shaped configs stay v1-shaped on the wire: tls is explicit,
+        // the v2-only fields are omitted entirely.
+        assert!(json.contains("\"tls\":true"));
+        assert!(!json.contains("allowNonLoopback"));
+        assert!(!json.contains("\"allow\""));
+        assert!(!json.contains("\"routes\""));
+    }
+
+    #[test]
+    fn serialize_proxy_add_command_v2_routes() {
+        let data = ProxyAddCommandData {
+            id: "web".to_string(),
+            name: "web".to_string(),
+            listen_port: 443,
+            target_host: "localhost".to_string(),
+            target_port: 0,
+            target_scheme: "http".to_string(),
+            tls: true,
+            allow_non_loopback: false,
+            allow: vec!["*@corp.com".to_string()],
+            routes: vec![
+                crate::network::ProxyRoute {
+                    prefix: "/api".to_string(),
+                    target_url: Some("http://localhost:8000".to_string()),
+                    dir: None,
+                    fallback: None,
+                    strip_prefix: true,
+                    allow: vec!["ops@corp.com".to_string()],
+                },
+                crate::network::ProxyRoute {
+                    prefix: "/".to_string(),
+                    target_url: None,
+                    dir: Some("/srv/public".to_string()),
+                    fallback: Some("/index.html".to_string()),
+                    strip_prefix: false,
+                    allow: vec![],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"allow\":[\"*@corp.com\"]"));
+        assert!(json.contains("\"prefix\":\"/api\""));
+        assert!(json.contains("\"targetUrl\":\"http://localhost:8000\""));
+        assert!(json.contains("\"stripPrefix\":true"));
+        assert!(json.contains("\"dir\":\"/srv/public\""));
+        assert!(json.contains("\"fallback\":\"/index.html\""));
+        // Per-route empty allow and absent backends are omitted.
+        assert!(!json.contains("\"targetUrl\":null"));
+    }
+
+    #[test]
+    fn status_event_parses_protocol_version() {
+        let json = r#"{"event":"tsnet:status","data":{"state":"running","hostname":"h","dnsName":"h.t.ts.net","tailscaleIP":"100.64.0.1","protocolVersion":2}}"#;
+        let event: SidecarEvent = serde_json::from_str(json).unwrap();
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.protocol_version, Some(2));
+
+        // Older sidecars omit the field → None (v1), not an error.
+        let legacy = r#"{"event":"tsnet:status","data":{"state":"running","hostname":"h","dnsName":"h.t.ts.net","tailscaleIP":"100.64.0.1"}}"#;
+        let event: SidecarEvent = serde_json::from_str(legacy).unwrap();
+        let data: StatusEventData = serde_json::from_value(event.data).unwrap();
+        assert_eq!(data.protocol_version, None);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use super::sidecar::{GoSidecar, SidecarConfig, SidecarInternalEvent};
 use crate::network::{
     DialOpts, HealthInfo, IncomingConnection, ListenOpts, NetworkError, NetworkPeer,
     NetworkPeerEvent, NetworkTcpListener, NodeIdentity, PeerAddr, PingResult, ProxyAddParams,
-    ProxyAddResult, ProxyListEntry,
+    ProxyAddResult, ProxyListEntry, ProxyRuntimeError,
 };
 
 /// Configuration for creating a TailscaleProvider.
@@ -134,6 +134,15 @@ pub struct TailscaleProvider {
     /// collisions from crashed/restarted dev runs can cause the local
     /// node to appear as its own peer under a different Tailscale ID.
     local_tailscale_id: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Runtime proxy-engine errors, forwarded from sidecar `proxy:error`
+    /// events (RFC 023 G5). Node subscribes via `proxy_runtime_errors()`.
+    proxy_error_tx: broadcast::Sender<ProxyRuntimeError>,
+
+    /// Sidecar control-protocol version from `tsnet:status` (0 = v1 /
+    /// unknown). Gates RFC 023 v2 proxy features so they fail loudly on
+    /// old sidecars instead of being silently ignored on the wire.
+    sidecar_protocol_version: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl TailscaleProvider {
@@ -142,6 +151,7 @@ impl TailscaleProvider {
     /// Does not start the provider — call [`start()`](crate::network::NetworkProvider::start) to begin.
     pub fn new(config: TailscaleConfig) -> Self {
         let (peer_event_tx, _) = broadcast::channel(256);
+        let (proxy_error_tx, _) = broadcast::channel(64);
 
         // Seed the identity with the RFC 017 fields we already know from
         // the config. `tailscale_id`, `dns_name`, and `ip` are filled in
@@ -173,6 +183,8 @@ impl TailscaleProvider {
             bridge_shutdown_tx: Arc::new(Mutex::new(None)),
             session_token: Arc::new(RwLock::new([0u8; 32])),
             local_tailscale_id: Arc::new(std::sync::RwLock::new(None)),
+            proxy_error_tx,
+            sidecar_protocol_version: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -233,6 +245,8 @@ impl TailscaleProvider {
         state: Arc<RwLock<ProviderState>>,
         started_tx: Option<oneshot::Sender<Result<(), NetworkError>>>,
         app_id: String,
+        proxy_error_tx: broadcast::Sender<ProxyRuntimeError>,
+        sidecar_protocol_version: Arc<std::sync::atomic::AtomicU32>,
     ) {
         tokio::spawn(async move {
             let mut started_tx = started_tx;
@@ -246,7 +260,13 @@ impl TailscaleProvider {
                                 dns_name,
                                 tailscale_ip,
                                 node_id,
+                                protocol_version,
                             } => {
+                                // 0 = v1/unknown; gates RFC 023 v2 proxy features.
+                                sidecar_protocol_version.store(
+                                    protocol_version.unwrap_or(0),
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                                 let ip: Option<IpAddr> = tailscale_ip.parse().ok();
 
                                 {
@@ -432,6 +452,15 @@ impl TailscaleProvider {
                                 }
                                 return;
                             }
+                            SidecarInternalEvent::ProxyError { id, code, message } => {
+                                // Runtime engine errors (RFC 023 G5). Add-time
+                                // failures are also seen (and returned) by the
+                                // proxy_add wait loop; the Node-side forwarder
+                                // drops events for ids it never saw start.
+                                tracing::warn!("proxy runtime error [{code}] for {id}: {message}");
+                                let _ =
+                                    proxy_error_tx.send(ProxyRuntimeError { id, code, message });
+                            }
                             // Dial/Listen/Ping results are handled by the caller,
                             // not the background event processor
                             _ => {}
@@ -529,6 +558,8 @@ impl super::super::NetworkProvider for TailscaleProvider {
             self.state.clone(),
             Some(started_tx),
             self.config.app_id.clone(),
+            self.proxy_error_tx.clone(),
+            self.sidecar_protocol_version.clone(),
         );
 
         // Send start command to sidecar
@@ -888,11 +919,33 @@ impl super::super::NetworkProvider for TailscaleProvider {
         self.health.read().await.clone()
     }
 
+    fn proxy_runtime_errors(&self) -> Option<broadcast::Receiver<ProxyRuntimeError>> {
+        Some(self.proxy_error_tx.subscribe())
+    }
+
     // ── Reverse proxy ─────────────────────────────────────────────────
 
     async fn proxy_add(&self, config: ProxyAddParams) -> Result<ProxyAddResult, NetworkError> {
         if *self.state.read().await != ProviderState::Running {
             return Err(NetworkError::NotRunning);
+        }
+
+        // RFC 023 §8.1: v2-only features must fail loudly on old sidecars.
+        // The wire silently drops unknown JSON fields — for `allow` that
+        // would be an access gate the user believes exists and doesn't.
+        let uses_v2 = !config.tls
+            || config.allow_non_loopback
+            || !config.allow.is_empty()
+            || !config.routes.is_empty();
+        let version = self
+            .sidecar_protocol_version
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if uses_v2 && version < 2 {
+            return Err(NetworkError::ProxyError(format!(
+                "sidecar protocol v{version} predates RFC 023 — routes, allow lists, \
+                 tls: false, and non-loopback targets need a v2 sidecar; upgrade the \
+                 sidecar binary"
+            )));
         }
 
         // Scope the sidecar lock: subscribe + send command, then release
@@ -908,6 +961,10 @@ impl super::super::NetworkProvider for TailscaleProvider {
                     target_host: config.target_host.clone(),
                     target_port: config.target_port,
                     target_scheme: config.target_scheme.clone(),
+                    tls: config.tls,
+                    allow_non_loopback: config.allow_non_loopback,
+                    allow: config.allow.clone(),
+                    routes: config.routes.clone(),
                 })
                 .await?;
             event_rx

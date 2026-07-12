@@ -410,6 +410,12 @@ pub async fn proxy_add(
             scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
         },
         announce: config.announce.unwrap_or(true),
+        // v1 defaults; the RFC 023 v2 fields arrive with the engine-v2
+        // binding update.
+        tls: true,
+        allow_non_loopback: false,
+        allow: vec![],
+        routes: vec![],
     };
     let info = proxy.add(core_config).await.map_err(|e| e.to_string())?;
     Ok(info.into())

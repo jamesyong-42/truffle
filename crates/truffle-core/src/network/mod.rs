@@ -11,6 +11,7 @@ pub mod tailscale;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
@@ -189,6 +190,13 @@ pub trait NetworkProvider: Send + Sync {
         std::future::ready(Err(NetworkError::Unsupported(
             "proxy_list not supported by this provider".into(),
         )))
+    }
+
+    /// Subscribe to runtime proxy-engine errors (RFC 023 G5). `None` for
+    /// providers without a proxy engine — the caller then skips spawning a
+    /// forwarding task.
+    fn proxy_runtime_errors(&self) -> Option<broadcast::Receiver<ProxyRuntimeError>> {
+        None
     }
 }
 
@@ -511,7 +519,7 @@ pub struct ProxyAddParams {
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Port on which the proxy listens on the tailnet (TLS).
+    /// Port on which the proxy listens on the tailnet.
     pub listen_port: u16,
     /// Target host to forward to (e.g., "localhost").
     pub target_host: String,
@@ -519,6 +527,53 @@ pub struct ProxyAddParams {
     pub target_port: u16,
     /// Target scheme ("http" or "https").
     pub target_scheme: String,
+    /// Terminate TLS on the tailnet listener (RFC 023; `true` = the v1
+    /// always-TLS behavior, `false` = plain HTTP listener).
+    pub tls: bool,
+    /// Permit non-loopback targets (RFC 023 §9.3; default deny).
+    pub allow_non_loopback: bool,
+    /// loginName allow globs; empty = whole tailnet (RFC 023 §9.7).
+    pub allow: Vec<String>,
+    /// Path-prefix routes; empty = the single-target v1 shape.
+    pub routes: Vec<ProxyRoute>,
+}
+
+/// One path-prefix route of a v2 proxy (RFC 023 §7). Wire-shaped: exactly
+/// one of `target_url` / `dir` must be set. Longest prefix wins (D11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRoute {
+    /// Path prefix to match (must start with `/`).
+    pub prefix: String,
+    /// Proxy target URL (e.g. `http://localhost:8000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    /// Static directory to serve (absolute path on the serving machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// SPA fallback rewritten on static misses (e.g. `/index.html`);
+    /// only meaningful with `dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// Strip the matched prefix before proxying (default false — D11;
+    /// only meaningful with `target_url`).
+    #[serde(default)]
+    pub strip_prefix: bool,
+    /// Per-route loginName globs; overrides the config-level `allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+/// A runtime error from the provider's proxy engine after a successful add
+/// (RFC 023 G5 fix — e.g. sidecar `SERVE_ERROR` / `CONNECTION_REFUSED`).
+#[derive(Debug, Clone)]
+pub struct ProxyRuntimeError {
+    /// Proxy id the error belongs to.
+    pub id: String,
+    /// Machine-readable error code.
+    pub code: String,
+    /// Human-readable detail.
+    pub message: String,
 }
 
 /// Result of successfully starting a reverse proxy.
