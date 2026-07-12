@@ -182,7 +182,12 @@ enum Commands {
         json: bool,
     },
 
-    /// Manage reverse proxies
+    /// Publish a local service or directory to your tailnet
+    #[command(long_about = commands::serve::LONG_ABOUT)]
+    Serve(commands::serve::ServeArgs),
+
+    /// [deprecated] Alias of `truffle serve` -- manage reverse proxies
+    #[command(hide = true)]
     Proxy {
         #[command(subcommand)]
         command: commands::proxy::ProxyCommands,
@@ -396,7 +401,10 @@ async fn main() {
             commands::recv::run(&config, from.as_deref(), timeout, json).await
         }
 
-        // -- Reverse Proxy --
+        // -- Serving (reverse proxy + static) --
+        Commands::Serve(args) => commands::serve::run(&config, args, global_json).await,
+
+        // -- Reverse Proxy (deprecated alias of `serve`) --
         Commands::Proxy { command } => commands::proxy::run(&config, command, global_json).await,
 
         // -- Diagnostics --

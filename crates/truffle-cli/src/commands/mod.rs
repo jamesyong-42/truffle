@@ -6,6 +6,7 @@ pub mod ping;
 pub mod proxy;
 pub mod recv;
 pub mod send;
+pub mod serve;
 pub mod status;
 pub mod tcp;
 pub mod up;
