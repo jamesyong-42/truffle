@@ -37,6 +37,9 @@ const mesh = await createMeshNode({
 const published = await mesh.serve({
   port: 443,
   target: `http://localhost:${LOCAL_PORT}`,
+  // Restrict access to specific tailnet users (Tailscale login-name globs).
+  // Absent = the whole tailnet; a non-match gets a 403. Uncomment to gate:
+  // allow: ['you@example.com', '*@your-org.com'],
 });
 
 console.log('Now reachable from anywhere on your tailnet:');

@@ -333,6 +333,67 @@ matter). A value is either a backend URL string or an object for finer control:
   **no directory listing**, dotfiles denied. `fallback` rewrites misses to one
   path — the SPA trick (`/index.html`, so client-side routes resolve).
 
+A `dir` route always maps its mount prefix to the directory root — a `/assets`
+mount serves `<dir>/logo.png` for `/assets/logo.png`. That's why `stripPrefix`
+is a `target`-only option: directories always strip.
+
+### Replaying a serve after restart
+
+The sidecar dies with your process, so there's nothing to "resume" — re-serving
+is just re-creating. `handle.config` is the normalized config (defaults filled,
+`dir`s made absolute) that produced the handle, so persist it and replay it on
+the next boot:
+
+```ts
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+
+const CONFIG = 'serve.config.json';
+const saved = existsSync(CONFIG) ? JSON.parse(readFileSync(CONFIG, 'utf8')) : null;
+const handle = await mesh.serve(saved ?? { port: 443, dir: './public', fallback: '/index.html' });
+if (!saved) writeFileSync(CONFIG, JSON.stringify(handle.config));
+```
+
+That save-and-replay is the whole persistence story — the library never writes
+anything itself (RFC 023 D16).
+
+### From the command line: `truffle serve`
+
+The same engine has a CLI, for publishing without writing any code:
+
+```bash
+# a local service — a URL, or the bare host:port shorthand
+truffle serve http://localhost:3000 --port 443
+truffle serve localhost:3000 --port 443
+
+# a static directory, with an SPA fallback
+truffle serve ./public --port 443 --fallback /index.html
+
+# mount under a path prefix, stripping it before proxying
+truffle serve http://localhost:8000 --port 443 --path /api --strip-prefix
+```
+
+The positional target picks the mode: an `http(s)://` URL (or a bare
+`host:port`) is reverse-proxied; anything else is a directory served as static
+files. `--no-tls` serves plain HTTP, `--allow <glob>` restricts by loginName
+(repeatable), `--allow-non-loopback` permits a non-localhost target, and
+`--name` / `--id` label it.
+
+One `truffle serve` publishes **one route on one port**. Composing several
+routes on a single port — an SPA plus its API — is the JS `mesh.serve({ routes })`
+API's job; the CLI stays one-route-per-command on purpose.
+
+Manage what's running:
+
+```bash
+truffle serve status        # list active serves: name, port, status, URL
+truffle serve stop <id>     # stop one (id defaults to serve-<port>)
+```
+
+> **One deliberate difference from the JS API:** the CLI accepts the bare
+> `host:port` shorthand and expands it to `http://host:port`. The JS `target`
+> does **not** — `new URL('localhost:3000')` reads `localhost:` as a scheme, so
+> `mesh.serve` rejects it with a hint to add `http://`. Pass a full URL in code.
+
 ### Not supported yet
 
 `funnel: true` (public-internet exposure) is reserved and **rejected** today with
