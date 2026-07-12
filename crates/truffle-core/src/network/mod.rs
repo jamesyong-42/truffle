@@ -111,6 +111,25 @@ pub trait NetworkProvider: Send + Sync {
         port: u16,
     ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send;
 
+    /// As [`listen_tcp`](Self::listen_tcp), with options (RFC 023 §7.1).
+    ///
+    /// Providers without TLS listener support reject `tls: true` rather than
+    /// silently serving plaintext.
+    fn listen_tcp_opts(
+        &self,
+        port: u16,
+        opts: ListenOpts,
+    ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send {
+        async move {
+            if opts.tls {
+                return Err(NetworkError::Unsupported(
+                    "TLS listeners are not supported by this provider".into(),
+                ));
+            }
+            self.listen_tcp(port).await
+        }
+    }
+
     /// Stop listening on a previously opened port.
     fn unlisten_tcp(
         &self,
@@ -180,10 +199,20 @@ pub trait NetworkProvider: Send + Sync {
 /// Options for [`NetworkProvider::dial_tcp_opts`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DialOpts {
-    /// Override TLS wrapping of the dial. `None` preserves the provider's
-    /// legacy behavior (the Tailscale sidecar wraps iff the target port is
-    /// 443); `Some(true)` / `Some(false)` force it on / off (RFC 021 §6.4).
+    /// Override TLS wrapping of the dial. `None` = no wrap on current
+    /// sidecars (RFC 023 D4 removed the legacy wrap-iff-port-443 rule);
+    /// `Some(true)` / `Some(false)` force it on / off (RFC 021 §6.4).
     pub tls: Option<bool>,
+}
+
+/// Options for [`NetworkProvider::listen_tcp_opts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListenOpts {
+    /// Terminate TLS at the provider using its platform certificates
+    /// (Tailscale: tsnet `ListenTLS` with automatic MagicDNS / Let's
+    /// Encrypt certs, RFC 023 §7.1 — requires MagicDNS + HTTPS enabled on
+    /// the tailnet). `false` = plain TCP listener.
+    pub tls: bool,
 }
 
 /// A peer as seen by the network layer (Layer 3).

@@ -18,9 +18,9 @@ use super::bridge::{Bridge, DIAL_TIMEOUT};
 use super::protocol::ProxyAddCommandData;
 use super::sidecar::{GoSidecar, SidecarConfig, SidecarInternalEvent};
 use crate::network::{
-    DialOpts, HealthInfo, IncomingConnection, NetworkError, NetworkPeer, NetworkPeerEvent,
-    NetworkTcpListener, NodeIdentity, PeerAddr, PingResult, ProxyAddParams, ProxyAddResult,
-    ProxyListEntry,
+    DialOpts, HealthInfo, IncomingConnection, ListenOpts, NetworkError, NetworkPeer,
+    NetworkPeerEvent, NetworkTcpListener, NodeIdentity, PeerAddr, PingResult, ProxyAddParams,
+    ProxyAddResult, ProxyListEntry,
 };
 
 /// Configuration for creating a TailscaleProvider.
@@ -659,6 +659,14 @@ impl super::super::NetworkProvider for TailscaleProvider {
     }
 
     async fn listen_tcp(&self, port: u16) -> Result<NetworkTcpListener, NetworkError> {
+        self.listen_tcp_opts(port, ListenOpts::default()).await
+    }
+
+    async fn listen_tcp_opts(
+        &self,
+        port: u16,
+        opts: ListenOpts,
+    ) -> Result<NetworkTcpListener, NetworkError> {
         if *self.state.read().await != ProviderState::Running {
             return Err(NetworkError::NotRunning);
         }
@@ -679,7 +687,12 @@ impl super::super::NetworkProvider for TailscaleProvider {
             let sidecar = sidecar_guard.as_ref().ok_or(NetworkError::NotRunning)?;
 
             let event_rx = sidecar.subscribe();
-            sidecar.send_listen(port, None).await?;
+            // `Some(true)` → tsnet ListenTLS with MagicDNS certs (RFC 023
+            // §7.1). Plain listeners send None so the field is omitted on
+            // the wire — sidecars predating the flag parse the command
+            // unchanged.
+            let tls = if opts.tls { Some(true) } else { None };
+            sidecar.send_listen(port, tls).await?;
             event_rx
         };
 

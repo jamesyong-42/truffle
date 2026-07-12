@@ -194,9 +194,13 @@ export declare class NapiNode {
    * Listen for raw TCP connections on a port (RFC 021).
    *
    * Port 0 binds an ephemeral port — read the resolved port from the
-   * returned listener. Ports 443 and 9417 are reserved.
+   * returned listener. The session WebSocket port (default 9417) is
+   * reserved. Pass `tls: true` to terminate TLS in the sidecar with
+   * automatic MagicDNS certificates (RFC 023 §7.1 — requires MagicDNS +
+   * HTTPS enabled on the tailnet, and a sidecar built with RFC 023 for
+   * port 443).
    */
-  listenTcp(port: number): Promise<NapiTcpListener>
+  listenTcp(port: number, tls?: boolean | undefined | null): Promise<NapiTcpListener>
   /**
    * Bind a UDP datagram socket on a port (RFC 021).
    *
@@ -675,6 +679,15 @@ export interface NapiNodeConfig {
    * omitted.
    */
   deviceId?: string
+  /**
+   * Optional explicit Tailscale hostname (RFC 023 §6.4), bypassing the
+   * `truffle-{appId}-{slug}` convention for pretty serving URLs. Must be
+   * a single lowercase DNS label (1–63 chars of `[a-z0-9-]`, no dots).
+   * Tradeoff: hello-less peers with a custom hostname lose bare
+   * device-name resolution; read the granted name from
+   * `getLocalInfo().dnsName` (Tailscale dedupes collisions with `-1`/`-2`).
+   */
+  hostname?: string
   /**
    * Tailscale state directory. Defaults to
    * `{userDataDir}/truffle/{app_id}/{slug(device_name)}`.

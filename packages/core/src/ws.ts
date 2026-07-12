@@ -102,7 +102,8 @@ export interface TruffleWsServer extends WsServerInstance {
 export interface TruffleWsServerOptions {
   /**
    * Mesh port to listen on. `0` binds an ephemeral port (read it back from
-   * `server.port`). Ports 443 and 9417 are reserved by the mesh and rejected.
+   * `server.port`). The session WebSocket port (default 9417) is reserved
+   * and rejected.
    */
   port: number;
   /**
@@ -110,6 +111,12 @@ export interface TruffleWsServerOptions {
    * whose URL path matches are accepted; others get a `400`-style socket close.
    */
   path?: string;
+  /**
+   * Terminate TLS in the sidecar with automatic MagicDNS certificates so
+   * browsers can connect via `wss://name.tailnet.ts.net` (RFC 023 §7.1).
+   * Same prerequisites as `mesh.http.createServer({ tls: true })`.
+   */
+  tls?: boolean;
 }
 
 /** WebSocket-over-mesh namespace bound to a mesh node's `net` namespace. */
@@ -196,7 +203,9 @@ export function createWsNamespace(net: TruffleNet, load: WsLoader = importWs): T
     // A mesh-listening http.Server (the shared RFC 023 engine) does the
     // HTTP/WebSocket upgrade parsing; a noServer WebSocketServer completes
     // the handshake — the seams `ws` documents for custom transports.
-    const httpServer = createMeshHttpServer(net);
+    const httpServer = options.tls
+      ? createMeshHttpServer(net, { tls: true })
+      : createMeshHttpServer(net);
     const wss = new WebSocketServer({ noServer: true, path: options.path });
 
     httpServer.on('upgrade', (req, socket, head) => {

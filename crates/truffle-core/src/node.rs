@@ -57,7 +57,7 @@ use crate::envelope::{Envelope, EnvelopeError};
 use crate::file_transfer::{self, FileTransferState};
 use crate::identity::{self, AppId, DeviceId, DeviceName};
 use crate::network::tailscale::{TailscaleConfig, TailscaleProvider};
-use crate::network::{DialOpts, HealthInfo, NetworkProvider, NodeIdentity, PingResult};
+use crate::network::{DialOpts, HealthInfo, ListenOpts, NetworkProvider, NodeIdentity, PingResult};
 use crate::session::{PeerEvent, PeerRegistry, PeerState};
 use crate::transport::quic::{QuicConnection, QuicListener};
 use crate::transport::websocket::WebSocketTransport;
@@ -272,7 +272,7 @@ pub enum NodeError {
     NotImplemented(String),
 
     /// The port is reserved by truffle's own listeners.
-    #[error("port {0} is reserved by truffle (443 = sidecar TLS, or the session WebSocket port)")]
+    #[error("port {0} is reserved by truffle (the session WebSocket port)")]
     ReservedPort(u16),
 
     /// The node has been stopped.
@@ -1232,16 +1232,40 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Returns a [`RawListener`] that yields raw `TcpStream`s. The caller
     /// is responsible for accepting connections in a loop. Port 0 binds an
     /// ephemeral port (advertise the resolved `RawListener::port` in-band,
-    /// like the file transfer subsystem does). Ports 443 and 9417 are
-    /// reserved by truffle's own listeners.
+    /// like the file transfer subsystem does). The session WebSocket port
+    /// (default 9417) is reserved.
     pub async fn listen_tcp(&self, port: u16) -> Result<RawListener, NodeError> {
+        self.listen_tcp_opts(port, ListenOpts::default()).await
+    }
+
+    /// As [`listen_tcp`](Self::listen_tcp), with options (RFC 023 §7.1).
+    ///
+    /// `tls: true` terminates TLS in the sidecar with automatic MagicDNS
+    /// certificates (requires MagicDNS + HTTPS enabled on the tailnet);
+    /// accepted streams then carry plaintext HTTP over the loopback bridge.
+    pub async fn listen_tcp_opts(
+        &self,
+        port: u16,
+        opts: ListenOpts,
+    ) -> Result<RawListener, NodeError> {
         self.ensure_not_stopped()?;
         use crate::transport::tcp::TcpTransport;
-        use crate::transport::RawTransport;
 
         ensure_port_unreserved(port, self.ws_port)?;
         let tcp = TcpTransport::new(self.network.clone());
-        tcp.listen(port).await.map_err(NodeError::Transport)
+        tcp.listen_opts(port, opts).await.map_err(|e| {
+            // RFC 023 unreserved 443, but sidecars predating it still bind a
+            // legacy TLS listener there — a double-bind here is almost
+            // always that, so say so instead of a bare LISTEN_ERROR.
+            if port == 443 {
+                NodeError::ConnectionFailed(format!(
+                    "{e} (port 443 requires a sidecar built with RFC 023 — older sidecars bind \
+                     a legacy TLS listener on 443; upgrade the sidecar binary)"
+                ))
+            } else {
+                NodeError::Transport(e)
+            }
+        })
     }
 
     /// Stop listening on a previously opened TCP port.
@@ -1280,10 +1304,10 @@ impl<N: NetworkProvider + 'static> Node<N> {
     /// Listen for raw QUIC connections on a port.
     ///
     /// Returns a [`QuicListener`] that yields [`QuicConnection`]s. Only
-    /// same-app peers can complete the handshake (ALPN scoping). Ports 443
-    /// and 9417 are reserved, and port 0 is not yet supported over the
-    /// tsnet relay (the relay cannot report the actual ephemeral port
-    /// back).
+    /// same-app peers can complete the handshake (ALPN scoping). The
+    /// session WebSocket port (default 9417) is reserved, and port 0 is
+    /// not yet supported over the tsnet relay (the relay cannot report the
+    /// actual ephemeral port back).
     pub async fn listen_quic(&self, port: u16) -> Result<QuicListener, NodeError> {
         self.ensure_not_stopped()?;
         ensure_port_unreserved(port, self.ws_port)?;
@@ -1336,10 +1360,31 @@ fn hostname_slug<'a>(hostname: &'a str, app_id: &str) -> Option<&'a str> {
         .strip_prefix('-')
 }
 
-/// Reject ports reserved by truffle's own listeners: 443 (sidecar TLS) and
-/// the node's configured session WebSocket port (default 9417).
+/// A valid single DNS label: 1–63 chars of `[a-z0-9-]`, lowercase, no
+/// leading/trailing hyphen, no dots (tsnet takes a bare hostname, not an
+/// FQDN). Used by [`NodeBuilder::hostname`].
+fn validate_hostname_label(s: &str) -> Result<(), String> {
+    let ok_len = (1..=63).contains(&s.len());
+    let ok_chars = s
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let ok_edges = !s.starts_with('-') && !s.ends_with('-');
+    if ok_len && ok_chars && ok_edges {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid hostname {s:?}: must be a single lowercase DNS label \
+             (1-63 chars of [a-z0-9-], no leading/trailing hyphen, no dots)"
+        ))
+    }
+}
+
+/// Reject ports reserved by truffle's own listeners: the node's configured
+/// session WebSocket port (default 9417). Port 443 is deliberately NOT
+/// reserved anymore — RFC 023 removed the sidecar's legacy TLS listener so
+/// users can serve HTTPS on the default port.
 fn ensure_port_unreserved(port: u16, ws_port: u16) -> Result<(), NodeError> {
-    if port == 443 || port == ws_port {
+    if port == ws_port {
         Err(NodeError::ReservedPort(port))
     } else {
         Ok(())
@@ -1371,6 +1416,9 @@ pub struct NodeBuilder {
     app_id: Option<AppId>,
     device_name: Option<DeviceName>,
     device_id: Option<DeviceId>,
+    /// RFC 023 §6.4: explicit Tailscale hostname, bypassing the
+    /// `truffle-{app_id}-{slug}` convention (pretty serving URLs).
+    hostname: Option<String>,
     sidecar_path: Option<PathBuf>,
     state_dir: Option<String>,
     auth_key: Option<String>,
@@ -1389,6 +1437,7 @@ impl std::fmt::Debug for NodeBuilder {
             .field("app_id", &self.app_id)
             .field("device_name", &self.device_name)
             .field("device_id", &self.device_id)
+            .field("hostname", &self.hostname)
             .field("sidecar_path", &self.sidecar_path)
             .field("state_dir", &self.state_dir)
             .field("auth_key", &self.auth_key.as_ref().map(|_| "[REDACTED]"))
@@ -1492,6 +1541,7 @@ impl Default for NodeBuilder {
             sidecar_path: None,
             state_dir: None,
             auth_key: None,
+            hostname: None,
             ephemeral: false,
             ws_port: 9417,
             idle_timeout_secs: None,
@@ -1520,6 +1570,26 @@ impl NodeBuilder {
     pub fn device_name(mut self, s: impl Into<String>) -> Self {
         self.device_name = Some(DeviceName::parse(s));
         self
+    }
+
+    /// Override the composed Tailscale hostname (RFC 023 §6.4).
+    ///
+    /// Bypasses the `truffle-{app_id}-{slug(device_name)}` convention so
+    /// serving URLs read like a product (`https://dashboard.{tailnet}.ts.net`).
+    /// Validated as a single lowercase DNS label (1–63 chars of `[a-z0-9-]`,
+    /// no leading/trailing hyphen, no dots — tsnet takes a bare hostname).
+    ///
+    /// Tradeoff: hello-less peers with a custom hostname are not resolvable
+    /// by bare device name (the hostname-slug convention no longer matches);
+    /// full hostname, dnsName, IP, device-id, and post-hello identity
+    /// resolution are unaffected. Tailscale dedupes hostname collisions by
+    /// suffixing `-1`/`-2` — read the granted name from
+    /// `local_info().dns_name` instead of string-building URLs.
+    pub fn hostname(mut self, s: impl Into<String>) -> Result<Self, NodeError> {
+        let raw: String = s.into();
+        validate_hostname_label(&raw).map_err(NodeError::BuildError)?;
+        self.hostname = Some(raw);
+        Ok(self)
     }
 
     /// Override the auto-generated device ID.
@@ -1619,7 +1689,13 @@ impl NodeBuilder {
 
         // 4. Compose the Tailscale hostname once, here. Downstream code
         //    MUST NOT rebuild it — the provider config stores this verbatim.
-        let tailscale_host = identity::tailscale_hostname(&app_id, &device_name);
+        //    An explicit builder hostname (RFC 023 §6.4) wins over the
+        //    `truffle-{app_id}-{slug}` convention; see the setter for what
+        //    that costs (bare-name resolution of hello-less peers).
+        let tailscale_host = match self.hostname.clone() {
+            Some(hostname) => hostname,
+            None => identity::tailscale_hostname(&app_id, &device_name),
+        };
 
         // 5. Resolve state_dir. Default:
         //    `{dirs::data_dir}/truffle/{app_id}/{slug(device_name)}`.
@@ -2942,12 +3018,24 @@ mod tests {
         let ws_port = random_port().await;
         let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
 
-        for port in [443u16, 9417] {
-            let err = node.listen_tcp(port).await.unwrap_err();
-            assert!(
-                matches!(err, NodeError::ReservedPort(p) if p == port),
-                "expected ReservedPort({port}), got: {err}"
-            );
+        let err = node.listen_tcp(9417).await.unwrap_err();
+        assert!(
+            matches!(err, NodeError::ReservedPort(9417)),
+            "expected ReservedPort(9417), got: {err}"
+        );
+
+        // RFC 023 D4: 443 is no longer reserved — the guard must not reject
+        // it. The mock binds a real host socket and 443 is privileged on
+        // most systems, so accept either outcome; what matters is that
+        // ReservedPort is gone and 443 bind failures carry the
+        // sidecar-upgrade hint.
+        match node.listen_tcp(443).await {
+            Ok(listener) => assert_eq!(listener.port, 443),
+            Err(NodeError::ReservedPort(_)) => panic!("443 must not be reserved (RFC 023 D4)"),
+            Err(e) => assert!(
+                e.to_string().contains("RFC 023"),
+                "443 bind errors should hint at the sidecar upgrade, got: {e}"
+            ),
         }
     }
 
@@ -2956,11 +3044,25 @@ mod tests {
         let ws_port = random_port().await;
         let (node, _event_tx, _net) = make_test_node("node-1", ws_port).await;
 
-        let err = node.listen_quic(443).await.unwrap_err();
-        assert!(matches!(err, NodeError::ReservedPort(443)));
+        let err = node.listen_quic(9417).await.unwrap_err();
+        assert!(matches!(err, NodeError::ReservedPort(9417)));
 
         let err = node.listen_quic(0).await.unwrap_err();
         assert!(matches!(err, NodeError::NotImplemented(_)));
+    }
+
+    #[test]
+    fn test_builder_hostname_override_validation() {
+        assert!(NodeBuilder::default().hostname("dashboard").is_ok());
+        assert!(NodeBuilder::default().hostname("my-app-1").is_ok());
+        for bad in ["", "Dashboard", "has.dot", "-lead", "trail-"] {
+            assert!(
+                NodeBuilder::default().hostname(bad).is_err(),
+                "expected hostname {bad:?} to be rejected"
+            );
+        }
+        let too_long = "x".repeat(64);
+        assert!(NodeBuilder::default().hostname(too_long).is_err());
     }
 
     #[tokio::test]

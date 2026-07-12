@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use crate::network::{NetworkProvider, PeerAddr, TailscalePeerIdentity};
+use crate::network::{ListenOpts, NetworkProvider, PeerAddr, TailscalePeerIdentity};
 
 use super::{resolve_dial_addr, RawIncoming, RawListener, RawTransport, TransportError};
 
@@ -48,33 +48,19 @@ impl<N: NetworkProvider + 'static> TcpTransport<N> {
     pub fn new(network: Arc<N>) -> Self {
         Self { network }
     }
-}
 
-impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
-    async fn open(
+    /// As [`RawTransport::listen`], with listener options (RFC 023 §7.1) —
+    /// an inherent method because the trait keeps the plain shape.
+    pub async fn listen_opts(
         &self,
-        addr: &PeerAddr,
         port: u16,
-    ) -> Result<tokio::net::TcpStream, TransportError> {
-        let dial_addr = resolve_dial_addr(addr);
-        tracing::debug!(addr = %dial_addr, port, "tcp: dialing peer");
-
-        let stream = self
-            .network
-            .dial_tcp(&dial_addr, port)
-            .await
-            .map_err(|e| TransportError::ConnectFailed(format!("tcp dial: {e}")))?;
-
-        tracing::debug!(addr = %dial_addr, port, "tcp: connected");
-        Ok(stream)
-    }
-
-    async fn listen(&self, port: u16) -> Result<RawListener, TransportError> {
-        tracing::debug!(port, "tcp: starting listener");
+        opts: ListenOpts,
+    ) -> Result<RawListener, TransportError> {
+        tracing::debug!(port, tls = opts.tls, "tcp: starting listener");
 
         let mut tcp_listener = self
             .network
-            .listen_tcp(port)
+            .listen_tcp_opts(port, opts)
             .await
             .map_err(|e| TransportError::ListenFailed(format!("tcp listen: {e}")))?;
 
@@ -109,6 +95,30 @@ impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
         });
 
         Ok(RawListener::new(rx, actual_port))
+    }
+}
+
+impl<N: NetworkProvider + 'static> RawTransport for TcpTransport<N> {
+    async fn open(
+        &self,
+        addr: &PeerAddr,
+        port: u16,
+    ) -> Result<tokio::net::TcpStream, TransportError> {
+        let dial_addr = resolve_dial_addr(addr);
+        tracing::debug!(addr = %dial_addr, port, "tcp: dialing peer");
+
+        let stream = self
+            .network
+            .dial_tcp(&dial_addr, port)
+            .await
+            .map_err(|e| TransportError::ConnectFailed(format!("tcp dial: {e}")))?;
+
+        tracing::debug!(addr = %dial_addr, port, "tcp: connected");
+        Ok(stream)
+    }
+
+    async fn listen(&self, port: u16) -> Result<RawListener, TransportError> {
+        self.listen_opts(port, ListenOpts::default()).await
     }
 }
 

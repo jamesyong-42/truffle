@@ -44,6 +44,14 @@ export type MeshNode = Omit<
   ws: TruffleWs;
   native: NapiNode;
 
+  /**
+   * The node's MagicDNS FQDN (`myapp.tail1234.ts.net`) — use it to build
+   * serving URLs (`https://${mesh.dnsName}/`). Null before the tailnet
+   * grants one (or after stop). Read this instead of string-building from
+   * the hostname: Tailscale dedupes collisions with `-1`/`-2` suffixes.
+   */
+  readonly dnsName: string | null;
+
   /** Interned Peer handles (`===` stable per peerRef). */
   getPeers(): Promise<Peer[]>;
 
@@ -114,6 +122,16 @@ export interface CreateMeshNodeOptions {
   appId: string;
   deviceName?: string;
   deviceId?: string;
+  /**
+   * Explicit Tailscale hostname (RFC 023 §6.4), bypassing the
+   * `truffle-{appId}-{slug}` convention for pretty serving URLs
+   * (`https://dashboard.{tailnet}.ts.net`). Single lowercase DNS label
+   * (1–63 chars of `[a-z0-9-]`, no dots). Tradeoff: hello-less peers with a
+   * custom hostname lose bare device-name resolution (full hostname / IP /
+   * deviceId / post-hello identity still resolve). Read the granted name
+   * from `mesh.dnsName` — Tailscale dedupes collisions with `-1`/`-2`.
+   */
+  hostname?: string;
   sidecarPath?: string;
   stateDir?: string;
   authKey?: string;
@@ -191,6 +209,7 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     appId,
     deviceName,
     deviceId,
+    hostname,
     autoAuth = true,
     openUrl: customOpenUrl,
     onAuthRequired,
@@ -224,6 +243,7 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     appId,
     deviceName,
     deviceId,
+    hostname,
     sidecarPath: resolvedSidecarPath,
     stateDir,
     authKey,
@@ -245,6 +265,19 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
 
   const registry = new PeerRegistry(node);
   const mesh = node as unknown as MeshNode;
+
+  // Live accessor, not a snapshot: dnsName may be granted after start and
+  // goes away when the node stops (getLocalInfo throws → null).
+  Object.defineProperty(mesh, 'dnsName', {
+    configurable: true,
+    get: (): string | null => {
+      try {
+        return node.getLocalInfo().dnsName ?? null;
+      } catch {
+        return null;
+      }
+    },
+  });
 
   // `mesh` IS the native node object, so each wrapper assignment shadows the
   // NAPI prototype method — the native method must be bound BEFORE the
