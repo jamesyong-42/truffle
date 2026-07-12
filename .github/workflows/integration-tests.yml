@@ -59,4 +59,8 @@ jobs:
           fi
 
       - name: Run real-network integration tests
-        run: cargo test -p truffle-core --tests --verbose -- --nocapture
+        # --test-threads=1: each integration test spins up its own real tsnet
+        # node pair; running them in parallel on shared GH runners causes
+        # occasional convergence timeouts (documented flake). Serializing
+        # within each test binary trades ~a minute of wall clock for green.
+        run: cargo test -p truffle-core --tests --verbose -- --nocapture --test-threads=1
