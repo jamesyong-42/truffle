@@ -1,6 +1,6 @@
 # RFC 023: HTTP Serving over the Tailnet
 
-**Status**: In progress (Phases 1–3; open questions resolved 2026-07-12)
+**Status**: Phases 1–3 implemented (2026-07-12) on `feat/rfc023-http-serving`; Phases 4 (Funnel) and 5 (service discovery) are future work
 **Author**: James Yong + Claude
 **Date**: 2026-07-12
 **Depends on**: RFC 012 (layered architecture), RFC 015 (bindings rewrite), RFC 017 (identity & namespacing), RFC 021 (raw transport JS API), RFC 022 (peer handle API)
@@ -388,16 +388,16 @@ version (same pattern as RFC 021's `tls`/`idleTimeoutSecs`).
 
 ## 11. Implementation Plan
 
-- **Phase 1 — `mesh.http.createServer` (TS only, no native changes).** Patched-listen
+- **Phase 1 — `mesh.http.createServer` (TS only, no native changes). Landed.** Patched-listen
   `http.Server`, `socket.remotePeer`, shared wiring with `mesh.ws.createServer`;
   unit tests on mocked natives (`net.test.cjs` pattern); examples: Express on the
   mesh, Fastify `serverFactory`, `ws` upgrade; phone-browser demo at
   `http://name:8080`. Docs: new guide page `serving-http.md`.
-- **Phase 2 — TLS & naming.** `listen_tcp_opts` plumb; 443 fossil removal (listener
+- **Phase 2 — TLS & naming. Landed.** `listen_tcp_opts` plumb; 443 fossil removal (listener
   + dial auto-wrap) + unreserve + version-gated error; cert pre-warm (always-on);
   `socket.encrypted` shim; `mesh.dnsName`; `hostname` override; release notes
   (min sidecar).
-- **Phase 3 — engine v2 + `mesh.serve`.** Sidecar routes/static/headers/loopback
+- **Phase 3 — engine v2 + `mesh.serve`. Landed.** Sidecar routes/static/headers/loopback
   gate/allow-lists/error forwarding; core `ProxyConfig` v2 + guard + event task;
   NAPI/Tauri field updates; CLI `truffle serve` family (positional URL-or-dir
   target, `serve status`, `serve stop`; `truffle proxy` becomes a hidden
@@ -416,6 +416,29 @@ version (same pattern as RFC 021's `tls`/`idleTimeoutSecs`).
   existing users' proxies on upgrade.
 
 Each phase lands green independently; Phases 1 and 2 are individually releasable.
+
+### Implementation notes (as built, 2026-07-12)
+
+Deviations and refinements from the spec above, all deliberate:
+
+- **ServeHandle events**: runtime engine errors emit `'serveError'` always and
+  `'error'` only when a listener is attached — an unlistened EventEmitter
+  `'error'` crashes the process, which a fire-and-forget `serve()` must never do.
+- **Bare `host:port` targets**: the JS API rejects them with an add-`http://`
+  hint (WHATWG `URL` parses `localhost:` as a scheme); the CLI accepts the
+  `localhost:3000` shorthand. Deliberate per-surface ergonomics; documented in
+  the guide.
+- **`announce` is not in `ServeOptions`**: an inert option has no business in
+  the public type; it remains (default `true`, inert) at the `NapiProxyConfig`
+  layer only, until Phase 5 flips it live-and-false (D15).
+- **`id?` option added** (default `serve-{port}`, `name` defaults to the id);
+  duplicate live ids fast-fail client-side to protect event routing.
+- **protocolVersion gating** landed as designed (§8.1): the sidecar advertises
+  `protocolVersion: 2` in every status event; v1 sidecars get a loud error for
+  v2-only features instead of silently dropped wire fields.
+- **CLI keeps a v1-compatible fast path**: a plain root-mounted URL serve
+  (no v2 options) is sent in the v1 single-target wire shape, so `truffle
+  serve http://localhost:3000 --port 8443` works against pre-RFC-023 sidecars.
 
 ## 12. Decisions
 

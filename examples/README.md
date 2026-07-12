@@ -95,6 +95,32 @@ See `examples/express-over-mesh/README.md` for details, or the
 surface — TLS for browsers, Fastify, WebSocket upgrade, and reaching a server
 from a phone.
 
+### Serve a static SPA over the mesh
+
+Publish a directory of static files to the whole tailnet with
+`mesh.serve({ dir, fallback })` (RFC 023) — no handler, no Express. The sidecar
+serves the files, and `fallback` keeps single-page-app routes working on a hard
+refresh:
+
+```bash
+pnpm --filter @vibecook/example-serve-static-spa start
+```
+
+Prints an `https://` URL any tailnet device (phone browsers included) can open.
+See `examples/serve-static-spa/README.md`.
+
+### Expose a local dev server over the mesh
+
+Publish something already listening on `localhost` — a Vite dev server, Grafana,
+an internal API — to your tailnet with `mesh.serve({ target })` (RFC 023). The
+sidecar reverse-proxies it; the bytes never touch JS:
+
+```bash
+pnpm --filter @vibecook/example-expose-dev-server start
+```
+
+See `examples/expose-dev-server/README.md`.
+
 ### WebSocket over the mesh
 
 Group chat built on `mesh.ws` (RFC 021) — the `ws` package running over mesh

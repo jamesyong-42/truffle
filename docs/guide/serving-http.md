@@ -239,24 +239,117 @@ The same URL works from `curl`, another laptop, or a teammate's machine —
 anything your tailnet ACLs allow. If that's broader than you want, put the
 identity middleware from above in front of it.
 
-## Publishing existing services
+## Publishing existing services with `mesh.serve`
 
-If what you want to expose isn't a JS handler but a **directory of static
-files** or **another process already listening on localhost** (a dev server,
-Grafana, a container), you won't need to write a handler at all.
-`mesh.serve()` — a `tailscale serve`-style verb for publishing local services
-and static directories with path routes — is coming in
-[RFC 023](../rfcs/023-http-serving.md) Phase 3. Until then, `createServer`
-covers everything you can express as a JavaScript handler.
+Not everything you want on the tailnet is a handler you wrote. When the bytes
+are a **static directory** or **another process already listening on localhost**
+— a Vite dev server, Grafana, a container — you don't write a handler at all.
+`mesh.serve(config)` publishes it in one call, the way `tailscale serve` does.
+The bytes stay in the Go sidecar (they never cross into JS), and TLS is on by
+default because the audience is browsers.
+
+The rule of thumb:
+
+> You wrote the request handler? `mesh.http.createServer`. It's a directory or
+> another process? `mesh.serve`.
+
+### Three shapes
+
+```ts
+// A. Expose a local process (dev server, dashboard, container)
+const h = await mesh.serve({ port: 443, target: 'http://localhost:3000' });
+console.log(h.url); // https://my-app.tail1234.ts.net
+
+// B. Serve a static directory (single-page app)
+await mesh.serve({ port: 443, dir: './public', fallback: '/index.html' });
+
+// C. Mixed path routes — an SPA plus its APIs, on one port
+await mesh.serve({
+  port: 443,
+  routes: {
+    '/api':     'http://localhost:8000',
+    '/grafana': { target: 'http://localhost:3001' },
+    '/':        { dir: './public', fallback: '/index.html' },
+  },
+});
+```
+
+Each call resolves to a `ServeHandle` once the listener is up.
+
+### The handle
+
+```ts
+const h = await mesh.serve({ port: 443, target: 'http://localhost:3000' });
+h.on('serveError', ({ code, message }) => console.error(`serve ${code}: ${message}`));
+console.log(`published at ${h.url}`);
+// …later
+await h.close();
+```
+
+- **`url` / `port`** — the public URL and the tailnet port. Read `h.url` rather
+  than string-building it: Tailscale dedupes name collisions with `-1`/`-2`
+  suffixes, so the granted URL isn't always the one you'd guess.
+- **`id`** — the proxy id, unique per node. Defaults to `serve-${port}`, so two
+  serves on the same port collide; pass a distinct `id` to run more than one.
+- **`config`** — the normalized config that created it (defaults filled, `dir`s
+  resolved to absolute), frozen. Persist it and replay `mesh.serve(h.config)` to
+  recreate the same serve after a restart; the library never persists on its
+  own.
+- **`close()`** — stop serving and release the port (idempotent; emits
+  `'close'`).
+- It's an **`EventEmitter`** for sidecar runtime errors. Listen on
+  `'serveError'` — `(info: { code, message })` — which is always safe to leave
+  unlistened. (A conventional `'error'` fires too, but only when something is
+  listening, since an unhandled `'error'` would crash the process.)
+
+### TLS, targets, and access
+
+- **TLS defaults on** here (`createServer` defaults it off). The serve audience
+  is browsers, so you get the padlock, secure-context APIs, and `wss:` out of
+  the box — the same MagicDNS-certificate prerequisites as the TLS section above
+  apply. Pass `tls: false` for plain HTTP; WireGuard still encrypts the tailnet
+  hop.
+- **Targets are loopback-only by default.** A `target` must be a full
+  `http(s)://` URL, and it must resolve to localhost unless you pass
+  `allowNonLoopback: true`. This is deliberate: a LAN target turns your node into
+  a pivot into its network, so opening that up is an explicit opt-in.
+- **Restrict who can reach it with `allow`.** The serve engine is the one place
+  your own code isn't running to gate requests, so it takes an allow-list:
+  `allow: ['*@corp.com']` — Tailscale loginName globs, matched against the
+  caller's verified WhoIs identity; a non-match gets a bare 403. Absent = the
+  whole tailnet. Set `allow` on a single route to override the config-level list
+  for that prefix.
+
+### Routes and static serving
+
+`routes` keys are path prefixes, matched by **longest prefix** (order doesn't
+matter). A value is either a backend URL string or an object for finer control:
+
+- `{ target, stripPrefix?, allow? }` — proxy to a backend. `stripPrefix`
+  defaults **false** (Grafana-style backends want the prefix kept); set it true
+  to strip the matched prefix before proxying.
+- `{ dir, fallback?, allow? }` — serve a directory. Static serving is Go's
+  `http.FileServer`: `index.html` at directory roots, ETag/Range/mime for free,
+  **no directory listing**, dotfiles denied. `fallback` rewrites misses to one
+  path — the SPA trick (`/index.html`, so client-side routes resolve).
+
+### Not supported yet
+
+`funnel: true` (public-internet exposure) is reserved and **rejected** today with
+a pointer to RFC 023 §9.6 — it lands in a later phase. Announcing serves for
+other peers to browse is also future work: there's no `announce` option on
+`serve` yet.
 
 ## Constraints
 
 | Constraint | Detail |
 | --- | --- |
-| Concurrency | The JS path rides the raw-transport bridge: up to 256 concurrent connections, HTTP/1.1 only |
-| Idle reaping | No inactivity timer; `close()` sweeps idle sockets, `closeAllConnections()` is the hard stop |
-| Exposure | Reachable by the entire tailnet, gated by Tailscale ACLs — not scoped to `appId` |
-| TLS prerequisites | MagicDNS + HTTPS certificates enabled; cert matches the full `.ts.net` FQDN; current sidecar |
+| `createServer` path | Rides the raw-transport bridge: up to 256 concurrent connections, HTTP/1.1 only |
+| `createServer` reaping | No inactivity timer; `close()` sweeps idle sockets, `closeAllConnections()` is the hard stop |
+| `serve` path | Bytes stay in Go — its own connections (no 256-conn bridge cap), 120 s idle timeout, HTTP/2 to browsers for free |
+| `serve` targets | Loopback-only unless `allowNonLoopback`; a `target` must be a full `http(s)://` URL |
+| Exposure | Reachable by the entire tailnet, gated by Tailscale ACLs (and `serve`'s `allow`) — not scoped to `appId` |
+| TLS | Default off for `createServer`, on for `serve`; needs MagicDNS + HTTPS certs enabled; cert matches the full `.ts.net` FQDN; current sidecar |
 | Ports | One listener per port per node; `9417` (the mesh's session port) is reserved; `443` needs an RFC 023 sidecar |
 
 Throughput note: mesh traffic crosses the userspace tailnet netstack plus a
