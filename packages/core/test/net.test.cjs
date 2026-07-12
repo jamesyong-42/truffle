@@ -206,6 +206,25 @@ test('createNetNamespace connect() validates host and supports (port, host)', as
   await once(socket, 'close');
 });
 
+test('TruffleSocket.remotePeer resolves through the registry hook (RFC 023)', async () => {
+  const { TruffleSocket } = await loadNet();
+  const { native } = mockNativeSocket([]);
+  const fakePeer = { displayName: 'Other Machine', online: true };
+
+  const withHook = new TruffleSocket(native, {
+    resolvePeer: (id) => (id === 'PEER-ID-01' ? fakePeer : null),
+  });
+  assert.equal(withHook.remotePeer, fakePeer);
+  withHook.destroy();
+  await new Promise((resolve) => withHook.once('close', resolve));
+
+  // Without hooks (namespace used outside createMeshNode) it is null, not a throw.
+  const bare = new TruffleSocket(mockNativeSocket([]).native);
+  assert.equal(bare.remotePeer, null);
+  bare.destroy();
+  await new Promise((resolve) => bare.once('close', resolve));
+});
+
 test('TruffleServer close(cb) fires even after the accept loop ended on its own', async () => {
   const { TruffleServer } = await loadNet();
   const mockListener = {

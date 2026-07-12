@@ -336,7 +336,10 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     mesh.onPeerChange(onPeerChange);
   }
 
-  mesh.net = createNetNamespace(node);
+  mesh.net = createNetNamespace(node, {
+    // Live registry lookup behind TruffleSocket.remotePeer (RFC 023 §6.1).
+    resolvePeer: (tailscaleId) => registry.getByTailscaleId(tailscaleId) ?? null,
+  });
   mesh.http = createHttpNamespace(mesh.net);
   mesh.quic = createQuicNamespace(node);
   mesh.dgram = createDgramNamespace(node);

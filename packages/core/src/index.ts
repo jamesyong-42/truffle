@@ -44,11 +44,20 @@ export {
   createNetNamespace,
   type TruffleNet,
   type NetConnectOptions,
+  type NetServerOptions,
+  type NetHooks,
   type ConnectionListener,
 } from './net.js';
 
-// node:http interop over the mesh (RFC 021)
-export { MeshAgent, createHttpNamespace, type TruffleHttp } from './http.js';
+// node:http interop over the mesh (RFC 021; server half RFC 023)
+export {
+  MeshAgent,
+  createHttpNamespace,
+  createMeshHttpServer,
+  type TruffleHttp,
+  type MeshHttpServer,
+  type MeshHttpServerOptions,
+} from './http.js';
 
 // QUIC over the mesh (RFC 021)
 export {
