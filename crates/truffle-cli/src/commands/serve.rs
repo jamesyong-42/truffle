@@ -83,7 +83,7 @@ pub struct ServeArgs {
     #[arg(long)]
     allow_non_loopback: bool,
 
-    /// Display name for this serve (defaults to serve-<port>)
+    /// Display name for this serve (defaults to `serve-<port>`)
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 

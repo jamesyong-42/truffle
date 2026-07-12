@@ -186,7 +186,7 @@ enum Commands {
     #[command(long_about = commands::serve::LONG_ABOUT)]
     Serve(commands::serve::ServeArgs),
 
-    /// [deprecated] Alias of `truffle serve` -- manage reverse proxies
+    /// Deprecated alias of `truffle serve` -- manage reverse proxies
     #[command(hide = true)]
     Proxy {
         #[command(subcommand)]

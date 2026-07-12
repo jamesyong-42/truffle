@@ -19,10 +19,12 @@ import { createMeshNode } from '@vibecook/truffle';
 const LOCAL_PORT = 3000;
 
 // Stand-in for "your local dev server". Anything on localhost works — this is
-// only here so the example runs on its own.
-const local = http.createServer((req, res) => {
+// only here so the example runs on its own. Note it serves a FIXED body:
+// reflecting request data (like req.url) into HTML would be an XSS the moment
+// this port is published to the tailnet.
+const local = http.createServer((_req, res) => {
   res.writeHead(200, { 'content-type': 'text/html' });
-  res.end(`<h1>Hello from localhost:${LOCAL_PORT}</h1><p>You asked for: ${req.url}</p>`);
+  res.end(`<h1>Hello from localhost:${LOCAL_PORT}</h1><p>Swap me for your real dev server.</p>`);
 });
 await new Promise<void>((resolve) => local.listen(LOCAL_PORT, '127.0.0.1', resolve));
 console.log(`Local dev server listening on http://localhost:${LOCAL_PORT}`);

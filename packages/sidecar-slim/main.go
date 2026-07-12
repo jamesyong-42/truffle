@@ -2779,26 +2779,35 @@ func spaFileServer(dir, fallback string) http.Handler {
 			}
 		}
 		// serve returns false when name doesn't resolve to a servable file
-		// (missing, or a directory without index.html — no listings).
+		// (missing, or a directory without index.html — no listings). Every
+		// file access goes through http.Dir.Open, which confines lookups to
+		// the root by construction — no OS path is ever assembled from
+		// request data, so there is no path-injection surface to reason
+		// about. ServeContent still gives Range/conditional requests and
+		// extension-based mime.
 		serve := func(name string) bool {
 			f, err := root.Open(name)
 			if err != nil {
 				return false
 			}
 			st, err := f.Stat()
-			f.Close()
 			if err != nil {
+				f.Close()
 				return false
 			}
 			if st.IsDir() {
+				f.Close()
 				name = path.Join(name, "index.html")
-				fi, err := root.Open(name)
-				if err != nil {
+				if f, err = root.Open(name); err != nil {
 					return false
 				}
-				fi.Close()
+				if st, err = f.Stat(); err != nil || st.IsDir() {
+					f.Close()
+					return false
+				}
 			}
-			http.ServeFile(w, r, filepath.Join(dir, filepath.FromSlash(name)))
+			defer f.Close()
+			http.ServeContent(w, r, name, st.ModTime(), f)
 			return true
 		}
 		if serve(reqPath) {
