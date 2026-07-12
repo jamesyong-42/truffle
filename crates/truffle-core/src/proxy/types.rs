@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Re-exported from the network layer: the wire-shaped path route
+/// (RFC 023 §7). Defined there because the provider command payloads embed
+/// it verbatim.
+pub use crate::network::ProxyRoute;
+
 /// Target backend for the reverse proxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyTarget {
@@ -32,11 +37,35 @@ pub struct ProxyConfig {
     pub name: String,
     /// Port on which the proxy listens on the tailnet.
     pub listen_port: u16,
-    /// Backend target to forward requests to.
+    /// Backend target to forward requests to. Ignored when `routes` is
+    /// non-empty (routes replace the single-target shape).
+    #[serde(default)]
     pub target: ProxyTarget,
     /// Whether to announce this proxy on the mesh for discovery.
+    ///
+    /// Currently a no-op — discovery ships in RFC 023 Phase 5, at which
+    /// point the default flips to `false` (D15: no surprise broadcasts).
     #[serde(default = "default_true")]
     pub announce: bool,
+    /// Terminate TLS on the tailnet listener with automatic MagicDNS
+    /// certificates. Default `true` preserves the shipped v1 behavior (the
+    /// audience is browsers); disabling requires a v2 sidecar (RFC 023).
+    #[serde(default = "default_true")]
+    pub tls: bool,
+    /// Permit non-loopback targets (RFC 023 §9.3). Default deny: a proxy
+    /// with a LAN target turns this node into a pivot into its network.
+    #[serde(default)]
+    pub allow_non_loopback: bool,
+    /// loginName allow globs (RFC 023 §9.7), e.g. `["*@corp.com"]`. Empty =
+    /// the whole tailnet (subject to tailnet ACLs). Evaluated by the sidecar
+    /// against the connection's WhoIs identity; non-matching requests get a
+    /// bare 403, on the proxy and WebSocket-hijack paths alike.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Path-prefix routes (RFC 023 §7). Empty = single-target v1 shape.
+    /// Longest prefix wins, order-independent (D11).
+    #[serde(default)]
+    pub routes: Vec<ProxyRoute>,
 }
 
 fn default_true() -> bool {

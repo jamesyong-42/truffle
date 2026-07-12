@@ -32,6 +32,55 @@ pub struct NapiProxyConfig {
     pub target_scheme: Option<String>,
     /// Whether to announce this proxy on the mesh for discovery (default: true).
     pub announce: Option<bool>,
+    /// Terminate TLS on the tailnet listener (default: true — the v1
+    /// always-TLS behavior). `false` = plain HTTP; requires a v2 sidecar.
+    pub tls: Option<bool>,
+    /// Permit non-loopback targets (default: false — deny). A LAN target
+    /// turns this node into a pivot into its network (RFC 023 §9.3).
+    pub allow_non_loopback: Option<bool>,
+    /// loginName allow globs, e.g. `["*@corp.com"]` (default: none = the
+    /// whole tailnet). Non-matching callers get a bare 403 (RFC 023 §9.7).
+    pub allow: Option<Vec<String>>,
+    /// Path-prefix routes (RFC 023 §7). When non-empty they replace the
+    /// single `targetHost`/`targetPort`/`targetScheme` target.
+    pub routes: Option<Vec<NapiProxyRoute>>,
+}
+
+/// One path-prefix route of a v2 proxy (RFC 023 §7). Exactly one of
+/// `targetUrl` / `dir` is set; longest prefix wins. Validation lives in
+/// core `validate_config`, not here.
+#[napi(object)]
+pub struct NapiProxyRoute {
+    /// Path prefix to match (must start with "/").
+    pub prefix: String,
+    /// Proxy target URL, e.g. "http://localhost:8000". Mutually exclusive
+    /// with `dir`.
+    pub target_url: Option<String>,
+    /// Static directory to serve (absolute path on the serving machine).
+    /// Mutually exclusive with `targetUrl`.
+    pub dir: Option<String>,
+    /// SPA fallback rewritten on static misses, e.g. "/index.html". Only
+    /// meaningful with `dir`.
+    pub fallback: Option<String>,
+    /// Strip the matched prefix before proxying (default: false). Only
+    /// meaningful with `targetUrl`.
+    pub strip_prefix: Option<bool>,
+    /// Per-route loginName globs; overrides the config-level `allow`
+    /// (default: none = inherit).
+    pub allow: Option<Vec<String>>,
+}
+
+impl From<NapiProxyRoute> for truffle_core::network::ProxyRoute {
+    fn from(r: NapiProxyRoute) -> Self {
+        Self {
+            prefix: r.prefix,
+            target_url: r.target_url,
+            dir: r.dir,
+            fallback: r.fallback,
+            strip_prefix: r.strip_prefix.unwrap_or(false),
+            allow: r.allow.unwrap_or_default(),
+        }
+    }
 }
 
 /// Information about a running or configured proxy, returned to JavaScript.
@@ -166,6 +215,17 @@ impl NapiProxy {
                 scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
             },
             announce: config.announce.unwrap_or(true),
+            // RFC 023 v2 fields. Core `validate_config` (called in
+            // `Proxy::add`) owns the shape rules — this only maps.
+            tls: config.tls.unwrap_or(true),
+            allow_non_loopback: config.allow_non_loopback.unwrap_or(false),
+            allow: config.allow.unwrap_or_default(),
+            routes: config
+                .routes
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         };
         let info = proxy
             .add(core_config)

@@ -119,6 +119,11 @@ impl NapiNode {
                 .device_id(device_id)
                 .map_err(|e| Error::from_reason(e.to_string()))?;
         }
+        if let Some(ref hostname) = config.hostname {
+            builder = builder
+                .hostname(hostname)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+        }
         if let Some(ref dir) = config.state_dir {
             builder = builder.state_dir(dir);
         }
@@ -375,12 +380,21 @@ impl NapiNode {
     /// Listen for raw TCP connections on a port (RFC 021).
     ///
     /// Port 0 binds an ephemeral port — read the resolved port from the
-    /// returned listener. Ports 443 and 9417 are reserved.
+    /// returned listener. The session WebSocket port (default 9417) is
+    /// reserved. Pass `tls: true` to terminate TLS in the sidecar with
+    /// automatic MagicDNS certificates (RFC 023 §7.1 — requires MagicDNS +
+    /// HTTPS enabled on the tailnet, and a sidecar built with RFC 023 for
+    /// port 443).
     #[napi]
-    pub async fn listen_tcp(&self, port: u16) -> Result<NapiTcpListener> {
+    pub async fn listen_tcp(&self, port: u16, tls: Option<bool>) -> Result<NapiTcpListener> {
         let node = self.require_node()?;
         let listener = node
-            .listen_tcp(port)
+            .listen_tcp_opts(
+                port,
+                truffle_core::network::ListenOpts {
+                    tls: tls.unwrap_or(false),
+                },
+            )
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(NapiTcpListener::new(listener, node))

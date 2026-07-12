@@ -12,7 +12,32 @@
 import { Duplex } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import type { NapiNode, NapiTcpListener, NapiTcpSocket } from '@vibecook/truffle-native';
-import { peerLikeToQuery, type PeerLike } from './peer.js';
+import { peerLikeToQuery, type Peer, type PeerLike } from './peer.js';
+
+/**
+ * Hooks threaded from `createMeshNode` into the namespaces (RFC 023 §6.1).
+ * Namespaces stay constructible without them (tests, low-level use); the
+ * Peer-handle surfaces just return null then.
+ */
+export interface NetHooks {
+  /**
+   * Resolve a Tailscale node id to the interned RFC 022 `Peer` handle.
+   * Wired to the mesh node's peer registry by `createMeshNode`.
+   */
+  resolvePeer?: (tailscaleId: string) => Peer | null;
+}
+
+/** Options for {@link TruffleNet.createServer}. */
+export interface NetServerOptions {
+  /**
+   * Terminate TLS in the sidecar with automatic MagicDNS certificates
+   * (RFC 023 §6.1). Requires MagicDNS + HTTPS enabled on the tailnet.
+   * Inbound sockets carry `encrypted: true` so http frameworks report
+   * `req.secure` correctly. Default false — WireGuard already encrypts
+   * peer-to-peer traffic; TLS is for browser consumers.
+   */
+  tls?: boolean;
+}
 
 export interface NetConnectOptions {
   /**
@@ -43,6 +68,7 @@ export class TruffleSocket extends Duplex {
   #native: NapiTcpSocket | null = null;
   #ready: Promise<NapiTcpSocket>;
   #reading = false;
+  #resolvePeer?: NetHooks['resolvePeer'];
 
   /** Logical remote address (`host:port`); set once connected. */
   remoteAddress?: string;
@@ -50,9 +76,16 @@ export class TruffleSocket extends Duplex {
   remotePeerId?: string;
   /** Human-readable peer name from the WhoIs identity (inbound sockets). */
   remotePeerName?: string;
+  /**
+   * True on sockets accepted by a `tls: true` mesh listener (TLS terminated
+   * in the sidecar). This is the undocumented-but-universal property http
+   * frameworks sniff for `req.secure` / `req.protocol === 'https'`.
+   */
+  encrypted?: boolean;
 
-  constructor(native: NapiTcpSocket | Promise<NapiTcpSocket>) {
+  constructor(native: NapiTcpSocket | Promise<NapiTcpSocket>, hooks?: NetHooks) {
     super({ allowHalfOpen: true });
+    this.#resolvePeer = hooks?.resolvePeer;
     const adopt = (sock: NapiTcpSocket): NapiTcpSocket => {
       this.#native = sock;
       this.remoteAddress = sock.remoteAddress();
@@ -183,6 +216,19 @@ export class TruffleSocket extends Duplex {
   address(): { address?: string; family?: string; port?: number } {
     return {};
   }
+
+  /**
+   * The interned RFC 022 `Peer` handle for the remote end, resolved live from
+   * the mesh node's registry by this socket's `remotePeerId`. Null when the
+   * id is not yet known (dial in flight), the peer isn't interned, or the
+   * namespace was built without registry hooks (outside `createMeshNode`).
+   * Inbound sockets have it from accept time — use it for gating:
+   * `req.socket.remotePeer?.displayName`.
+   */
+  get remotePeer(): Peer | null {
+    if (!this.remotePeerId || !this.#resolvePeer) return null;
+    return this.#resolvePeer(this.remotePeerId) ?? null;
+  }
 }
 
 /**
@@ -203,13 +249,21 @@ export class TruffleServer extends EventEmitter {
   #listener: NapiTcpListener | null = null;
   #closed = false;
   #closeEmitted = false;
+  #hooks?: NetHooks;
+  #tls: boolean;
 
   /** Bound port; set once `'listening'` fires (resolved when 0 was requested). */
   port?: number;
 
-  constructor(node: NapiNode, connectionListener?: ConnectionListener) {
+  constructor(
+    node: NapiNode,
+    connectionListener?: ConnectionListener,
+    options?: NetServerOptions & { hooks?: NetHooks },
+  ) {
     super();
     this.#node = node;
+    this.#hooks = options?.hooks;
+    this.#tls = options?.tls ?? false;
     if (connectionListener) this.on('connection', connectionListener);
   }
 
@@ -220,8 +274,13 @@ export class TruffleServer extends EventEmitter {
   listen(port: number, listeningListener?: () => void): this {
     if (this.#listener) throw new Error('listen() already called');
     if (listeningListener) this.once('listening', listeningListener);
-    this.#node
-      .listenTcp(port)
+    // The tls parameter is the RFC 023 P2 native signature; pre-P2 natives
+    // (and test mocks written against the one-arg form) ignore extra args.
+    const listenTcp = this.#node.listenTcp.bind(this.#node) as (
+      port: number,
+      tls?: boolean,
+    ) => Promise<NapiTcpListener>;
+    listenTcp(port, this.#tls ? true : undefined)
       .then((listener) => {
         if (this.#closed) {
           void listener.close();
@@ -241,7 +300,11 @@ export class TruffleServer extends EventEmitter {
       for (;;) {
         const native = await listener.accept();
         if (native === null) break;
-        this.emit('connection', new TruffleSocket(native));
+        const socket = new TruffleSocket(native, this.#hooks);
+        // TLS terminated in the sidecar → mark the socket the way frameworks
+        // sniff it (req.secure); see TruffleSocket.encrypted.
+        if (this.#tls) socket.encrypted = true;
+        this.emit('connection', socket);
       }
     } catch (err) {
       if (!this.#closed) this.emit('error', err);
@@ -296,6 +359,7 @@ export interface TruffleNet {
   createConnection(port: number, host: PeerLike): TruffleSocket;
   /** Create a server; call `.listen(port)` to bind, like `net.createServer`. */
   createServer(connectionListener?: ConnectionListener): TruffleServer;
+  createServer(options: NetServerOptions, connectionListener?: ConnectionListener): TruffleServer;
 }
 
 function resolveConnectTarget(options: NetConnectOptions): string {
@@ -306,20 +370,33 @@ function resolveConnectTarget(options: NetConnectOptions): string {
   return peerLikeToQuery(target);
 }
 
-export function createNetNamespace(node: NapiNode): TruffleNet {
+export function createNetNamespace(node: NapiNode, hooks?: NetHooks): TruffleNet {
   function connect(options: NetConnectOptions): TruffleSocket;
   function connect(port: number, host: PeerLike): TruffleSocket;
   function connect(optionsOrPort: NetConnectOptions | number, maybeHost?: PeerLike): TruffleSocket {
     const opts: NetConnectOptions =
       typeof optionsOrPort === 'number' ? { host: maybeHost, port: optionsOrPort } : optionsOrPort;
     const host = resolveConnectTarget(opts);
-    return new TruffleSocket(node.openTcp(host, opts.port));
+    return new TruffleSocket(node.openTcp(host, opts.port), hooks);
+  }
+
+  function createServer(connectionListener?: ConnectionListener): TruffleServer;
+  function createServer(
+    options: NetServerOptions,
+    connectionListener?: ConnectionListener,
+  ): TruffleServer;
+  function createServer(
+    arg1?: ConnectionListener | NetServerOptions,
+    arg2?: ConnectionListener,
+  ): TruffleServer {
+    const options = typeof arg1 === 'object' && arg1 !== null ? arg1 : {};
+    const listener = typeof arg1 === 'function' ? arg1 : arg2;
+    return new TruffleServer(node, listener, { ...options, hooks });
   }
 
   return {
     connect,
     createConnection: connect,
-    createServer: (connectionListener?: ConnectionListener) =>
-      new TruffleServer(node, connectionListener),
+    createServer,
   };
 }

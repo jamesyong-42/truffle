@@ -911,6 +911,38 @@ async fn handle_get_file(
 // Reverse Proxy
 // ==========================================================================
 
+/// Snake_case shape of one `proxy_add` route on the CLI <-> daemon JSON-RPC
+/// wire. The whole daemon protocol is snake_case; core's
+/// [`ProxyRoute`](truffle_core::proxy::ProxyRoute) is camelCase, so this
+/// mirror exists purely to translate the casing at the boundary (RFC 023 P3).
+#[derive(serde::Deserialize)]
+struct ProxyRouteParams {
+    prefix: String,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    fallback: Option<String>,
+    #[serde(default)]
+    strip_prefix: bool,
+    #[serde(default)]
+    allow: Vec<String>,
+}
+
+impl From<ProxyRouteParams> for truffle_core::proxy::ProxyRoute {
+    fn from(r: ProxyRouteParams) -> Self {
+        Self {
+            prefix: r.prefix,
+            target_url: r.target_url,
+            dir: r.dir,
+            fallback: r.fallback,
+            strip_prefix: r.strip_prefix,
+            allow: r.allow,
+        }
+    }
+}
+
 async fn handle_proxy_add(
     id: u64,
     params: &serde_json::Value,
@@ -930,6 +962,35 @@ async fn handle_proxy_add(
         .to_string();
     let announce = params["announce"].as_bool().unwrap_or(true);
 
+    // RFC 023 v2 fields. Absent fields reproduce v1 behavior exactly, so old
+    // CLIs (which omit them) keep the shipped single-target, always-TLS,
+    // whole-tailnet semantics via serde defaults.
+    let tls = params["tls"].as_bool().unwrap_or(true);
+    let allow_non_loopback = params["allow_non_loopback"].as_bool().unwrap_or(false);
+    let allow: Vec<String> = params["allow"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let routes: Vec<truffle_core::proxy::ProxyRoute> = match params.get("routes") {
+        Some(v) if !v.is_null() => {
+            match serde_json::from_value::<Vec<ProxyRouteParams>>(v.clone()) {
+                Ok(rs) => rs.into_iter().map(Into::into).collect(),
+                Err(e) => {
+                    return DaemonResponse::error(
+                        id,
+                        error_code::INVALID_PARAMS,
+                        format!("Invalid 'routes' parameter: {e}"),
+                    )
+                }
+            }
+        }
+        _ => vec![],
+    };
+
     if proxy_id.is_empty() {
         return DaemonResponse::error(id, error_code::INVALID_PARAMS, "Missing 'id' parameter");
     }
@@ -940,7 +1001,9 @@ async fn handle_proxy_add(
             "Missing or invalid 'listen_port' parameter",
         );
     }
-    if target_port == 0 {
+    // A single-target (v1) proxy needs a real target port; a routes proxy
+    // carries its backends in `routes` and ignores the `target` field.
+    if routes.is_empty() && target_port == 0 {
         return DaemonResponse::error(
             id,
             error_code::INVALID_PARAMS,
@@ -958,6 +1021,10 @@ async fn handle_proxy_add(
             scheme: target_scheme,
         },
         announce,
+        tls,
+        allow_non_loopback,
+        allow,
+        routes,
     };
 
     match node.proxy().add(config).await {

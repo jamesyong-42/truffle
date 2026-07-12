@@ -160,6 +160,23 @@ export type FileTransferEvent =
       reason: string;
     };
 
+/** One path-prefix route of a v2 proxy. Mirrors `ProxyRouteJs` (RFC 023 §7).
+ *  Exactly one of `targetUrl` / `dir` is set; longest prefix wins. */
+export interface ProxyRoute {
+  /** Path prefix to match (must start with "/"). */
+  prefix: string;
+  /** Proxy target URL, e.g. "http://localhost:8000". Mutually exclusive with `dir`. */
+  targetUrl?: string;
+  /** Static directory to serve (absolute path). Mutually exclusive with `targetUrl`. */
+  dir?: string;
+  /** SPA fallback rewritten on static misses (e.g. "/index.html"); requires `dir`. */
+  fallback?: string;
+  /** Strip the matched prefix before proxying (default false); requires `targetUrl`. */
+  stripPrefix?: boolean;
+  /** Per-route loginName globs; overrides the config-level `allow`. */
+  allow?: string[];
+}
+
 /** Reverse-proxy config. Mirrors `ProxyConfigJs`. */
 export interface ProxyConfig {
   id: string;
@@ -169,6 +186,14 @@ export interface ProxyConfig {
   targetPort: number;
   targetScheme?: string;
   announce?: boolean;
+  /** Terminate TLS on the listener (default true; `false` needs a v2 sidecar). */
+  tls?: boolean;
+  /** Permit non-loopback targets (default false = deny the LAN-pivot risk). */
+  allowNonLoopback?: boolean;
+  /** loginName allow globs; empty/absent = the whole tailnet. */
+  allow?: string[];
+  /** Path-prefix routes; when non-empty they replace the single target. */
+  routes?: ProxyRoute[];
 }
 
 /** Reverse-proxy info. Mirrors `ProxyInfoJs`. */

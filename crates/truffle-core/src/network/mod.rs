@@ -11,6 +11,7 @@ pub mod tailscale;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 
@@ -111,6 +112,25 @@ pub trait NetworkProvider: Send + Sync {
         port: u16,
     ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send;
 
+    /// As [`listen_tcp`](Self::listen_tcp), with options (RFC 023 §7.1).
+    ///
+    /// Providers without TLS listener support reject `tls: true` rather than
+    /// silently serving plaintext.
+    fn listen_tcp_opts(
+        &self,
+        port: u16,
+        opts: ListenOpts,
+    ) -> impl std::future::Future<Output = Result<NetworkTcpListener, NetworkError>> + Send {
+        async move {
+            if opts.tls {
+                return Err(NetworkError::Unsupported(
+                    "TLS listeners are not supported by this provider".into(),
+                ));
+            }
+            self.listen_tcp(port).await
+        }
+    }
+
     /// Stop listening on a previously opened port.
     fn unlisten_tcp(
         &self,
@@ -171,6 +191,13 @@ pub trait NetworkProvider: Send + Sync {
             "proxy_list not supported by this provider".into(),
         )))
     }
+
+    /// Subscribe to runtime proxy-engine errors (RFC 023 G5). `None` for
+    /// providers without a proxy engine — the caller then skips spawning a
+    /// forwarding task.
+    fn proxy_runtime_errors(&self) -> Option<broadcast::Receiver<ProxyRuntimeError>> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,10 +207,20 @@ pub trait NetworkProvider: Send + Sync {
 /// Options for [`NetworkProvider::dial_tcp_opts`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DialOpts {
-    /// Override TLS wrapping of the dial. `None` preserves the provider's
-    /// legacy behavior (the Tailscale sidecar wraps iff the target port is
-    /// 443); `Some(true)` / `Some(false)` force it on / off (RFC 021 §6.4).
+    /// Override TLS wrapping of the dial. `None` = no wrap on current
+    /// sidecars (RFC 023 D4 removed the legacy wrap-iff-port-443 rule);
+    /// `Some(true)` / `Some(false)` force it on / off (RFC 021 §6.4).
     pub tls: Option<bool>,
+}
+
+/// Options for [`NetworkProvider::listen_tcp_opts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListenOpts {
+    /// Terminate TLS at the provider using its platform certificates
+    /// (Tailscale: tsnet `ListenTLS` with automatic MagicDNS / Let's
+    /// Encrypt certs, RFC 023 §7.1 — requires MagicDNS + HTTPS enabled on
+    /// the tailnet). `false` = plain TCP listener.
+    pub tls: bool,
 }
 
 /// A peer as seen by the network layer (Layer 3).
@@ -482,7 +519,7 @@ pub struct ProxyAddParams {
     pub id: String,
     /// Human-readable name.
     pub name: String,
-    /// Port on which the proxy listens on the tailnet (TLS).
+    /// Port on which the proxy listens on the tailnet.
     pub listen_port: u16,
     /// Target host to forward to (e.g., "localhost").
     pub target_host: String,
@@ -490,6 +527,53 @@ pub struct ProxyAddParams {
     pub target_port: u16,
     /// Target scheme ("http" or "https").
     pub target_scheme: String,
+    /// Terminate TLS on the tailnet listener (RFC 023; `true` = the v1
+    /// always-TLS behavior, `false` = plain HTTP listener).
+    pub tls: bool,
+    /// Permit non-loopback targets (RFC 023 §9.3; default deny).
+    pub allow_non_loopback: bool,
+    /// loginName allow globs; empty = whole tailnet (RFC 023 §9.7).
+    pub allow: Vec<String>,
+    /// Path-prefix routes; empty = the single-target v1 shape.
+    pub routes: Vec<ProxyRoute>,
+}
+
+/// One path-prefix route of a v2 proxy (RFC 023 §7). Wire-shaped: exactly
+/// one of `target_url` / `dir` must be set. Longest prefix wins (D11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRoute {
+    /// Path prefix to match (must start with `/`).
+    pub prefix: String,
+    /// Proxy target URL (e.g. `http://localhost:8000`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_url: Option<String>,
+    /// Static directory to serve (absolute path on the serving machine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// SPA fallback rewritten on static misses (e.g. `/index.html`);
+    /// only meaningful with `dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// Strip the matched prefix before proxying (default false — D11;
+    /// only meaningful with `target_url`).
+    #[serde(default)]
+    pub strip_prefix: bool,
+    /// Per-route loginName globs; overrides the config-level `allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+/// A runtime error from the provider's proxy engine after a successful add
+/// (RFC 023 G5 fix — e.g. sidecar `SERVE_ERROR` / `CONNECTION_REFUSED`).
+#[derive(Debug, Clone)]
+pub struct ProxyRuntimeError {
+    /// Proxy id the error belongs to.
+    pub id: String,
+    /// Machine-readable error code.
+    pub code: String,
+    /// Human-readable detail.
+    pub message: String,
 }
 
 /// Result of successfully starting a reverse proxy.

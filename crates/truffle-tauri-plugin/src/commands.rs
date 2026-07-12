@@ -410,6 +410,17 @@ pub async fn proxy_add(
             scheme: config.target_scheme.unwrap_or_else(|| "http".to_string()),
         },
         announce: config.announce.unwrap_or(true),
+        // RFC 023 v2 fields. Core `validate_config` (called in
+        // `Proxy::add`) owns the shape rules — this only maps.
+        tls: config.tls.unwrap_or(true),
+        allow_non_loopback: config.allow_non_loopback.unwrap_or(false),
+        allow: config.allow.unwrap_or_default(),
+        routes: config
+            .routes
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
     };
     let info = proxy.add(core_config).await.map_err(|e| e.to_string())?;
     Ok(info.into())

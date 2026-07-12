@@ -15,6 +15,7 @@ import { createHttpNamespace, type TruffleHttp } from './http.js';
 import { createQuicNamespace, type TruffleQuic } from './quic.js';
 import { createDgramNamespace, type TruffleDgram } from './dgram.js';
 import { createWsNamespace, type TruffleWs } from './ws.js';
+import { createServeNamespace, type TruffleServe } from './serve.js';
 import { resolveSidecarPath } from './sidecar.js';
 import { Peer, PeerRegistry, peerLikeToQuery, type PeerLike, type PeerRef } from './peer.js';
 
@@ -43,6 +44,43 @@ export type MeshNode = Omit<
   dgram: TruffleDgram;
   ws: TruffleWs;
   native: NapiNode;
+
+  /**
+   * Publish a local service or directory to the whole tailnet (RFC 023 §6.2).
+   * The declarative counterpart to `http.createServer`: use `serve` when the
+   * bytes are a directory or another process, `http.createServer` when you
+   * wrote the handler. TLS defaults on (the audience is browsers). Resolves
+   * with a {@link ServeHandle} (`{ id, url, port, config, close() }`, an
+   * `EventEmitter` for runtime errors).
+   *
+   * ```ts
+   * // Expose a local dev server
+   * const h = await mesh.serve({ port: 443, target: 'http://localhost:3000' });
+   * console.log(h.url); // https://myapp.tail1234.ts.net
+   *
+   * // Static SPA
+   * await mesh.serve({ port: 443, dir: './public', fallback: '/index.html' });
+   *
+   * // Mixed routes (SPA + API)
+   * await mesh.serve({
+   *   port: 443,
+   *   routes: {
+   *     '/api':     'http://localhost:8000',
+   *     '/grafana': { target: 'http://localhost:3001' },
+   *     '/':        { dir: './public', fallback: '/index.html' },
+   *   },
+   * });
+   * ```
+   */
+  serve: TruffleServe;
+
+  /**
+   * The node's MagicDNS FQDN (`myapp.tail1234.ts.net`) — use it to build
+   * serving URLs (`https://${mesh.dnsName}/`). Null before the tailnet
+   * grants one (or after stop). Read this instead of string-building from
+   * the hostname: Tailscale dedupes collisions with `-1`/`-2` suffixes.
+   */
+  readonly dnsName: string | null;
 
   /** Interned Peer handles (`===` stable per peerRef). */
   getPeers(): Promise<Peer[]>;
@@ -114,6 +152,16 @@ export interface CreateMeshNodeOptions {
   appId: string;
   deviceName?: string;
   deviceId?: string;
+  /**
+   * Explicit Tailscale hostname (RFC 023 §6.4), bypassing the
+   * `truffle-{appId}-{slug}` convention for pretty serving URLs
+   * (`https://dashboard.{tailnet}.ts.net`). Single lowercase DNS label
+   * (1–63 chars of `[a-z0-9-]`, no dots). Tradeoff: hello-less peers with a
+   * custom hostname lose bare device-name resolution (full hostname / IP /
+   * deviceId / post-hello identity still resolve). Read the granted name
+   * from `mesh.dnsName` — Tailscale dedupes collisions with `-1`/`-2`.
+   */
+  hostname?: string;
   sidecarPath?: string;
   stateDir?: string;
   authKey?: string;
@@ -191,6 +239,7 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     appId,
     deviceName,
     deviceId,
+    hostname,
     autoAuth = true,
     openUrl: customOpenUrl,
     onAuthRequired,
@@ -224,6 +273,7 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     appId,
     deviceName,
     deviceId,
+    hostname,
     sidecarPath: resolvedSidecarPath,
     stateDir,
     authKey,
@@ -245,6 +295,19 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
 
   const registry = new PeerRegistry(node);
   const mesh = node as unknown as MeshNode;
+
+  // Live accessor, not a snapshot: dnsName may be granted after start and
+  // goes away when the node stops (getLocalInfo throws → null).
+  Object.defineProperty(mesh, 'dnsName', {
+    configurable: true,
+    get: (): string | null => {
+      try {
+        return node.getLocalInfo().dnsName ?? null;
+      } catch {
+        return null;
+      }
+    },
+  });
 
   // `mesh` IS the native node object, so each wrapper assignment shadows the
   // NAPI prototype method — the native method must be bound BEFORE the
@@ -336,11 +399,17 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     mesh.onPeerChange(onPeerChange);
   }
 
-  mesh.net = createNetNamespace(node);
+  mesh.net = createNetNamespace(node, {
+    // Live registry lookup behind TruffleSocket.remotePeer (RFC 023 §6.1).
+    resolvePeer: (tailscaleId) => registry.getByTailscaleId(tailscaleId) ?? null,
+  });
   mesh.http = createHttpNamespace(mesh.net);
   mesh.quic = createQuicNamespace(node);
   mesh.dgram = createDgramNamespace(node);
   mesh.ws = createWsNamespace(mesh.net);
+  // `serve` is a new property (NapiNode has no such method), so no shadowing
+  // rule applies. A fresh NapiProxy per call — its handles are per-call.
+  mesh.serve = createServeNamespace(() => node.proxy());
   mesh.native = node;
 
   return mesh;

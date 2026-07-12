@@ -15,7 +15,7 @@
 
 import http from 'node:http';
 import type { Duplex } from 'node:stream';
-import { MeshAgent } from './http.js';
+import { MeshAgent, createMeshHttpServer } from './http.js';
 import type { TruffleNet } from './net.js';
 import { peerLikeToQuery, type PeerLike } from './peer.js';
 // Type-only: erased at compile time, so it never forces `ws` to be installed
@@ -102,7 +102,8 @@ export interface TruffleWsServer extends WsServerInstance {
 export interface TruffleWsServerOptions {
   /**
    * Mesh port to listen on. `0` binds an ephemeral port (read it back from
-   * `server.port`). Ports 443 and 9417 are reserved by the mesh and rejected.
+   * `server.port`). The session WebSocket port (default 9417) is reserved
+   * and rejected.
    */
   port: number;
   /**
@@ -110,6 +111,12 @@ export interface TruffleWsServerOptions {
    * whose URL path matches are accepted; others get a `400`-style socket close.
    */
   path?: string;
+  /**
+   * Terminate TLS in the sidecar with automatic MagicDNS certificates so
+   * browsers can connect via `wss://name.tailnet.ts.net` (RFC 023 §7.1).
+   * Same prerequisites as `mesh.http.createServer({ tls: true })`.
+   */
+  tls?: boolean;
 }
 
 /** WebSocket-over-mesh namespace bound to a mesh node's `net` namespace. */
@@ -193,10 +200,12 @@ export function createWsNamespace(net: TruffleNet, load: WsLoader = importWs): T
   async function createServer(options: TruffleWsServerOptions): Promise<TruffleWsServer> {
     const { WebSocketServer } = await loadWs();
 
-    // A throwaway http.Server does the HTTP/WebSocket upgrade parsing; a
-    // noServer WebSocketServer completes the handshake. We never `.listen()`
-    // this http server on a host port — mesh connections are fed in by hand.
-    const httpServer = http.createServer();
+    // A mesh-listening http.Server (the shared RFC 023 engine) does the
+    // HTTP/WebSocket upgrade parsing; a noServer WebSocketServer completes
+    // the handshake — the seams `ws` documents for custom transports.
+    const httpServer = options.tls
+      ? createMeshHttpServer(net, { tls: true })
+      : createMeshHttpServer(net);
     const wss = new WebSocketServer({ noServer: true, path: options.path });
 
     httpServer.on('upgrade', (req, socket, head) => {
@@ -212,32 +221,27 @@ export function createWsNamespace(net: TruffleNet, load: WsLoader = importWs): T
       });
     });
 
-    // Each mesh TCP connection becomes an http.Server 'connection' — exactly
-    // what a real listening socket would emit — so http parses it and, on an
-    // Upgrade request, fires the 'upgrade' handler above.
-    const meshServer = net.createServer((sock) => httpServer.emit('connection', sock));
     await new Promise<void>((resolve, reject) => {
       const onError = (err: Error): void => reject(err);
-      meshServer.once('error', onError);
-      meshServer.listen(options.port, () => {
-        meshServer.removeListener('error', onError);
+      httpServer.once('error', onError);
+      httpServer.listen(options.port, () => {
+        httpServer.removeListener('error', onError);
         resolve();
       });
     });
 
     const server = wss as TruffleWsServer;
     Object.defineProperty(server, 'port', {
-      value: meshServer.port ?? options.port,
+      value: httpServer.port ?? options.port,
       enumerable: true,
     });
 
-    // close() also tears down the mesh listener and any live client sockets;
-    // the http.Server holds no listening socket, so there's nothing to close
-    // there. Keep ws's void-returning signature so the type stays a ws Server.
+    // close() also tears down the mesh listener and any live client sockets.
+    // Keep ws's void-returning signature so the type stays a ws Server.
     const closeWs = wss.close.bind(wss);
     server.close = (callback?: (err?: Error) => void): void => {
       for (const client of wss.clients) client.close();
-      meshServer.close();
+      httpServer.close();
       closeWs(callback);
     };
 

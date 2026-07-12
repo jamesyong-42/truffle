@@ -19,12 +19,10 @@ use crate::node::{Node, NodeError};
 
 /// Internal state for the proxy subsystem, stored in [`Node`].
 ///
-/// **Limitation**: [`ProxyEvent::Error`] is currently only emitted during
-/// [`Proxy::add()`] and [`Proxy::remove()`] calls (synchronous failures).
-/// Post-start runtime errors from the sidecar (e.g. `SERVE_ERROR`,
-/// `CONNECTION_REFUSED`) are logged but *not* forwarded to `event_tx`.
-/// Addressing this requires a persistent background task that subscribes to
-/// sidecar proxy error events — tracked as a future enhancement.
+/// Runtime sidecar errors (`SERVE_ERROR`, `CONNECTION_REFUSED`, …) reach
+/// `event_tx` through a node-scoped forwarding task that subscribes to the
+/// provider's [`proxy_runtime_errors`](crate::network::NetworkProvider::proxy_runtime_errors)
+/// stream (RFC 023 G5 fix) — see `Node::spawn_proxy_error_forwarder`.
 pub(crate) struct ProxyState {
     /// Broadcast channel for proxy lifecycle events.
     pub(crate) event_tx: broadcast::Sender<ProxyEvent>,
@@ -41,13 +39,18 @@ impl ProxyState {
         }
     }
 
-    /// Forward an error from the sidecar to the proxy event channel.
-    ///
-    /// Currently unused — see the limitation note on [`ProxyState`]. Provided
-    /// so that a future background error-forwarding task can call it without
-    /// reaching into `event_tx` directly.
-    #[allow(dead_code)]
-    pub(crate) fn emit_error(&self, id: String, code: String, message: String) {
+    /// Record a runtime engine error: mark the proxy `Error` and emit
+    /// [`ProxyEvent::Error`]. Errors for ids that never started are dropped
+    /// — add-time failures are returned by [`Proxy::add`] itself, and
+    /// re-emitting them here would announce a proxy that never existed.
+    pub(crate) fn record_runtime_error(&self, id: String, code: String, message: String) {
+        {
+            let mut proxies = self.proxies.lock().expect("proxy state poisoned");
+            match proxies.get_mut(&id) {
+                Some(info) => info.status = ProxyStatus::Error(format!("[{code}] {message}")),
+                None => return,
+            }
+        }
         let _ = self.event_tx.send(ProxyEvent::Error { id, code, message });
     }
 }
@@ -57,7 +60,6 @@ impl ProxyState {
 /// Obtained via [`Node::proxy()`]. Follows the same pattern as
 /// [`FileTransfer`](crate::file_transfer::FileTransfer).
 pub struct Proxy<'a, N: NetworkProvider + 'static> {
-    #[allow(dead_code)]
     node: &'a Node<N>,
 }
 
@@ -86,13 +88,19 @@ impl<'a, N: NetworkProvider + 'static> Proxy<'a, N> {
             .collect()
     }
 
-    /// Add a reverse proxy that forwards traffic from a TLS port on the mesh
-    /// to a local target.
+    /// Add a reverse proxy that forwards traffic from a port on the mesh to
+    /// a local target — or, with `routes`, to several targets and static
+    /// directories by path prefix (RFC 023 §7).
     ///
     /// Sends the `proxy:add` command to the sidecar and waits for confirmation.
     /// On success, stores the proxy in local state and emits a
     /// [`ProxyEvent::Started`] event.
     pub async fn add(&self, config: ProxyConfig) -> Result<ProxyInfo, NodeError> {
+        // RFC 023 G4: proxy listeners honor the same reserved-port rule as
+        // raw listeners instead of failing at the sidecar OS bind.
+        crate::node::ensure_port_unreserved(config.listen_port, self.node.ws_port)?;
+        validate_config(&config).map_err(NodeError::ConnectionFailed)?;
+
         let params = ProxyAddParams {
             id: config.id.clone(),
             name: config.name.clone(),
@@ -100,6 +108,10 @@ impl<'a, N: NetworkProvider + 'static> Proxy<'a, N> {
             target_host: config.target.host.clone(),
             target_port: config.target.port,
             target_scheme: config.target.scheme.clone(),
+            tls: config.tls,
+            allow_non_loopback: config.allow_non_loopback,
+            allow: config.allow.clone(),
+            routes: config.routes.clone(),
         };
 
         let result = self.node.network.proxy_add(params).await?;
@@ -152,5 +164,177 @@ impl<'a, N: NetworkProvider + 'static> Proxy<'a, N> {
             .send(ProxyEvent::Stopped { id: id.to_string() });
 
         Ok(())
+    }
+}
+
+/// Config-shape validation shared by every binding (RFC 023 §7): route
+/// prefixes are absolute, each route names exactly one backend, and option
+/// combinations that would silently do nothing are rejected here rather
+/// than half-applied by the engine.
+fn validate_config(config: &ProxyConfig) -> Result<(), String> {
+    for route in &config.routes {
+        if !route.prefix.starts_with('/') {
+            return Err(format!(
+                "route prefix {:?} must start with '/'",
+                route.prefix
+            ));
+        }
+        match (&route.target_url, &route.dir) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "route {:?} sets both targetUrl and dir — pick one",
+                    route.prefix
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "route {:?} needs a targetUrl or a dir",
+                    route.prefix
+                ));
+            }
+            _ => {}
+        }
+        if route.fallback.is_some() && route.dir.is_none() {
+            return Err(format!(
+                "route {:?}: fallback only applies to dir routes",
+                route.prefix
+            ));
+        }
+        if route.strip_prefix && route.target_url.is_none() {
+            return Err(format!(
+                "route {:?}: stripPrefix only applies to targetUrl routes",
+                route.prefix
+            ));
+        }
+    }
+    if config.allow.iter().any(|glob| glob.trim().is_empty()) {
+        return Err("allow globs must be non-empty strings".into());
+    }
+    if config
+        .routes
+        .iter()
+        .flat_map(|r| r.allow.iter())
+        .any(|glob| glob.trim().is_empty())
+    {
+        return Err("route allow globs must be non-empty strings".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config(routes: Vec<ProxyRoute>) -> ProxyConfig {
+        ProxyConfig {
+            id: "p".into(),
+            name: "p".into(),
+            listen_port: 8443,
+            target: ProxyTarget::default(),
+            announce: true,
+            tls: true,
+            allow_non_loopback: false,
+            allow: vec![],
+            routes,
+        }
+    }
+
+    fn url_route(prefix: &str) -> ProxyRoute {
+        ProxyRoute {
+            prefix: prefix.into(),
+            target_url: Some("http://localhost:3000".into()),
+            dir: None,
+            fallback: None,
+            strip_prefix: false,
+            allow: vec![],
+        }
+    }
+
+    #[test]
+    fn validate_accepts_v1_shape_and_mixed_routes() {
+        assert!(validate_config(&base_config(vec![])).is_ok());
+        let dir_route = ProxyRoute {
+            prefix: "/".into(),
+            target_url: None,
+            dir: Some("/srv/public".into()),
+            fallback: Some("/index.html".into()),
+            strip_prefix: false,
+            allow: vec![],
+        };
+        assert!(validate_config(&base_config(vec![url_route("/api"), dir_route])).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bad_routes() {
+        // Relative prefix.
+        assert!(validate_config(&base_config(vec![url_route("api")])).is_err());
+        // Both backends.
+        let mut both = url_route("/x");
+        both.dir = Some("/srv".into());
+        assert!(validate_config(&base_config(vec![both])).is_err());
+        // Neither backend.
+        let mut neither = url_route("/x");
+        neither.target_url = None;
+        assert!(validate_config(&base_config(vec![neither])).is_err());
+        // fallback without dir.
+        let mut fb = url_route("/x");
+        fb.fallback = Some("/index.html".into());
+        assert!(validate_config(&base_config(vec![fb])).is_err());
+        // stripPrefix on a dir route.
+        let strip_dir = ProxyRoute {
+            prefix: "/x".into(),
+            target_url: None,
+            dir: Some("/srv".into()),
+            fallback: None,
+            strip_prefix: true,
+            allow: vec![],
+        };
+        assert!(validate_config(&base_config(vec![strip_dir])).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_allow_globs() {
+        let mut config = base_config(vec![]);
+        config.allow = vec!["*@corp.com".into(), "  ".into()];
+        assert!(validate_config(&config).is_err());
+
+        let mut route = url_route("/api");
+        route.allow = vec![String::new()];
+        assert!(validate_config(&base_config(vec![route])).is_err());
+    }
+
+    #[test]
+    fn runtime_errors_only_mark_known_proxies() {
+        let state = ProxyState::new();
+        let mut rx = state.event_tx.subscribe();
+
+        // Unknown id: dropped (add-time failures are returned by add()).
+        state.record_runtime_error("ghost".into(), "SERVE_ERROR".into(), "boom".into());
+        assert!(rx.try_recv().is_err());
+
+        state.proxies.lock().unwrap().insert(
+            "web".into(),
+            ProxyInfo {
+                id: "web".into(),
+                name: "web".into(),
+                listen_port: 8443,
+                target: ProxyTarget::default(),
+                url: "https://x.ts.net:8443".into(),
+                status: ProxyStatus::Running,
+            },
+        );
+        state.record_runtime_error("web".into(), "CONNECTION_REFUSED".into(), "down".into());
+        match rx.try_recv() {
+            Ok(ProxyEvent::Error { id, code, .. }) => {
+                assert_eq!(id, "web");
+                assert_eq!(code, "CONNECTION_REFUSED");
+            }
+            other => panic!("expected Error event, got {other:?}"),
+        }
+        let proxies = state.proxies.lock().unwrap();
+        assert!(matches!(
+            proxies.get("web").unwrap().status,
+            ProxyStatus::Error(_)
+        ));
     }
 }

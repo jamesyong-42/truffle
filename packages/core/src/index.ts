@@ -44,11 +44,20 @@ export {
   createNetNamespace,
   type TruffleNet,
   type NetConnectOptions,
+  type NetServerOptions,
+  type NetHooks,
   type ConnectionListener,
 } from './net.js';
 
-// node:http interop over the mesh (RFC 021)
-export { MeshAgent, createHttpNamespace, type TruffleHttp } from './http.js';
+// node:http interop over the mesh (RFC 021; server half RFC 023)
+export {
+  MeshAgent,
+  createHttpNamespace,
+  createMeshHttpServer,
+  type TruffleHttp,
+  type MeshHttpServer,
+  type MeshHttpServerOptions,
+} from './http.js';
 
 // QUIC over the mesh (RFC 021)
 export {
@@ -75,6 +84,21 @@ export {
   type TruffleWsServerOptions,
   type WsLoader,
 } from './ws.js';
+
+// Declarative HTTP serving over the tailnet (RFC 023 §6.2)
+export {
+  ServeHandle,
+  createServeNamespace,
+  normalizeServeConfig,
+  type TruffleServe,
+  type ServeConfig,
+  type ServeOptions,
+  type ServeTargetConfig,
+  type ServeStaticConfig,
+  type ServeRoutesConfig,
+  type ServeRouteValue,
+  type ServeErrorInfo,
+} from './serve.js';
 
 // High-level API
 export {

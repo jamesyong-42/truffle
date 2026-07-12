@@ -66,6 +66,8 @@ pub(crate) enum SidecarInternalEvent {
         dns_name: String,
         tailscale_ip: String,
         node_id: String,
+        /// Sidecar control-protocol version; `None` = pre-RFC-023 (v1).
+        protocol_version: Option<u32>,
     },
     /// Sidecar stopped.
     Stopped,
@@ -356,6 +358,7 @@ impl GoSidecar {
                             dns_name: data.dns_name,
                             tailscale_ip: data.tailscale_ip,
                             node_id: data.node_id,
+                            protocol_version: data.protocol_version,
                         })
                     } else if data.state == "error" {
                         Some(SidecarInternalEvent::Error {

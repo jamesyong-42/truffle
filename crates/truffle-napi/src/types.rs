@@ -37,6 +37,13 @@ pub struct NapiNodeConfig {
     /// Optional stable ULID override. Auto-generated (and persisted) when
     /// omitted.
     pub device_id: Option<String>,
+    /// Optional explicit Tailscale hostname (RFC 023 §6.4), bypassing the
+    /// `truffle-{appId}-{slug}` convention for pretty serving URLs. Must be
+    /// a single lowercase DNS label (1–63 chars of `[a-z0-9-]`, no dots).
+    /// Tradeoff: hello-less peers with a custom hostname lose bare
+    /// device-name resolution; read the granted name from
+    /// `getLocalInfo().dnsName` (Tailscale dedupes collisions with `-1`/`-2`).
+    pub hostname: Option<String>,
     /// Tailscale state directory. Defaults to
     /// `{userDataDir}/truffle/{app_id}/{slug(device_name)}`.
     pub state_dir: Option<String>,

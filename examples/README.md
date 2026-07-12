@@ -78,8 +78,10 @@ pnpm --filter @vibecook/example-quic-streams exec tsx src/main.ts bench <device-
 
 ### Express over the mesh (HTTP interop)
 
-A stock Express app served over the tailnet via `mesh.net`, queried with
-`mesh.http` (RFC 021):
+A stock Express app served to the tailnet with `mesh.http.createServer`
+(RFC 023) and queried with `mesh.http` (RFC 021). Every request carries the
+caller's verified identity on `req.socket` — the server's `/api/whoami` route
+reflects it back:
 
 ```bash
 # device A
@@ -88,7 +90,36 @@ pnpm --filter @vibecook/example-express-over-mesh run server
 pnpm --filter @vibecook/example-express-over-mesh run client <device-name>
 ```
 
-See `examples/express-over-mesh/README.md` for details.
+See `examples/express-over-mesh/README.md` for details, or the
+[Serving HTTP guide](../docs/guide/serving-http.md) for the full `createServer`
+surface — TLS for browsers, Fastify, WebSocket upgrade, and reaching a server
+from a phone.
+
+### Serve an SPA + its API over the mesh
+
+Publish a single-page app and its API on one tailnet port with
+`mesh.serve({ routes })` (RFC 023) — static files at `/`, a reverse-proxied
+backend at `/api`, one origin, no CORS, no handler code. `fallback` keeps SPA
+routes working on a hard refresh:
+
+```bash
+pnpm --filter @vibecook/example-serve-static-spa start
+```
+
+Prints an `https://` URL any tailnet device (phone browsers included) can open.
+See `examples/serve-static-spa/README.md`.
+
+### Expose a local dev server over the mesh
+
+Publish something already listening on `localhost` — a Vite dev server, Grafana,
+an internal API — to your tailnet with `mesh.serve({ target })` (RFC 023). The
+sidecar reverse-proxies it; the bytes never touch JS:
+
+```bash
+pnpm --filter @vibecook/example-expose-dev-server start
+```
+
+See `examples/expose-dev-server/README.md`.
 
 ### WebSocket over the mesh
 

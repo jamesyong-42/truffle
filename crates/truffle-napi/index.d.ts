@@ -194,9 +194,13 @@ export declare class NapiNode {
    * Listen for raw TCP connections on a port (RFC 021).
    *
    * Port 0 binds an ephemeral port — read the resolved port from the
-   * returned listener. Ports 443 and 9417 are reserved.
+   * returned listener. The session WebSocket port (default 9417) is
+   * reserved. Pass `tls: true` to terminate TLS in the sidecar with
+   * automatic MagicDNS certificates (RFC 023 §7.1 — requires MagicDNS +
+   * HTTPS enabled on the tailnet, and a sidecar built with RFC 023 for
+   * port 443).
    */
-  listenTcp(port: number): Promise<NapiTcpListener>
+  listenTcp(port: number, tls?: boolean | undefined | null): Promise<NapiTcpListener>
   /**
    * Bind a UDP datagram socket on a port (RFC 021).
    *
@@ -676,6 +680,15 @@ export interface NapiNodeConfig {
    */
   deviceId?: string
   /**
+   * Optional explicit Tailscale hostname (RFC 023 §6.4), bypassing the
+   * `truffle-{appId}-{slug}` convention for pretty serving URLs. Must be
+   * a single lowercase DNS label (1–63 chars of `[a-z0-9-]`, no dots).
+   * Tradeoff: hello-less peers with a custom hostname lose bare
+   * device-name resolution; read the granted name from
+   * `getLocalInfo().dnsName` (Tailscale dedupes collisions with `-1`/`-2`).
+   */
+  hostname?: string
+  /**
    * Tailscale state directory. Defaults to
    * `{userDataDir}/truffle/{app_id}/{slug(device_name)}`.
    */
@@ -806,6 +819,26 @@ export interface NapiProxyConfig {
   targetScheme?: string
   /** Whether to announce this proxy on the mesh for discovery (default: true). */
   announce?: boolean
+  /**
+   * Terminate TLS on the tailnet listener (default: true — the v1
+   * always-TLS behavior). `false` = plain HTTP; requires a v2 sidecar.
+   */
+  tls?: boolean
+  /**
+   * Permit non-loopback targets (default: false — deny). A LAN target
+   * turns this node into a pivot into its network (RFC 023 §9.3).
+   */
+  allowNonLoopback?: boolean
+  /**
+   * loginName allow globs, e.g. `["*@corp.com"]` (default: none = the
+   * whole tailnet). Non-matching callers get a bare 403 (RFC 023 §9.7).
+   */
+  allow?: Array<string>
+  /**
+   * Path-prefix routes (RFC 023 §7). When non-empty they replace the
+   * single `targetHost`/`targetPort`/`targetScheme` target.
+   */
+  routes?: Array<NapiProxyRoute>
 }
 
 /** A proxy lifecycle event delivered to JavaScript. */
@@ -835,6 +868,41 @@ export interface NapiProxyInfo {
   url: string
   /** Status: "starting", "running", "stopped", or "error: <message>". */
   status: string
+}
+
+/**
+ * One path-prefix route of a v2 proxy (RFC 023 §7). Exactly one of
+ * `targetUrl` / `dir` is set; longest prefix wins. Validation lives in
+ * core `validate_config`, not here.
+ */
+export interface NapiProxyRoute {
+  /** Path prefix to match (must start with "/"). */
+  prefix: string
+  /**
+   * Proxy target URL, e.g. "http://localhost:8000". Mutually exclusive
+   * with `dir`.
+   */
+  targetUrl?: string
+  /**
+   * Static directory to serve (absolute path on the serving machine).
+   * Mutually exclusive with `targetUrl`.
+   */
+  dir?: string
+  /**
+   * SPA fallback rewritten on static misses, e.g. "/index.html". Only
+   * meaningful with `dir`.
+   */
+  fallback?: string
+  /**
+   * Strip the matched prefix before proxying (default: false). Only
+   * meaningful with `targetUrl`.
+   */
+  stripPrefix?: boolean
+  /**
+   * Per-route loginName globs; overrides the config-level `allow`
+   * (default: none = inherit).
+   */
+  allow?: Array<string>
 }
 
 /** A versioned slice of data owned by a single device. */
