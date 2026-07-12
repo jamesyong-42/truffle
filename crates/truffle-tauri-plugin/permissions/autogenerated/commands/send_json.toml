@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-send-json"
+description = "Enables the send_json command without any pre-configured scope."
+commands.allow = ["send_json"]
+
+[[permission]]
+identifier = "deny-send-json"
+description = "Denies the send_json command without any pre-configured scope."
+commands.deny = ["send_json"]

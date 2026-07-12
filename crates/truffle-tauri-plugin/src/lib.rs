@@ -23,8 +23,12 @@
 //! - `get_peers()` — List all known peers
 //! - `ping(peer_id)` — Ping a peer
 //! - `health()` — Get network health info
-//! - `send_message(peer_id, namespace, data)` — Send a message
-//! - `broadcast(namespace, data)` — Broadcast to all peers
+//! - `send_message(peer_id, namespace, data)` — Send a message (legacy content-sniffing)
+//! - `broadcast(namespace, data)` — Broadcast to all peers (legacy content-sniffing)
+//! - `send_json(peer_id, namespace, payload)` — Send a JSON payload (explicit wire type)
+//! - `send_bytes(peer_id, namespace, data)` — Send opaque bytes (explicit wire type)
+//! - `broadcast_json(namespace, payload)` — Broadcast JSON, returns a queueing report
+//! - `broadcast_bytes(namespace, data)` — Broadcast bytes, returns a queueing report
 //! - `send_file(peer_id, local_path, remote_path)` — Send a file
 //! - `pull_file(peer_id, remote_path, local_path)` — Download a file
 //! - `auto_accept(output_dir)` — Auto-accept incoming file offers
@@ -122,6 +126,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::health,
             commands::send_message,
             commands::broadcast,
+            commands::send_json,
+            commands::send_bytes,
+            commands::broadcast_json,
+            commands::broadcast_bytes,
             commands::send_file,
             commands::pull_file,
             commands::auto_accept,

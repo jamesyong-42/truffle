@@ -15,6 +15,12 @@ Default permissions for the Truffle plugin
 - `allow-role`
 - `allow-send-envelope`
 - `allow-broadcast-envelope`
+- `allow-send-message`
+- `allow-broadcast`
+- `allow-send-json`
+- `allow-send-bytes`
+- `allow-broadcast-json`
+- `allow-broadcast-bytes`
 - `allow-handle-tailnet-peers`
 - `allow-set-local-online`
 - `allow-proxy-add`
@@ -137,6 +143,32 @@ Denies the broadcast command without any pre-configured scope.
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-broadcast-bytes`
+
+</td>
+<td>
+
+Enables the broadcast_bytes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-broadcast-bytes`
+
+</td>
+<td>
+
+Denies the broadcast_bytes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-broadcast-envelope`
 
 </td>
@@ -156,6 +188,32 @@ Enables the broadcast_envelope command without any pre-configured scope.
 <td>
 
 Denies the broadcast_envelope command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-broadcast-json`
+
+</td>
+<td>
+
+Enables the broadcast_json command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-broadcast-json`
+
+</td>
+<td>
+
+Denies the broadcast_json command without any pre-configured scope.
 
 </td>
 </tr>
@@ -891,6 +949,32 @@ Denies the role command without any pre-configured scope.
 <tr>
 <td>
 
+`truffle-tauri-plugin:allow-send-bytes`
+
+</td>
+<td>
+
+Enables the send_bytes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-send-bytes`
+
+</td>
+<td>
+
+Denies the send_bytes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `truffle-tauri-plugin:allow-send-envelope`
 
 </td>
@@ -936,6 +1020,32 @@ Enables the send_file command without any pre-configured scope.
 <td>
 
 Denies the send_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:allow-send-json`
+
+</td>
+<td>
+
+Enables the send_json command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`truffle-tauri-plugin:deny-send-json`
+
+</td>
+<td>
+
+Denies the send_json command without any pre-configured scope.
 
 </td>
 </tr>

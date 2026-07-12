@@ -189,6 +189,65 @@ pub async fn broadcast(
     Ok(())
 }
 
+/// Send a JSON payload to a specific peer (explicit wire type).
+#[command]
+pub async fn send_json(
+    state: State<'_, TruffleState>,
+    peer_id: String,
+    namespace: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    node.send_json(&peer_id, &namespace, &payload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Send opaque binary data to a specific peer (explicit wire type; base64
+/// `"bytes"` envelope — the representation never depends on the contents).
+#[command]
+pub async fn send_bytes(
+    state: State<'_, TruffleState>,
+    peer_id: String,
+    namespace: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let node = get_node(&state).await?;
+    node.send_bytes(&peer_id, &namespace, &data)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Broadcast a JSON payload to all connected peers, reporting how many
+/// peers it was queued to.
+#[command]
+pub async fn broadcast_json(
+    state: State<'_, TruffleState>,
+    namespace: String,
+    payload: serde_json::Value,
+) -> Result<BroadcastReportJs, String> {
+    let node = get_node(&state).await?;
+    node.broadcast_json(&namespace, &payload)
+        .await
+        .map(Into::into)
+        .map_err(|e| e.to_string())
+}
+
+/// Broadcast opaque binary data to all connected peers, reporting how many
+/// peers it was queued to.
+#[command]
+pub async fn broadcast_bytes(
+    state: State<'_, TruffleState>,
+    namespace: String,
+    data: Vec<u8>,
+) -> Result<BroadcastReportJs, String> {
+    let node = get_node(&state).await?;
+    node.broadcast_bytes(&namespace, &data)
+        .await
+        .map(Into::into)
+        .map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // File Transfer
 // ---------------------------------------------------------------------------

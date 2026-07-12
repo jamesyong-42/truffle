@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-send-bytes"
+description = "Enables the send_bytes command without any pre-configured scope."
+commands.allow = ["send_bytes"]
+
+[[permission]]
+identifier = "deny-send-bytes"
+description = "Denies the send_bytes command without any pre-configured scope."
+commands.deny = ["send_bytes"]

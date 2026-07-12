@@ -55,6 +55,30 @@ impl std::fmt::Debug for StartConfig {
     }
 }
 
+/// Outcome of a `broadcastJson` / `broadcastBytes` call, serialized for the
+/// frontend. "Queued" means handed to a peer's connection task — delivery
+/// is not confirmed. Broadcasts reach only currently connected peers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BroadcastReportJs {
+    /// Peers with an active WS connection at broadcast time.
+    pub attempted: u32,
+    /// Messages successfully queued to a connection task.
+    pub queued: u32,
+    /// Tailscale ids of peers whose connection task was already closed.
+    pub failed: Vec<String>,
+}
+
+impl From<truffle_core::BroadcastReport> for BroadcastReportJs {
+    fn from(r: truffle_core::BroadcastReport) -> Self {
+        Self {
+            attempted: r.attempted as u32,
+            queued: r.queued as u32,
+            failed: r.failed,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NodeIdentityJs
 // ---------------------------------------------------------------------------
