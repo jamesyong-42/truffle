@@ -2085,6 +2085,129 @@ mod tests {
 
     // ── Tests ────────────────────────────────────────────────────────
 
+    // ── Exhaustion tests (review: resource-exhaustion section) ────────
+
+    /// Flood the real dispatch path with offers from one peer and assert
+    /// every bound holds: per-peer pending cap, bounded app queue, and a
+    /// prompt stop() despite parked decision waits.
+    #[tokio::test]
+    async fn offer_flood_respects_caps_and_stop_drains() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-flood", ws_port).await;
+        let node = Arc::new(node);
+        let mut offers = node.file_transfer().offer_channel(node.clone()).await;
+
+        for i in 0..500u32 {
+            let payload = json!({
+                "type": "offer",
+                "file_name": format!("f{i}.bin"),
+                "size": 1,
+                "sha256": "0".repeat(64),
+                "save_path": "",
+                "token": format!("tok-{i}"),
+                "tcp_port": 0,
+            });
+            let envelope = Envelope::new("ft", "offer", payload).with_timestamp();
+            node.session
+                .test_inject_incoming("peer-flood", JsonCodec.encode(&envelope).unwrap());
+            if i % 64 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let pending = node
+            .file_transfer_state
+            .pending_offers_per_peer
+            .lock()
+            .unwrap()
+            .get("peer-flood")
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            pending <= crate::file_transfer::MAX_PENDING_OFFERS_PER_PEER,
+            "per-peer pending cap violated: {pending}"
+        );
+
+        // Without an app draining it, the offer queue stays bounded.
+        let mut buffered = 0;
+        while offers.try_recv().is_ok() {
+            buffered += 1;
+        }
+        assert!(buffered <= 36, "app offer queue grew to {buffered}");
+
+        // Parked offers wait up to 60s for a decision — stop() must cancel
+        // them instead of waiting that out.
+        let started = std::time::Instant::now();
+        node.stop().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stop() took {:?} with parked offers",
+            started.elapsed()
+        );
+        assert!(node.tasks.tracker.is_empty());
+    }
+
+    /// Churning through dynamic namespaces must not grow the filter map.
+    #[tokio::test]
+    async fn dynamic_namespace_churn_stays_bounded() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-ns-churn", ws_port).await;
+        for i in 0..1000 {
+            let rx = node.subscribe(&format!("dyn-{i}"));
+            drop(rx);
+        }
+        let len = node
+            .namespace_filters
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        assert!(len <= 1, "namespace map grew to {len} entries");
+    }
+
+    /// Repeated build → use → stop cycles leave no background tasks behind.
+    #[tokio::test]
+    async fn lifecycle_churn_leaves_no_tasks() {
+        for _ in 0..25 {
+            let ws_port = random_port().await;
+            let (node, _event_tx, _network) = make_test_node("node-churn", ws_port).await;
+            let node = Arc::new(node);
+            let _rx = node.subscribe("churn");
+            let _offers = node.file_transfer().offer_channel(node.clone()).await;
+            node.stop().await;
+            assert!(node.tasks.tracker.is_empty(), "task leak after stop()");
+        }
+    }
+
+    /// A subscriber that never polls observes Lagged (bounded channel)
+    /// rather than causing unbounded buffering.
+    #[tokio::test]
+    async fn slow_subscriber_lags_instead_of_growing() {
+        let ws_port = random_port().await;
+        let (node, _event_tx, _network) = make_test_node("node-lag", ws_port).await;
+        let mut rx = node.subscribe("chat");
+
+        for i in 0..2000 {
+            let envelope = Envelope::new("chat", "message", json!({ "i": i })).with_timestamp();
+            node.session
+                .test_inject_incoming("peer-x", JsonCodec.encode(&envelope).unwrap());
+            if i % 100 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut lagged = false;
+        loop {
+            match rx.try_recv() {
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => lagged = true,
+                Err(_) => break,
+            }
+        }
+        assert!(lagged, "slow subscriber should observe Lagged");
+    }
+
     #[tokio::test]
     async fn stop_drains_all_background_tasks() {
         let ws_port = random_port().await;

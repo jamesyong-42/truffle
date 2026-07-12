@@ -1421,4 +1421,66 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, TransferError::Rejected(_)), "{err}");
     }
+
+    // ── Property + concurrency tests (review: fuzzing / exhaustion) ────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Whatever a peer sends as a file name, the sanitized base name
+        /// must never be able to escape the destination directory.
+        #[test]
+        fn safe_base_name_never_escapes(name in ".{0,256}") {
+            if let Some(safe) = safe_base_name(&name) {
+                prop_assert!(!safe.contains('/'));
+                prop_assert!(!safe.contains('\\'));
+                prop_assert!(!safe.contains('\0'));
+                prop_assert!(safe != "." && safe != "..");
+                prop_assert!(!safe.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_finalize_same_dest_reject_single_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("race.txt").to_str().unwrap().to_string();
+        let t1 = write_file(dir.path(), "race.txt.aaa.truffle-tmp", b"one").await;
+        let t2 = write_file(dir.path(), "race.txt.bbb.truffle-tmp", b"two").await;
+
+        let (r1, r2) = tokio::join!(
+            finalize_received_file(&t1, &dest, OverwritePolicy::Reject),
+            finalize_received_file(&t2, &dest, OverwritePolicy::Reject),
+        );
+        assert!(
+            r1.is_ok() ^ r2.is_ok(),
+            "exactly one writer should win: {r1:?} / {r2:?}"
+        );
+        let winner: &[u8] = if r1.is_ok() { b"one" } else { b"two" };
+        assert_eq!(tokio::fs::read(&dest).await.unwrap(), winner);
+        // Both temp files consumed (winner) or cleaned up (loser).
+        assert!(!tokio::fs::try_exists(&t1).await.unwrap());
+        assert!(!tokio::fs::try_exists(&t2).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_finalize_same_dest_rename_both_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("both.txt").to_str().unwrap().to_string();
+        let t1 = write_file(dir.path(), "both.txt.aaa.truffle-tmp", b"one").await;
+        let t2 = write_file(dir.path(), "both.txt.bbb.truffle-tmp", b"two").await;
+
+        let (r1, r2) = tokio::join!(
+            finalize_received_file(&t1, &dest, OverwritePolicy::Rename),
+            finalize_received_file(&t2, &dest, OverwritePolicy::Rename),
+        );
+        let (p1, p2) = (r1.unwrap(), r2.unwrap());
+        assert_ne!(p1, p2, "rename policy must dedupe concurrent writers");
+        let mut contents = vec![
+            tokio::fs::read(&p1).await.unwrap(),
+            tokio::fs::read(&p2).await.unwrap(),
+        ];
+        contents.sort();
+        assert_eq!(contents, vec![b"one".to_vec(), b"two".to_vec()]);
+    }
 }

@@ -1424,3 +1424,22 @@ fn test_eager_jitter_delay_bounded_and_stable() {
         distinct.len()
     );
 }
+
+// ── Property tests (review: protocol fuzzing) ───────────────────────────
+
+use proptest::prelude::*;
+
+proptest! {
+    /// Arbitrary strings must never panic the peer-ref parser.
+    #[test]
+    fn parse_peer_ref_never_panics(s in ".{0,128}") {
+        let _ = super::parse_peer_ref(&s);
+    }
+
+    /// Every formatted peer ref parses back to its parts.
+    #[test]
+    fn peer_ref_roundtrip(id in "[A-Za-z0-9_.-]{1,32}", generation in 0u64..1_000_000) {
+        let formatted = super::format_peer_ref(&id, generation);
+        prop_assert_eq!(super::parse_peer_ref(&formatted), Some((id.as_str(), generation)));
+    }
+}

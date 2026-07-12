@@ -614,3 +614,20 @@ async fn test_persistence_across_restart() {
         store.stop().await;
     }
 }
+
+// ── Exhaustion (review): rapid set() bursts must not queue unboundedly ──
+
+#[tokio::test]
+async fn rapid_set_burst_completes_and_keeps_newest() {
+    let (node, _events) = make_test_node("burst-node", 39400).await;
+    let store: Arc<SyncedStore<u64>> = SyncedStore::new(node, "burst");
+
+    // Far faster than any network drain; the watch channel coalesces so
+    // this must complete quickly with only the newest version pending.
+    for i in 0..10_000u64 {
+        store.set(i).await;
+    }
+    assert_eq!(store.version(), 10_000);
+    assert_eq!(store.local().await, Some(9_999));
+    store.stop().await;
+}
