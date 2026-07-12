@@ -323,8 +323,8 @@ func TestMarshalPeerIdentitySmallIdentityUnchanged(t *testing.T) {
 }
 
 // TestShouldWrapTLS covers the dial TLS-wrap decision: an explicit tls flag
-// wins in both directions, and when absent the legacy behavior (wrap iff the
-// target port is 443) applies.
+// wins in both directions, and when absent (nil) the dial is never wrapped
+// (RFC 023 D4 retired the legacy wrap-iff-port==443 rule).
 func TestShouldWrapTLS(t *testing.T) {
 	tru, fals := true, false
 	cases := []struct {
@@ -333,8 +333,8 @@ func TestShouldWrapTLS(t *testing.T) {
 		tls  *bool
 		want bool
 	}{
-		{"nil wraps on 443", 443, nil, true},
-		{"nil no-wrap off 443", 8080, nil, false},
+		{"nil never wraps on 443", 443, nil, false},
+		{"nil never wraps off 443", 8080, nil, false},
 		{"explicit true wraps non-443", 8080, &tru, true},
 		{"explicit false skips 443", 443, &fals, false},
 		{"explicit true on 443", 443, &tru, true},
@@ -344,6 +344,36 @@ func TestShouldWrapTLS(t *testing.T) {
 		if got := shouldWrapTLS(tc.port, tc.tls); got != tc.want {
 			t.Errorf("%s: shouldWrapTLS(%d, %v) = %v, want %v", tc.name, tc.port, tc.tls, got, tc.want)
 		}
+	}
+}
+
+// TestStatusEventAdvertisesProtocolVersion verifies the status payload carries
+// protocolVersion so an RFC 023-aware core enables v2 serve features instead of
+// treating this sidecar as v1. The core reads it off the "running" status/started
+// event (protocol.rs StatusEventData.protocol_version, camelCase, integer).
+func TestStatusEventAdvertisesProtocolVersion(t *testing.T) {
+	if sidecarProtocolVersion != 2 {
+		t.Fatalf("sidecarProtocolVersion = %d, want 2 (RFC 023 serve v2)", sidecarProtocolVersion)
+	}
+
+	var buf bytes.Buffer
+	s := &shim{writer: json.NewEncoder(&buf)}
+	s.sendStatus("running", "host", "host.tail.ts.net", "100.64.0.1", "")
+
+	// The core matches the camelCase key exactly, as a JSON integer.
+	if !bytes.Contains(buf.Bytes(), []byte(`"protocolVersion":2`)) {
+		t.Errorf("status payload missing protocolVersion on the wire: %s", strings.TrimSpace(buf.String()))
+	}
+
+	var ev struct {
+		Event string     `json:"event"`
+		Data  statusData `json:"data"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &ev); err != nil {
+		t.Fatalf("status event JSON parse: %v", err)
+	}
+	if ev.Data.ProtocolVersion != sidecarProtocolVersion {
+		t.Errorf("status protocolVersion = %d, want %d", ev.Data.ProtocolVersion, sidecarProtocolVersion)
 	}
 }
 

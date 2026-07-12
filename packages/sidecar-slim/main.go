@@ -15,7 +15,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -107,6 +106,13 @@ type dialResultData struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// sidecarProtocolVersion is the serve/proxy protocol version this sidecar
+// speaks. It is advertised in every status/started event so an RFC 023-aware
+// core enables v2 serve features (path routes, allow-lists, tls:false); an older
+// or absent value makes the core treat the sidecar as v1. Bump on wire-breaking
+// changes to the proxy/serve command surface.
+const sidecarProtocolVersion = 2
+
 type statusData struct {
 	State       string `json:"state"`
 	Hostname    string `json:"hostname,omitempty"`
@@ -114,6 +120,10 @@ type statusData struct {
 	TailscaleIP string `json:"tailscaleIP,omitempty"`
 	NodeID      string `json:"nodeId,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// ProtocolVersion advertises sidecarProtocolVersion on every emission (no
+	// omitempty: a status event must always carry it, and the "running" one is
+	// what the core reads to gate v2 features).
+	ProtocolVersion int `json:"protocolVersion"`
 }
 
 type authRequiredData struct {
@@ -420,7 +430,7 @@ type shim struct {
 	writer  *json.Encoder
 
 	listenerMu sync.Mutex     // protects listeners
-	listeners  []net.Listener // active listeners (TLS :443, dynamic)
+	listeners  []net.Listener // active listeners (dynamic), closed on stop
 
 	// dynamicListeners tracks listeners created via tsnet:listen, keyed by port.
 	dynamicListenerMu sync.Mutex
@@ -437,6 +447,12 @@ type shim struct {
 	// watchCancel stops a running WatchIPNBus goroutine (guarded by watchMu).
 	watchMu     sync.Mutex
 	watchCancel context.CancelFunc
+
+	// certWarmed dedupes cert pre-warms per node domain: a TLS listener created
+	// via tsnet:listen/proxy:add fires a one-shot CertPair fetch so ACME issuance
+	// happens at listen time, not on the first visitor's handshake (RFC 023 §7).
+	certWarmMu sync.Mutex
+	certWarmed map[string]struct{}
 }
 
 // getServer returns the current tsnet server (nil if not started/stopped).
@@ -773,18 +789,19 @@ func (s *shim) waitForRunning(ctx context.Context, hostname string) {
 
 			s.sendStatus("running", hostname, dnsName, ip, "")
 			s.sendEvent("tsnet:started", statusData{
-				State:       "running",
-				Hostname:    hostname,
-				DNSName:     dnsName,
-				TailscaleIP: ip,
-				NodeID:      nodeID,
+				State:           "running",
+				Hostname:        hostname,
+				DNSName:         dnsName,
+				TailscaleIP:     ip,
+				NodeID:          nodeID,
+				ProtocolVersion: sidecarProtocolVersion,
 			})
 
-			// Start the TLS listener (:443) for HTTPS connections.
-			// NOTE: We do NOT start the TCP listener on :9417 here.
-			// The Rust session layer starts it dynamically via tsnet:listen
-			// to avoid double-bind conflicts with the dynamic listener.
-			go s.listenTLS(ctx, lc)
+			// The sidecar opens no listeners at startup. The Rust session layer
+			// starts the :9417 TCP listener dynamically via tsnet:listen (avoids a
+			// double-bind with that dynamic listener); serving listeners are
+			// created on demand by tsnet:listen/proxy:add. RFC 023 removed the
+			// v1-era fossil :443 TLS listener that used to start here.
 
 			// Start background state monitor
 			go s.monitorState(ctx, lc)
@@ -800,45 +817,6 @@ func (s *shim) trackListener(ln net.Listener) {
 	s.listenerMu.Lock()
 	defer s.listenerMu.Unlock()
 	s.listeners = append(s.listeners, ln)
-}
-
-func (s *shim) listenTLS(ctx context.Context, lc *tailscale.LocalClient) {
-	defer s.recoverPanic("listenTLS")
-
-	srv := s.getServer()
-	if srv == nil {
-		return
-	}
-	ln, err := srv.ListenTLS("tcp", ":443")
-	if err != nil {
-		log.Printf("ListenTLS :443 failed: %v", err)
-		s.sendError("LISTEN_ERROR", fmt.Sprintf("ListenTLS :443: %v", err))
-		return
-	}
-	s.trackListener(ln)
-	defer ln.Close()
-
-	log.Printf("listening TLS on :443")
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// Deliberate close during stop — exit instead of busy-looping on a
-			// closed listener. The :443 listener lives in s.listeners and is
-			// only ever closed by handleStop, so net.ErrClosed is the analog of
-			// the dynamic loop's stillActive guard.
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return
-			}
-			log.Printf("accept :443 error: %v", err)
-			continue
-		}
-		// G7: resolve peer identity inside the per-connection goroutine so a
-		// slow WhoIs doesn't serialize acceptance of the next connection.
-		go func(c net.Conn) {
-			peerIdentity := s.resolvePeerIdentity(lc, c.RemoteAddr().String())
-			s.bridgeToRust(c, 443, dirIncoming, "", c.RemoteAddr().String(), peerIdentity)
-		}(conn)
-	}
 }
 
 func (s *shim) handleStop() {
@@ -966,13 +944,15 @@ func (s *shim) handleGetPeers() {
 }
 
 // shouldWrapTLS decides whether an outbound dial is TLS-wrapped. An explicit
-// tls flag from the dial command wins in both directions; when absent, the
-// legacy behavior applies: wrap iff the target port is 443.
+// tls flag from the dial command wins in both directions; when absent (nil) the
+// dial is never wrapped. RFC 023 (D4) retired the legacy "wrap iff port==443"
+// rule alongside the fossil :443 listener, so port no longer influences the
+// decision (kept in the signature to mirror the dial's target port).
 func shouldWrapTLS(port uint16, tls *bool) bool {
 	if tls != nil {
 		return *tls
 	}
-	return port == 443
+	return false
 }
 
 func (s *shim) handleDial(data json.RawMessage) {
@@ -1082,6 +1062,12 @@ func (s *shim) handleListen(data json.RawMessage) {
 		if err != nil {
 			s.sendError("LISTEN_ERROR", fmt.Sprintf("Listen :%d: %v", d.Port, err))
 			return
+		}
+
+		if d.TLS {
+			// RFC 023: warm the node cert now so ACME issuance happens at listen
+			// time, not inside the first visitor's TLS handshake.
+			go s.prewarmCert(ctx, srv)
 		}
 
 		// Resolve the actual port (important when d.Port is 0 and the OS
@@ -2086,6 +2072,12 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 			return
 		}
 
+		// RFC 023: warm the node cert now so ACME issuance happens at proxy-add
+		// time, not inside the first visitor's TLS handshake. Use the lifecycle
+		// context (not this proxy's serve ctx) — the cert is shared by every TLS
+		// listener, so removing this one proxy shouldn't cancel an in-flight warm.
+		go s.prewarmCert(s.lifecycleCtx(), srv)
+
 		ctx, cancel := context.WithCancel(s.lifecycleCtx())
 		// P4: bound header reads (slow-loris) and idle keep-alives. ReadTimeout
 		// is intentionally unset so long-lived streaming/WebSocket bodies work.
@@ -2481,6 +2473,61 @@ func marshalPeerIdentity(identity peerIdentityData) string {
 	return ""
 }
 
+// prewarmCert fetches the node's TLS certificate ahead of the first visitor so
+// ACME issuance happens at listen time instead of inside the first browser
+// handshake. Fire-and-forget and non-fatal: the TLS listener is already up and
+// tsnet still issues on demand if this fails. CertPair caches to the state dir,
+// so this is a no-op once a cert exists. Deduped per domain because every TLS
+// listener on the node shares one cert (RFC 023 §7, D13).
+//
+// Failures are logged only, never sent as a tsnet:error event: ErrorEventData
+// carries no correlation id (just code+message), and the Rust request loops that
+// await listen/proxy confirmations treat ANY sidecar Error as their own in-flight
+// failure (provider.rs listen_tcp / proxy_add), so an unsolicited warning racing
+// a concurrent listen would turn a successful listen into a spurious error.
+func (s *shim) prewarmCert(ctx context.Context, srv *tsnet.Server) {
+	defer s.recoverPanic("prewarmCert")
+
+	// CertDomains returns nil until the node is Running; a later listen retries.
+	domains := srv.CertDomains()
+	if len(domains) == 0 {
+		log.Printf("cert pre-warm skipped: no cert domains yet (is HTTPS enabled for your tailnet?)")
+		return
+	}
+	domain := domains[0]
+
+	// Dedupe: one warm per domain per lifecycle. Marking before the fetch also
+	// collapses concurrent listens racing to warm the same node cert. A failed
+	// warm is not retried within the lifecycle — the listener still issues on
+	// demand, and re-hitting a misconfigured tailnet would only re-fail.
+	s.certWarmMu.Lock()
+	if s.certWarmed == nil {
+		s.certWarmed = make(map[string]struct{})
+	}
+	if _, done := s.certWarmed[domain]; done {
+		s.certWarmMu.Unlock()
+		return
+	}
+	s.certWarmed[domain] = struct{}{}
+	s.certWarmMu.Unlock()
+
+	lc, err := srv.LocalClient()
+	if err != nil {
+		log.Printf("cert pre-warm for %s skipped: %v", domain, err)
+		return
+	}
+
+	// Bound the fetch: first issuance does an ACME round-trip (seconds), but a
+	// misconfigured tailnet could otherwise hang this goroutine indefinitely.
+	warmCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	if _, _, err := lc.CertPair(warmCtx, domain); err != nil {
+		log.Printf("cert pre-warm for %s failed: %v (is HTTPS enabled for your tailnet?)", domain, err)
+		return
+	}
+	debugf("cert pre-warm for %s complete", domain)
+}
+
 // monitorState polls Tailscale status every 60 seconds and emits events for
 // state changes, upcoming key expiry, and health warnings.
 func (s *shim) monitorState(ctx context.Context, lc *tailscale.LocalClient) {
@@ -2546,11 +2593,12 @@ func (s *shim) sendEvent(eventType string, data interface{}) {
 // sendStatus is a convenience for sending tsnet:status events.
 func (s *shim) sendStatus(state, hostname, dnsName, tailscaleIP, errMsg string) {
 	s.sendEvent("tsnet:status", statusData{
-		State:       state,
-		Hostname:    hostname,
-		DNSName:     dnsName,
-		TailscaleIP: tailscaleIP,
-		Error:       errMsg,
+		State:           state,
+		Hostname:        hostname,
+		DNSName:         dnsName,
+		TailscaleIP:     tailscaleIP,
+		Error:           errMsg,
+		ProtocolVersion: sidecarProtocolVersion,
 	})
 }
 
