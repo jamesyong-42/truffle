@@ -119,6 +119,7 @@ truffle-sidecar = { version = "0.7.0", path = "crates/truffle-sidecar" } # x-rel
 # (tokio dev features are added per-crate via `features = [...]`)
 dotenvy = "0.15"
 criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1"
 hdrhistogram = "7"
 
 # ── Optimise dependency compilation in dev builds ────────────────────

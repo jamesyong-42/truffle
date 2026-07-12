@@ -145,4 +145,36 @@ mod tests {
         let decoded = codec.decode(&encoded).expect("decode");
         assert_eq!(decoded.namespace, "test");
     }
+
+    // ── Property tests (review: protocol fuzzing) ───────────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Arbitrary bytes must never panic the decoder — the worst
+        /// acceptable outcome is a clean Deserialization error.
+        #[test]
+        fn decode_never_panics_on_arbitrary_bytes(
+            data in proptest::collection::vec(any::<u8>(), 0..2048)
+        ) {
+            let _ = JsonCodec.decode(&data);
+        }
+
+        /// Valid envelopes roundtrip losslessly whatever the field contents
+        /// (unicode, quotes, control characters, ...).
+        #[test]
+        fn roundtrip_arbitrary_fields(
+            ns in ".{0,64}",
+            mt in ".{0,64}",
+            text in ".{0,256}"
+        ) {
+            let envelope = Envelope::new(&ns, &mt, json!({ "text": text.clone() }));
+            let decoded = JsonCodec
+                .decode(&JsonCodec.encode(&envelope).unwrap())
+                .unwrap();
+            prop_assert_eq!(decoded.namespace, ns);
+            prop_assert_eq!(decoded.msg_type, mt);
+            prop_assert_eq!(&decoded.payload["text"], &serde_json::Value::from(text));
+        }
+    }
 }
