@@ -186,10 +186,13 @@ server.listen(443, () => console.log(`https://${mesh.dnsName}/`));
   `server.address()` → `{ port }`.
 - **Identity**: `req.socket` is a `TruffleSocket` with `remotePeerId`,
   `remotePeerName`, and (new) `remotePeer: Peer | null` — the RFC 022 handle,
-  resolved through the packages/core registry, `null` for tailnet callers that are
-  not mesh peers... which cannot happen on-tailnet (WatchIPNBus sees all devices),
-  but can for future Funnel traffic. No headers are injected on this path — there
-  is no proxy hop to inject them.
+  resolved live through the packages/core registry. `null` is possible and is
+  the reject cue: transiently before the caller is interned (registry lag right
+  after discovery), always when the namespace is built without registry hooks
+  (outside `createMeshNode`), and permanently for future Funnel traffic. The
+  WhoIs strings (`remotePeerId`/`remotePeerName`) are set from accept time
+  regardless. No headers are injected on this path — there is no proxy hop to
+  inject them.
 
 ### 6.2 `mesh.serve(config)` → `ServeHandle`
 

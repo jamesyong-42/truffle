@@ -119,8 +119,8 @@ Turn it on when a **browser** is the client:
 
 ```ts
 const server = mesh.http.createServer({ tls: true }, app);
-server.listen(8443, () => {
-  console.log(`serving on https://${mesh.dnsName}:8443/`);
+server.listen(443, () => {
+  console.log(`serving on https://${mesh.dnsName}/`);
 });
 ```
 
@@ -141,9 +141,11 @@ What to know before you flip it on:
 - **First handshake per name does ACME issuance** (a few seconds). The mesh
   pre-warms it at listen time, so the latency lands on you at startup rather
   than on your first visitor.
-- **TLS termination needs a current sidecar build.** Serve it on an explicit
-  port (`8443` above); port `443` — the bare `https://name.ts.net/` URL with no
-  suffix — is reserved by the mesh.
+- **TLS termination and port 443 need a current sidecar build.** Listening on
+  `443` — the bare `https://name.ts.net/` URL with no port suffix — works on
+  RFC 023 sidecars; against an older sidecar the bind fails with an explicit
+  "upgrade the sidecar" error (its legacy internal listener still squats 443).
+  Any other port works on both.
 
 ## How it differs from a host server
 
@@ -255,7 +257,7 @@ covers everything you can express as a JavaScript handler.
 | Idle reaping | No inactivity timer; `close()` sweeps idle sockets, `closeAllConnections()` is the hard stop |
 | Exposure | Reachable by the entire tailnet, gated by Tailscale ACLs — not scoped to `appId` |
 | TLS prerequisites | MagicDNS + HTTPS certificates enabled; cert matches the full `.ts.net` FQDN; current sidecar |
-| Ports | One listener per port per node; `443` and `9417` are reserved by the mesh |
+| Ports | One listener per port per node; `9417` (the mesh's session port) is reserved; `443` needs an RFC 023 sidecar |
 
 Throughput note: mesh traffic crosses the userspace tailnet netstack plus a
 loopback hop. It's great for APIs, dashboards, control traffic, and app data —
