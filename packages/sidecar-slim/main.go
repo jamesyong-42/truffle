@@ -24,6 +24,9 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -289,6 +292,32 @@ type proxyAddData struct {
 	TargetHost   string `json:"targetHost"`
 	TargetPort   uint16 `json:"targetPort"`
 	TargetScheme string `json:"targetScheme"`
+
+	// RFC 023 engine v2 fields. Absent on v1 cores → v1 behavior exactly.
+
+	// Tls: nil preserves the v1 always-TLS listener; explicit false serves
+	// plain HTTP (D5 — WireGuard already encrypts; TLS is for browsers).
+	Tls *bool `json:"tls"`
+	// AllowNonLoopback permits proxy targets beyond 127.0.0.1/localhost
+	// (§9.3 default-deny: a LAN target turns this node into a pivot).
+	AllowNonLoopback bool `json:"allowNonLoopback,omitempty"`
+	// Allow is the config-level loginName glob gate (§9.7); empty = whole
+	// tailnet. Routes may override per-route.
+	Allow []string `json:"allow,omitempty"`
+	// Routes replaces the single target with path-prefix mounts (§7).
+	Routes []proxyRouteData `json:"routes,omitempty"`
+}
+
+// proxyRouteData is one path-prefix route of a v2 proxy (RFC 023 §7).
+// Exactly one of targetUrl/dir is set. The Rust core validates shapes, but
+// the sidecar re-checks — it must not trust the wire.
+type proxyRouteData struct {
+	Prefix      string   `json:"prefix"`
+	TargetURL   string   `json:"targetUrl,omitempty"`
+	Dir         string   `json:"dir,omitempty"`
+	Fallback    string   `json:"fallback,omitempty"`
+	StripPrefix bool     `json:"stripPrefix,omitempty"`
+	Allow       []string `json:"allow,omitempty"`
 }
 
 // proxyRemoveData is the payload for proxy:remove commands.
@@ -345,7 +374,8 @@ type proxyEntry struct {
 	targetHost   string
 	targetPort   uint16
 	targetScheme string
-	targetURL    *url.URL
+	targetURL    *url.URL // first URL target; nil in routes mode (RFC 023)
+	tlsOn        bool     // whether the tailnet listener terminates TLS
 	listener     net.Listener
 	server       *http.Server
 	cancel       context.CancelFunc
@@ -453,6 +483,19 @@ type shim struct {
 	// happens at listen time, not on the first visitor's handshake (RFC 023 §7).
 	certWarmMu sync.Mutex
 	certWarmed map[string]struct{}
+
+	// identityCache bounds WhoIs lookups on the proxy request path: keep-alive
+	// connections re-present the same RemoteAddr for every request, so a short
+	// TTL avoids a 3s-budget RPC per request without letting identity go stale
+	// past a minute (RFC 023 §7 identity headers).
+	identityCacheMu sync.Mutex
+	identityCache   map[string]cachedIdentity
+}
+
+// cachedIdentity is one identityCache slot.
+type cachedIdentity struct {
+	identity peerIdentityData
+	expires  time.Time
 }
 
 // getServer returns the current tsnet server (nil if not started/stopped).
@@ -1971,6 +2014,95 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		data.TargetScheme = "http"
 	}
 
+	// RFC 023 D5: nil preserves the v1 always-TLS listener.
+	tlsOn := data.Tls == nil || *data.Tls
+
+	// boundRoute is a validated, ready-to-serve mount. v1 single-target
+	// configs become one "/" route so a single handler path serves both.
+	type boundRoute struct {
+		prefix      string
+		allow       []string
+		handler     http.Handler
+		target      *url.URL // nil for dir routes (no WebSocket dispatch)
+		stripPrefix bool
+	}
+
+	fail := func(code, msg string) {
+		s.sendEvent("proxy:error", proxyErrorEventData{ID: data.ID, Code: code, Message: msg})
+	}
+
+	lc, err := srv.LocalClient()
+	if err != nil {
+		fail("INTERNAL", "local client unavailable: "+err.Error())
+		return
+	}
+
+	// Validate + bind routes BEFORE any state is inserted, so failures need
+	// no placeholder cleanup. The Rust core validates shapes too, but the
+	// sidecar re-checks — it must not trust the wire (§9).
+	var routes []boundRoute
+	if len(data.Routes) == 0 {
+		targetURL := &url.URL{Scheme: data.TargetScheme, Host: fmt.Sprintf("%s:%d", data.TargetHost, data.TargetPort)}
+		if !data.AllowNonLoopback && !isLoopbackHost(data.TargetHost) {
+			fail("TARGET_NOT_LOOPBACK", fmt.Sprintf("target %q is not loopback; a non-loopback target makes this node a pivot into its network — set allowNonLoopback to opt in (RFC 023 §9.3)", data.TargetHost))
+			return
+		}
+		routes = append(routes, boundRoute{
+			prefix:  "/",
+			handler: s.buildReverseProxy(data.ID, targetURL, ""),
+			target:  targetURL,
+		})
+	} else {
+		for _, rt := range data.Routes {
+			if !strings.HasPrefix(rt.Prefix, "/") {
+				fail("INVALID_ROUTE", fmt.Sprintf("route prefix %q must start with '/'", rt.Prefix))
+				return
+			}
+			switch {
+			case rt.TargetURL != "" && rt.Dir != "":
+				fail("INVALID_ROUTE", fmt.Sprintf("route %q sets both targetUrl and dir", rt.Prefix))
+				return
+			case rt.TargetURL != "":
+				u, err := url.Parse(rt.TargetURL)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+					fail("INVALID_ROUTE", fmt.Sprintf("route %q: targetUrl must be an absolute http(s) URL", rt.Prefix))
+					return
+				}
+				if !data.AllowNonLoopback && !isLoopbackHost(u.Hostname()) {
+					fail("TARGET_NOT_LOOPBACK", fmt.Sprintf("route %q target %q is not loopback — set allowNonLoopback to opt in (RFC 023 §9.3)", rt.Prefix, u.Hostname()))
+					return
+				}
+				strip := ""
+				if rt.StripPrefix {
+					strip = rt.Prefix
+				}
+				routes = append(routes, boundRoute{
+					prefix:      rt.Prefix,
+					allow:       rt.Allow,
+					handler:     s.buildReverseProxy(data.ID, u, strip),
+					target:      u,
+					stripPrefix: rt.StripPrefix,
+				})
+			case rt.Dir != "":
+				if !filepath.IsAbs(rt.Dir) {
+					fail("INVALID_ROUTE", fmt.Sprintf("route %q: dir must be an absolute path", rt.Prefix))
+					return
+				}
+				routes = append(routes, boundRoute{
+					prefix:  rt.Prefix,
+					allow:   rt.Allow,
+					handler: spaFileServer(rt.Dir, rt.Fallback),
+				})
+			default:
+				fail("INVALID_ROUTE", fmt.Sprintf("route %q needs a targetUrl or a dir", rt.Prefix))
+				return
+			}
+		}
+		// Longest prefix wins, order-independent (D11): sort once, match
+		// first-hit at request time.
+		sort.Slice(routes, func(i, j int) bool { return len(routes[i].prefix) > len(routes[j].prefix) })
+	}
+
 	s.proxyMu.Lock()
 	if _, exists := s.proxies[data.ID]; exists {
 		s.proxyMu.Unlock()
@@ -2002,57 +2134,84 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 	}
 	s.dynamicListenerMu.Unlock()
 
-	targetURL := &url.URL{Scheme: data.TargetScheme, Host: fmt.Sprintf("%s:%d", data.TargetHost, data.TargetPort)}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = fmt.Sprintf("%s:%d", data.TargetHost, data.TargetPort)
+	forwardedProto := "http"
+	if tlsOn {
+		forwardedProto = "https"
 	}
 
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-	if data.TargetScheme == "https" {
-		// P6: only skip TLS verification for loopback targets; verify certs for
-		// any non-loopback host.
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: isLoopbackHost(data.TargetHost)}
-	}
-	proxy.Transport = transport
-
-	proxyID := data.ID
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		if strings.Contains(err.Error(), "connection refused") {
-			s.sendEvent("proxy:error", proxyErrorEventData{ID: proxyID, Code: "CONNECTION_REFUSED", Message: err.Error()})
-		}
-		// P7: don't leak internal error detail (target host/port, dial state) to
-		// the remote caller; the detail is reported on the local event above.
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	// The proxyEntry keeps the v1 single-target URL for list/debug; routes
+	// mode has no single target.
+	var entryTargetURL *url.URL
+	if len(data.Routes) == 0 {
+		entryTargetURL = routes[0].target
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isProxyWebSocketRequest(r) {
+		// Identity first (§9.2): resolve who is calling from the WireGuard
+		// tunnel, strip anything they claimed in our header namespace, gate,
+		// then inject the verified values for the backend.
+		identity := s.proxyWhois(lc, r.RemoteAddr)
+		sanitizeTailscaleHeaders(r.Header)
+
+		var route *boundRoute
+		for i := range routes {
+			if pathMatchesPrefix(r.URL.Path, routes[i].prefix) {
+				route = &routes[i]
+				break
+			}
+		}
+		if route == nil {
+			http.NotFound(w, r)
+			return
+		}
+
+		if !allowedLogin(effectiveAllow(route.allow, data.Allow), identity.LoginName) {
+			// Bare 403 (§9.7): no detail about the gate to non-matching callers.
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		injectIdentityHeaders(r.Header, identity)
+		r.Header.Set("X-Forwarded-Proto", forwardedProto)
+
+		// WebSocket upgrades bypass ReverseProxy via hijack — only for URL
+		// targets (an upgrade against a static dir just gets the file 404s).
+		// The request is already sanitized/injected, so the raw r.Write on
+		// the hijack path forwards the verified headers.
+		if route.target != nil && isProxyWebSocketRequest(r) {
+			if route.stripPrefix {
+				r.URL.Path = stripPathPrefix(r.URL.Path, route.prefix)
+			}
 			s.proxyMu.Lock()
 			entry := s.proxies[data.ID]
 			s.proxyMu.Unlock()
-			s.handleProxyWebSocket(w, r, entry, data.TargetHost, data.TargetPort, data.TargetScheme)
+			s.handleProxyWebSocket(w, r, entry, route.target.Hostname(), urlPort(route.target), route.target.Scheme)
 			return
 		}
-		proxy.ServeHTTP(w, r)
+
+		// Dir mounts always strip their prefix: the mount point maps to the
+		// directory ROOT ("/app/x" on a "/app" dir mount serves dir/x, never
+		// dir/app/x). URL targets keep stripping explicit (D11).
+		if route.target == nil && route.prefix != "/" {
+			r.URL.Path = stripPathPrefix(r.URL.Path, route.prefix)
+		}
+
+		route.handler.ServeHTTP(w, r)
 	})
 
 	go func() {
 		defer s.recoverPanic("handleProxyAdd")
 
 		addr := fmt.Sprintf(":%d", data.ListenPort)
-		ln, err := srv.ListenTLS("tcp", addr)
+		var ln net.Listener
+		var err error
+		if tlsOn {
+			ln, err = srv.ListenTLS("tcp", addr)
+		} else {
+			// RFC 023 D5: explicit tls:false serves plain HTTP — WireGuard
+			// already encrypts the path; TLS is a browser-facing concern.
+			ln, err = srv.Listen("tcp", addr)
+		}
 		if err != nil {
 			// Clean up placeholder on listen failure
 			s.proxyMu.Lock()
@@ -2072,11 +2231,14 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 			return
 		}
 
-		// RFC 023: warm the node cert now so ACME issuance happens at proxy-add
-		// time, not inside the first visitor's TLS handshake. Use the lifecycle
-		// context (not this proxy's serve ctx) — the cert is shared by every TLS
-		// listener, so removing this one proxy shouldn't cancel an in-flight warm.
-		go s.prewarmCert(s.lifecycleCtx(), srv)
+		if tlsOn {
+			// RFC 023: warm the node cert now so ACME issuance happens at
+			// proxy-add time, not inside the first visitor's TLS handshake.
+			// Use the lifecycle context (not this proxy's serve ctx) — the
+			// cert is shared by every TLS listener, so removing this one
+			// proxy shouldn't cancel an in-flight warm.
+			go s.prewarmCert(s.lifecycleCtx(), srv)
+		}
 
 		ctx, cancel := context.WithCancel(s.lifecycleCtx())
 		// P4: bound header reads (slow-loris) and idle keep-alives. ReadTimeout
@@ -2093,12 +2255,12 @@ func (s *shim) handleProxyAdd(raw json.RawMessage) {
 		s.proxies[data.ID] = &proxyEntry{
 			id: data.ID, name: data.Name, listenPort: data.ListenPort,
 			targetHost: data.TargetHost, targetPort: data.TargetPort,
-			targetScheme: data.TargetScheme, targetURL: targetURL,
+			targetScheme: data.TargetScheme, targetURL: entryTargetURL, tlsOn: tlsOn,
 			listener: ln, server: httpSrv, cancel: cancel,
 		}
 		s.proxyMu.Unlock()
 
-		proxyURL := fmt.Sprintf("https://%s:%d", s.getDNSName(), data.ListenPort)
+		proxyURL := publicURL(tlsOn, s.getDNSName(), data.ListenPort)
 		s.sendEvent("proxy:added", proxyAddedEventData{ID: data.ID, ListenPort: data.ListenPort, URL: proxyURL})
 
 		if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -2226,7 +2388,7 @@ func (s *shim) handleProxyList() {
 		if entry == nil {
 			continue // skip placeholders still being set up
 		}
-		proxyURL := fmt.Sprintf("https://%s:%d", s.getDNSName(), entry.listenPort)
+		proxyURL := publicURL(entry.tlsOn, s.getDNSName(), entry.listenPort)
 		proxies = append(proxies, proxyInfoData{
 			ID: entry.id, Name: entry.name,
 			ListenPort: entry.listenPort,
@@ -2411,6 +2573,32 @@ func idleCopy(dst, src net.Conn, timeout time.Duration) {
 	}
 }
 
+// publicURL renders a proxy's tailnet URL, omitting the scheme's default
+// port — `https://name.ts.net/` is the demo URL RFC 023 exists for.
+func publicURL(tlsOn bool, dnsName string, port uint16) string {
+	scheme := "http"
+	if tlsOn {
+		scheme = "https"
+	}
+	if (tlsOn && port == 443) || (!tlsOn && port == 80) {
+		return fmt.Sprintf("%s://%s", scheme, dnsName)
+	}
+	return fmt.Sprintf("%s://%s:%d", scheme, dnsName, port)
+}
+
+// urlPort resolves a parsed URL's port, defaulting by scheme.
+func urlPort(u *url.URL) uint16 {
+	if p := u.Port(); p != "" {
+		if n, err := strconv.ParseUint(p, 10, 16); err == nil {
+			return uint16(n)
+		}
+	}
+	if u.Scheme == "https" {
+		return 443
+	}
+	return 80
+}
+
 // isLoopbackHost reports whether host refers to the local loopback interface.
 func isLoopbackHost(host string) bool {
 	if host == "" || host == "localhost" {
@@ -2422,16 +2610,16 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-// resolvePeerIdentity maps a remote address to a PeerIdentity JSON string via WhoIs.
-// The JSON is placed into the bridge header's remoteDNS field so Rust can
-// extract rich identity info about the connecting peer.
-func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) string {
+// whoisIdentity maps a remote address to the peer's identity via WhoIs.
+// A zero identity means the lookup failed or found nothing (e.g. a future
+// Funnel caller) — callers treat that as "anonymous".
+func (s *shim) whoisIdentity(lc *tailscale.LocalClient, remoteAddr string) peerIdentityData {
 	ctx, cancel := context.WithTimeout(s.lifecycleCtx(), whoisTimeout)
 	defer cancel()
 	whois, err := lc.WhoIs(ctx, remoteAddr)
 	if err != nil {
-		log.Printf("resolvePeerIdentity: WhoIs(%s) failed: %v", remoteAddr, err)
-		return ""
+		log.Printf("whoisIdentity: WhoIs(%s) failed: %v", remoteAddr, err)
+		return peerIdentityData{}
 	}
 
 	identity := peerIdentityData{}
@@ -2444,8 +2632,226 @@ func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string)
 		identity.DisplayName = whois.UserProfile.DisplayName
 		identity.ProfilePicURL = whois.UserProfile.ProfilePicURL
 	}
+	return identity
+}
 
+// resolvePeerIdentity maps a remote address to a PeerIdentity JSON string via WhoIs.
+// The JSON is placed into the bridge header's remoteDNS field so Rust can
+// extract rich identity info about the connecting peer.
+func (s *shim) resolvePeerIdentity(lc *tailscale.LocalClient, remoteAddr string) string {
+	identity := s.whoisIdentity(lc, remoteAddr)
+	if identity == (peerIdentityData{}) {
+		return ""
+	}
 	return marshalPeerIdentity(identity)
+}
+
+// proxyWhois is whoisIdentity behind a short TTL cache, for the proxy request
+// path: keep-alive connections re-present the same RemoteAddr per request,
+// and a WhoIs RPC per request would serialize handlers on a 3s budget.
+func (s *shim) proxyWhois(lc *tailscale.LocalClient, remoteAddr string) peerIdentityData {
+	now := time.Now()
+	s.identityCacheMu.Lock()
+	if c, ok := s.identityCache[remoteAddr]; ok && now.Before(c.expires) {
+		s.identityCacheMu.Unlock()
+		return c.identity
+	}
+	s.identityCacheMu.Unlock()
+
+	identity := s.whoisIdentity(lc, remoteAddr)
+
+	s.identityCacheMu.Lock()
+	if s.identityCache == nil {
+		s.identityCache = make(map[string]cachedIdentity)
+	}
+	// Crude size bound: reset rather than LRU — entries are tiny and a reset
+	// only costs one extra WhoIs per live address.
+	if len(s.identityCache) > 1024 {
+		s.identityCache = make(map[string]cachedIdentity)
+	}
+	s.identityCache[remoteAddr] = cachedIdentity{identity: identity, expires: now.Add(identityCacheTTL)}
+	s.identityCacheMu.Unlock()
+	return identity
+}
+
+// ── RFC 023 engine v2: identity headers, allow-lists, routes, static ──────
+
+// Every inbound header in this namespace is stripped before our own values
+// are injected, so a caller can never smuggle a Tailscale-User-Login past a
+// backend that trusts the proxy (§9.2).
+const tailscaleHeaderPrefix = "Tailscale-"
+
+// Identity headers injected for backends, matching Tailscale's own serve /
+// nginx-auth convention.
+const (
+	hdrUserLogin  = "Tailscale-User-Login"
+	hdrUserName   = "Tailscale-User-Name"
+	hdrProfilePic = "Tailscale-User-Profile-Pic"
+)
+
+// identityCacheTTL bounds identity staleness on the proxy request path.
+const identityCacheTTL = 60 * time.Second
+
+func sanitizeTailscaleHeaders(h http.Header) {
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), tailscaleHeaderPrefix) {
+			h.Del(name)
+		}
+	}
+}
+
+func injectIdentityHeaders(h http.Header, id peerIdentityData) {
+	if id.LoginName != "" {
+		h.Set(hdrUserLogin, id.LoginName)
+	}
+	if id.DisplayName != "" {
+		h.Set(hdrUserName, id.DisplayName)
+	}
+	if id.ProfilePicURL != "" {
+		h.Set(hdrProfilePic, id.ProfilePicURL)
+	}
+}
+
+// allowedLogin evaluates loginName against shell-style globs (path.Match),
+// case-insensitively. An empty glob list means no gate. Callers WITHOUT a
+// login identity (tagged nodes, failed WhoIs, future Funnel) never pass a
+// non-empty gate — fail closed (§9.7).
+func allowedLogin(globs []string, login string) bool {
+	if len(globs) == 0 {
+		return true
+	}
+	l := strings.ToLower(login)
+	if l == "" {
+		return false
+	}
+	for _, g := range globs {
+		if ok, err := path.Match(strings.ToLower(g), l); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveAllow picks the gate for a matched route: a per-route list
+// overrides the config-level one (D14).
+func effectiveAllow(routeAllowList, configAllow []string) []string {
+	if len(routeAllowList) > 0 {
+		return routeAllowList
+	}
+	return configAllow
+}
+
+// pathMatchesPrefix reports whether p is mounted under prefix. "/" matches
+// everything; otherwise the match is exact or on a segment boundary, so
+// "/api" matches "/api" and "/api/x" but never "/apix" (D11).
+func pathMatchesPrefix(p, prefix string) bool {
+	if prefix == "/" {
+		return true
+	}
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
+}
+
+// stripPathPrefix removes a matched mount prefix, always leaving an
+// absolute path ("/api" request on stripped mount "/api" → "/").
+func stripPathPrefix(p, prefix string) string {
+	rest := strings.TrimPrefix(p, prefix)
+	if !strings.HasPrefix(rest, "/") {
+		rest = "/" + rest
+	}
+	return rest
+}
+
+// spaFileServer serves a directory with RFC 023 static semantics (§6.2):
+// index.html at directory roots, no listings, dotfiles denied, optional SPA
+// fallback for misses. ETag/Range/mime come from http.ServeFile.
+func spaFileServer(dir, fallback string) http.Handler {
+	root := http.Dir(dir)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		reqPath := path.Clean("/" + r.URL.Path)
+		for _, seg := range strings.Split(reqPath, "/") {
+			if len(seg) > 1 && strings.HasPrefix(seg, ".") {
+				http.NotFound(w, r)
+				return
+			}
+		}
+		// serve returns false when name doesn't resolve to a servable file
+		// (missing, or a directory without index.html — no listings).
+		serve := func(name string) bool {
+			f, err := root.Open(name)
+			if err != nil {
+				return false
+			}
+			st, err := f.Stat()
+			f.Close()
+			if err != nil {
+				return false
+			}
+			if st.IsDir() {
+				name = path.Join(name, "index.html")
+				fi, err := root.Open(name)
+				if err != nil {
+					return false
+				}
+				fi.Close()
+			}
+			http.ServeFile(w, r, filepath.Join(dir, filepath.FromSlash(name)))
+			return true
+		}
+		if serve(reqPath) {
+			return
+		}
+		if fallback != "" && serve(path.Clean("/"+fallback)) {
+			return
+		}
+		http.NotFound(w, r)
+	})
+}
+
+// buildReverseProxy assembles the httputil.ReverseProxy for one target with
+// the engine's shared policy: Host rewrite, optional mount-prefix strip,
+// loopback-only TLS skip-verify, bounded transport, and the detail-free 502
+// (P6/P7 carried over from v1).
+func (s *shim) buildReverseProxy(proxyID string, target *url.URL, stripPrefix string) *httputil.ReverseProxy {
+	rp := httputil.NewSingleHostReverseProxy(target)
+
+	originalDirector := rp.Director
+	rp.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = target.Host
+		if stripPrefix != "" {
+			req.URL.Path = stripPathPrefix(req.URL.Path, stripPrefix)
+		}
+	}
+
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	if target.Scheme == "https" {
+		// P6: only skip TLS verification for loopback targets; verify certs
+		// for any non-loopback host.
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: isLoopbackHost(target.Hostname())}
+	}
+	rp.Transport = transport
+
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if strings.Contains(err.Error(), "connection refused") {
+			s.sendEvent("proxy:error", proxyErrorEventData{ID: proxyID, Code: "CONNECTION_REFUSED", Message: err.Error()})
+		}
+		// P7: don't leak internal error detail (target host/port, dial state)
+		// to the remote caller; the detail is reported on the local event above.
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	}
+	return rp
 }
 
 // marshalPeerIdentity encodes identity as JSON bounded to maxRemoteDNSNameLen.

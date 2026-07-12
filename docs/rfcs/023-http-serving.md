@@ -440,7 +440,10 @@ Each phase lands green independently; Phases 1 and 2 are individually releasable
 - **D9 — Funnel deferred**, key reserved, constraints pre-documented (§9.6).
 - **D10 — discovery kept, not culled**: `announce`/`discovery.rs` stay (already in
   shipped binding types), documented inert, implemented in Phase 5.
-- **D11 — routes**: longest-prefix, order-independent, `stripPrefix` default false.
+- **D11 — routes**: longest-prefix, order-independent, `stripPrefix` default
+  false for URL targets. Dir mounts always strip — the mount point maps to the
+  directory root (`/app/x` on a `/app` dir mount serves `dir/x`), which is why
+  `stripPrefix` is rejected on dir routes rather than defaulted.
 - **D12 — HTTP/2**: engine path terminates h2 in Go for free; JS path stays h1.1
   (no ALPN into Node; sidecar-terminated TLS). Revisit only with demand.
 - **D13 — cert pre-warm is behavior, not an option**: always fire-and-forget on
