@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.7.0...truffle-v0.7.1) (2026-07-12)
+
+
+### Features
+
+* HTTP serving over the tailnet — mesh.http.createServer, mesh.serve, truffle serve (RFC 023 P1-P3) ([#152](https://github.com/jamesyong-42/truffle/issues/152)) ([beaadb8](https://github.com/jamesyong-42/truffle/commit/beaadb8f51fb7ffbf38dd69bcc519c2cb7bb3a2b))
+* **tauri:** sendJson/sendBytes/broadcastJson/broadcastBytes parity ([#149](https://github.com/jamesyong-42/truffle/issues/149)) ([68e2e0d](https://github.com/jamesyong-42/truffle/commit/68e2e0da8fd400736327feb01ec26c2afcaf7bc7))
+
 ## [0.7.0](https://github.com/jamesyong-42/truffle/compare/truffle-v0.6.0...truffle-v0.7.0) (2026-07-11)
 
 
