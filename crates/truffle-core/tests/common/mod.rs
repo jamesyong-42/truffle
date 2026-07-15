@@ -591,6 +591,11 @@ async fn rendezvous_nodes(
 /// Exchange a dummy message each direction and wait until both sides have
 /// a live WS to the other — at which point the hello handshake has run and
 /// the peer registry carries the real ULID device_id.
+///
+/// Retries once on timeout: simultaneous dual-dials on a fresh pair can race
+/// (both connect, both tear down the "losing" socket) and leave
+/// `ws_connected=false` even though hello briefly completed. Soft-failing used
+/// to mask that and produce confusing failures deep inside app tests.
 async fn warm_up_pair(
     alpha: &Arc<Node<TailscaleProvider>>,
     beta: &Arc<Node<TailscaleProvider>>,
@@ -627,48 +632,77 @@ async fn warm_up_pair(
     // Fire warm-up messages. These go out on the `_pair_warmup` namespace,
     // which applications don't subscribe to — the receiver drops them, but
     // the Session layer still performs the WS connect + hello exchange.
-    let _ = alpha
-        .send_typed(
-            &beta_ts_id,
-            "_pair_warmup",
-            "ping",
-            &serde_json::Value::Null,
-        )
-        .await;
-    let _ = beta
-        .send_typed(
-            &alpha_ts_id,
-            "_pair_warmup",
-            "ping",
-            &serde_json::Value::Null,
-        )
-        .await;
+    // Up to two attempts: dual-dial races are common on first try.
+    for attempt in 1..=2u8 {
+        let _ = alpha
+            .send_typed(
+                &beta_ts_id,
+                "_pair_warmup",
+                "ping",
+                &serde_json::Value::Null,
+            )
+            .await;
+        // Stagger the reverse dial slightly so both sides don't always race
+        // the same simultaneous connect/accept teardown path.
+        if attempt == 1 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = beta
+            .send_typed(
+                &alpha_ts_id,
+                "_pair_warmup",
+                "ping",
+                &serde_json::Value::Null,
+            )
+            .await;
 
-    // Wait until both sides see the other as ws_connected.
-    let deadline = tokio::time::Instant::now() + timeout_dur;
-    loop {
-        let a_ok = alpha
-            .peers()
-            .await
-            .iter()
-            .any(|p| p.tailscale_id == beta_ts_id && p.ws_connected);
-        let b_ok = beta
-            .peers()
-            .await
-            .iter()
-            .any(|p| p.tailscale_id == alpha_ts_id && p.ws_connected);
-        if a_ok && b_ok {
-            return;
+        // Wait until both sides see the other as ws_connected.
+        let per_attempt = if attempt == 1 {
+            timeout_dur
+        } else {
+            // Second try is usually a reconnect; don't burn a full 45s again.
+            timeout_dur.min(Duration::from_secs(20))
+        };
+        let deadline = tokio::time::Instant::now() + per_attempt;
+        loop {
+            let a_ok = alpha
+                .peers()
+                .await
+                .iter()
+                .any(|p| p.tailscale_id == beta_ts_id && p.ws_connected);
+            let b_ok = beta
+                .peers()
+                .await
+                .iter()
+                .any(|p| p.tailscale_id == alpha_ts_id && p.ws_connected);
+            if a_ok && b_ok {
+                if attempt > 1 {
+                    eprintln!("[truffle-pair] warm-up succeeded on attempt {attempt}");
+                }
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                eprintln!(
+                    "[truffle-pair] warm-up timeout attempt={attempt}: \
+                     a_ok={a_ok} b_ok={b_ok} \
+                     (ws connection didn't establish in {per_attempt:?})"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        if tokio::time::Instant::now() >= deadline {
-            eprintln!(
-                "[truffle-pair] warm-up timeout: a_ok={a_ok} b_ok={b_ok} \
-                 (ws connection didn't establish in {timeout_dur:?})"
-            );
-            return; // fall through — tests that need it will surface clearer errors
+
+        if attempt < 2 {
+            eprintln!("[truffle-pair] warm-up retrying after brief pause…");
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
     }
+
+    panic!(
+        "truffle-pair warm-up failed after 2 attempts: WS bus never stayed \
+         connected between {alpha_name} and {beta_name}. \
+         Synced-store / messaging tests require a live session hello."
+    );
 }
 
 /// Poll `predicate` until it returns `Some(T)` or the deadline passes.
