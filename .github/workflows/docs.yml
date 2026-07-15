@@ -1,0 +1,50 @@
+# Deploy static docs/ to GitHub Pages.
+# Site root is the docs/ folder (index.html, api.html, install scripts, RFCs).
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  pages: write
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
+
+      - name: Prepare site root
+        run: |
+          mkdir -p _site
+          # Public site surface: guide + API + install scripts + RFCs/guides.
+          # Keep internal handover notes and testing docs off the public root.
+          rsync -a \
+            --exclude 'HANDOVER-*.md' \
+            --exclude 'TESTING.md' \
+            docs/ _site/
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
