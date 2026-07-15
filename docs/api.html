@@ -3,90 +3,93 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Truffle API Reference</title>
+    <title>Truffle API Reference — @vibecook/truffle</title>
     <meta
       name="description"
-      content="Reference for the @vibecook/truffle JavaScript API: Peer handles, createMeshNode, TCP, HTTP, UDP, WebSocket, QUIC, messaging, files, synced stores, proxy, and React hooks."
+      content="API reference for @vibecook/truffle — simple network programming on top of Tailscale: createMeshNode, Peers, TCP/HTTP/UDP/WebSocket/QUIC, messaging, files, stores, and serve."
     />
+    <meta name="theme-color" content="#0b1512" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&amp;display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&amp;family=IBM+Plex+Mono:wght@400;500;600&amp;family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&amp;display=swap"
       rel="stylesheet"
     />
     <style>
       :root {
-        color-scheme: light;
-        --bg: #fbfbf9;
-        --ink: #16181d;
-        --muted: #5c6470;
-        --faint: #8b93a0;
-        --line: #e3e5e1;
-        --line-soft: #edeeea;
-        --panel: #f3f3ef;
-        --panel-2: #ecece7;
-        --soft: #eef1fd;
-        --code: #0f1216;
-        --code-chip: #1b2027;
-        --code-ink: #cfd3da;
-        --accent: #0f766e;
-        --accent-2: #3b5bdb;
-        --warn: #9a5b13;
-        --c-com: #8a9a86;
-        --c-str: #d4c08f;
-        --c-kw: #8fa6e6;
-        --c-typ: #b4a3f0;
-        --c-fn: #e3c489;
-        --c-num: #d9998c;
-        --shadow: 0 1px 0 rgba(22, 24, 29, 0.12), 0 16px 34px -24px rgba(15, 18, 22, 0.6);
+        color-scheme: light dark;
+        --bg: #f4f1ea;
+        --bg-2: #ebe6db;
+        --surface: #fffcf6;
+        --ink: #13201b;
+        --muted: #5a675f;
+        --faint: #8a948c;
+        --line: #d8d2c4;
+        --line-soft: #e8e2d4;
+        --accent: #0f6b57;
+        --accent-ink: #084538;
+        --accent-soft: #d8f0e7;
+        --warm: #b45309;
+        --warm-soft: #fde8c8;
+        --blue: #2557c4;
+        --blue-soft: #e4ecff;
+        --warn-bg: #fff6eb;
+        --warn-line: #efc48a;
+        --code-bg: #101816;
+        --code-ink: #d7e0da;
+        --c-com: #7f9187;
+        --c-str: #d8bf7a;
+        --c-kw: #8fb4ef;
+        --c-typ: #c4b0f5;
+        --c-fn: #e2c48d;
+        --c-num: #e0a08f;
+        --shadow: 0 1px 0 rgba(19, 32, 27, 0.06), 0 18px 40px -28px rgba(19, 32, 27, 0.45);
+        --radius: 16px;
+        --font: "DM Sans", system-ui, sans-serif;
+        --display: "Fraunces", Georgia, serif;
+        --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        --sidebar-w: 240px;
       }
 
-      * {
-        box-sizing: border-box;
-      }
-
-      html {
-        scroll-behavior: smooth;
-      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
 
       body {
         margin: 0;
         color: var(--ink);
-        background: var(--bg);
-        font-family: "Source Serif 4", Georgia, serif;
-        font-size: 16.5px;
-        line-height: 1.7;
-        overflow-x: hidden;
+        background:
+          radial-gradient(1000px 420px at 0% -5%, rgba(31, 154, 122, 0.1), transparent 55%),
+          var(--bg);
+        font-family: var(--font);
+        font-size: 16px;
+        line-height: 1.65;
         -webkit-font-smoothing: antialiased;
-        text-rendering: optimizeLegibility;
       }
 
       a {
         color: var(--accent);
         text-decoration: none;
       }
-
       a:hover {
         text-decoration: underline;
+        text-underline-offset: 3px;
       }
 
-      code,
-      pre {
-        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
+      code, pre, kbd { font-family: var(--mono); }
 
+      /* Topbar */
       .topbar {
         position: sticky;
         top: 0;
-        z-index: 10;
+        z-index: 50;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 24px;
-        padding: 14px clamp(20px, 5vw, 64px);
-        border-bottom: 1px solid rgb(227 229 225 / 84%);
-        background: rgb(251 251 249 / 92%);
-        backdrop-filter: blur(12px);
+        gap: 16px;
+        padding: 12px clamp(16px, 3vw, 32px);
+        border-bottom: 1px solid rgb(216 210 196 / 70%);
+        background: rgb(244 241 234 / 90%);
+        backdrop-filter: blur(14px);
       }
 
       .brand {
@@ -94,495 +97,413 @@
         align-items: center;
         gap: 10px;
         color: var(--ink);
-        font-family: "Archivo", sans-serif;
-        font-weight: 750;
+        font-weight: 700;
+        text-decoration: none;
       }
+      .brand:hover { text-decoration: none; }
 
       .mark {
         display: grid;
-        width: 28px;
-        height: 28px;
+        width: 32px;
+        height: 32px;
         place-items: center;
-        border: 1px solid #9ac7bd;
-        border-radius: 7px;
-        background: #d8f3ec;
-        color: #075e54;
-        font-size: 14px;
+        border-radius: 10px;
+        background: linear-gradient(145deg, #1a8f72, #0d5c4a);
+        color: #eafff6;
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 600;
       }
 
       .topnav {
         display: flex;
         flex-wrap: wrap;
-        gap: 16px;
-        min-width: 0;
-        font-family: "Archivo", sans-serif;
+        gap: 6px 14px;
         font-size: 14px;
+        font-weight: 500;
       }
+      .topnav a { color: var(--muted); }
+      .topnav a.is-active { color: var(--accent-ink); }
 
-      .topnav a {
-        color: var(--muted);
-      }
-
+      /* Hero */
       .hero {
-        padding: 56px clamp(20px, 5vw, 64px) 34px;
+        padding: 40px clamp(16px, 3vw, 32px) 28px;
         border-bottom: 1px solid var(--line);
-        background: var(--bg);
+      }
+
+      .hero-inner {
+        max-width: 1100px;
       }
 
       .eyebrow {
-        margin: 0 0 12px;
+        margin: 0 0 10px;
         color: var(--accent);
-        font-family: "JetBrains Mono", monospace;
-        font-size: 13px;
-        font-weight: 760;
-        letter-spacing: 0.08em;
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
       }
 
-      h1,
-      h2,
-      h3,
-      h4 {
+      h1, h2, h3, h4 {
         margin: 0;
-        font-family: "Archivo", sans-serif;
-        line-height: 1.12;
-        letter-spacing: 0;
+        letter-spacing: -0.03em;
+        line-height: 1.15;
       }
 
       h1 {
-        max-width: 960px;
-        font-size: clamp(34px, 5.2vw, 56px);
+        font-family: var(--display);
+        font-size: clamp(2rem, 4vw, 2.9rem);
+        font-weight: 600;
       }
 
       h2 {
-        padding-top: 6px;
-        font-size: clamp(28px, 4vw, 40px);
+        font-family: var(--display);
+        font-size: clamp(1.55rem, 2.6vw, 2rem);
+        font-weight: 600;
       }
 
       h3 {
-        margin-top: 34px;
-        font-size: 23px;
+        margin-top: 28px;
+        font-size: 1.2rem;
+        font-weight: 650;
       }
 
       h4 {
-        margin-top: 22px;
-        font-size: 18px;
+        margin-top: 0;
+        font-size: 1rem;
+        font-weight: 650;
+        font-family: var(--mono);
+        letter-spacing: -0.02em;
       }
 
-      p {
-        margin: 0;
-      }
+      p { margin: 0; }
 
       .lede {
-        max-width: 850px;
-        margin-top: 18px;
+        max-width: 820px;
+        margin-top: 14px;
         color: var(--muted);
-        font-size: clamp(17px, 2vw, 21px);
+        font-size: clamp(1.02rem, 1.5vw, 1.15rem);
       }
 
-      .hero-links {
+      .hero-chips {
         display: flex;
         flex-wrap: wrap;
-        gap: 10px;
-        margin-top: 24px;
+        gap: 8px;
+        margin-top: 20px;
       }
 
-      .hero-links a {
+      .chip {
         display: inline-flex;
-        min-height: 36px;
         align-items: center;
+        min-height: 34px;
+        padding: 0 12px;
         border: 1px solid var(--line);
         border-radius: 999px;
-        padding: 0 13px;
-        background: var(--panel);
+        background: var(--surface);
         color: #314044;
-        font-family: "JetBrains Mono", monospace;
-        font-size: 14px;
-        font-weight: 680;
-        box-shadow: 0 8px 24px rgb(22 36 33 / 5%);
+        font-family: var(--mono);
+        font-size: 12.5px;
+        text-decoration: none;
       }
-
-      .hero-links a:hover {
-        border-color: #9ac7bd;
-        color: #0f766e;
+      .chip:hover {
+        border-color: #9fd3c0;
+        background: #f4fffb;
         text-decoration: none;
       }
 
+      /* Layout */
       .layout {
         display: grid;
-        grid-template-columns: 242px minmax(0, 1fr);
-        gap: 38px;
+        grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+        gap: 0;
+        max-width: 1280px;
+        margin: 0 auto;
         align-items: start;
-        padding: 34px clamp(20px, 5vw, 64px) 68px;
-      }
-
-      .layout > *,
-      .grid > * {
-        min-width: 0;
       }
 
       .sidebar {
         position: sticky;
-        top: 78px;
-        max-height: calc(100vh - 98px);
+        top: 58px;
+        max-height: calc(100vh - 58px);
         overflow: auto;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 14px;
-        background: var(--bg);
-        font-size: 14px;
+        padding: 24px 18px 40px clamp(12px, 2vw, 28px);
+        border-right: 1px solid var(--line-soft);
+        font-size: 13.5px;
       }
 
       .sidebar strong {
         display: block;
-        margin: 16px 8px 8px;
+        margin: 16px 0 8px;
         color: var(--faint);
-        font-family: "JetBrains Mono", monospace;
-        font-size: 12px;
+        font-family: var(--mono);
+        font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
-
-      .sidebar strong:first-child {
-        margin-top: 0;
-      }
+      .sidebar strong:first-child { margin-top: 0; }
 
       .sidebar a {
         display: block;
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-family: "Archivo", sans-serif;
-        color: #4b5a60;
+        padding: 5px 0;
+        color: var(--muted);
+        border-left: 2px solid transparent;
+        padding-left: 10px;
+        margin-left: -2px;
       }
-
       .sidebar a:hover {
-        background: #edf5f2;
-        color: #0f766e;
+        color: var(--accent-ink);
         text-decoration: none;
+      }
+      .sidebar a.active {
+        color: var(--accent-ink);
+        border-left-color: var(--accent);
+        font-weight: 600;
       }
 
       .content {
         min-width: 0;
-        max-width: 1020px;
+        padding: 8px clamp(18px, 3vw, 40px) 80px;
       }
 
       section {
-        padding: 42px 0;
-        border-bottom: 1px solid var(--line);
+        padding: 36px 0 12px;
+        border-bottom: 1px solid var(--line-soft);
+        scroll-margin-top: 72px;
       }
-
-      section:first-child {
-        padding-top: 0;
-      }
-
-      section:last-child {
-        border-bottom: 0;
-      }
+      section:last-of-type { border-bottom: 0; }
 
       .summary {
-        margin-top: 14px;
+        max-width: 760px;
+        margin: 12px 0 18px;
         color: var(--muted);
-        font-size: 17px;
       }
 
-      .grid {
+      /* Diagram / cards */
+      .api-map {
+        margin: 18px 0 8px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .api-map svg {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .map-caption {
+        margin-top: 12px;
+        color: var(--muted);
+        font-size: 13.5px;
+      }
+
+      .grid-2 {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
-        margin-top: 18px;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin: 16px 0;
+      }
+
+      .grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin: 16px 0;
       }
 
       .card {
+        padding: 16px;
         border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 18px;
-        background: var(--bg);
+        border-radius: 14px;
+        background: var(--surface);
       }
-
       .card h3 {
         margin-top: 0;
-        font-size: 18px;
+        font-size: 1.02rem;
       }
-
       .card p {
-        margin-top: 8px;
+        margin-top: 6px;
         color: var(--muted);
+        font-size: 14px;
       }
 
       .tag {
         display: inline-flex;
         align-items: center;
-        min-height: 24px;
-        border: 1px solid #a7cec5;
+        min-height: 22px;
+        padding: 0 8px;
         border-radius: 999px;
-        padding: 0 9px;
-        color: #0b655b;
-        background: #e5f6f2;
-        font-size: 12px;
-        font-weight: 720;
-      }
-
-      pre {
-        position: relative;
-        max-width: 100%;
-        margin: 16px 0 0;
-        overflow: auto;
-        border-radius: 9px;
-        padding: 18px;
-        background: var(--code);
-        color: var(--code-ink);
-        font-size: 13.5px;
-        line-height: 1.55;
-      }
-
-      pre code {
-        color: var(--code-ink);
-      }
-
-      .code-frame {
-        position: relative;
-        margin: 18px 0 22px;
-        overflow: hidden;
-        border-radius: 9px;
-        background: var(--code);
-        box-shadow: var(--shadow);
-      }
-
-      .code-frame .code-bar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 8px 12px 8px 14px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      }
-
-      .code-frame .code-file {
-        color: #aab3c0;
-        font-family: "JetBrains Mono", monospace;
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-family: var(--mono);
         font-size: 11px;
-        font-weight: 500;
-        letter-spacing: 0.02em;
-      }
-
-      .code-frame pre {
-        margin: 0;
-        border-radius: 0;
-        padding: 16px 18px;
-        box-shadow: none;
-      }
-
-      .copy {
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 5px;
-        padding: 3px 8px;
-        background: rgba(255, 255, 255, 0.04);
-        color: #7d8794;
-        cursor: pointer;
-        font-family: "JetBrains Mono", monospace;
-        font-size: 10px;
-        letter-spacing: 0.05em;
+        font-weight: 600;
+        letter-spacing: 0.04em;
         text-transform: uppercase;
-        transition: color 0.12s, border-color 0.12s;
       }
+      .tag.warm { background: var(--warm-soft); color: #8a3f08; }
+      .tag.blue { background: var(--blue-soft); color: #1a3f9c; }
+      .tag.muted { background: var(--bg-2); color: var(--muted); }
 
-      .copy:hover {
-        border-color: rgba(255, 255, 255, 0.28);
-        color: var(--code-ink);
-      }
-
-      .copy.done {
-        border-color: #8fbf9e;
-        color: #8fbf9e;
-      }
-
-      .tok-c {
-        color: var(--c-com);
-        font-style: italic;
-      }
-
-      .tok-s {
-        color: var(--c-str);
-      }
-
-      .tok-k {
-        color: var(--c-kw);
-      }
-
-      .tok-t {
-        color: var(--c-typ);
-      }
-
-      .tok-f {
-        color: var(--c-fn);
-      }
-
-      .tok-n {
-        color: var(--c-num);
-      }
-
-      p code,
-      li code,
-      td code {
-        border: 1px solid #d7e4de;
-        border-radius: 5px;
-        padding: 1px 5px;
-        background: var(--bg);
-        color: #254348;
-        font-size: 0.92em;
-      }
-
+      /* Tables */
       table {
         width: 100%;
-        margin-top: 18px;
-        border: 1px solid var(--line);
-        border-spacing: 0;
-        border-radius: 8px;
-        overflow: hidden;
-        font-size: 14px;
+        border-collapse: collapse;
+        margin: 14px 0 8px;
+        font-size: 14.5px;
       }
 
-      th,
-      td {
-        border-bottom: 1px solid var(--line);
+      th, td {
         padding: 10px 12px;
+        border: 1px solid var(--line-soft);
         text-align: left;
         vertical-align: top;
       }
 
       th {
-        color: #2d3a3f;
-        background: var(--panel);
-        font-weight: 720;
+        background: var(--bg-2);
+        font-size: 12px;
+        font-weight: 650;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: var(--muted);
       }
 
-      tbody tr:nth-child(even) {
-        background: #f7f7f3;
+      td code {
+        font-size: 12.5px;
+        color: var(--accent-ink);
       }
 
-      tbody tr:last-child td {
-        border-bottom: 0;
+      /* Code */
+      pre {
+        margin: 14px 0;
+        padding: 16px 18px;
+        overflow-x: auto;
+        border: 1px solid #1d2b25;
+        border-radius: 14px;
+        background: var(--code-bg);
+        color: var(--code-ink);
+        font-size: 12.8px;
+        line-height: 1.55;
+        box-shadow: var(--shadow);
       }
 
-      ul {
-        margin: 12px 0 0;
-        padding-left: 20px;
+      code .tok-c { color: var(--c-com); }
+      code .tok-s { color: var(--c-str); }
+      code .tok-k { color: var(--c-kw); }
+      code .tok-t { color: var(--c-typ); }
+      code .tok-f { color: var(--c-fn); }
+      code .tok-n { color: var(--c-num); }
+
+      .inline-code {
+        padding: 1px 6px;
+        border-radius: 6px;
+        background: var(--bg-2);
+        color: var(--accent-ink);
+        font-size: 0.9em;
       }
 
-      li + li {
-        margin-top: 6px;
-      }
-
-      .note,
-      .warning {
-        margin-top: 16px;
-        border-radius: 8px;
-        padding: 14px 16px;
-      }
-
-      .note {
-        border: 1px solid #bad4e8;
-        background: #f0f7fc;
-        color: #3d5668;
-      }
-
-      .warning {
-        border: 1px solid #e4d2ae;
-        background: #fff9ed;
-        color: #6f4a0f;
-      }
-
+      /* Method blocks */
       .method {
-        margin-top: 22px;
+        margin: 18px 0;
+        padding: 14px 16px;
         border: 1px solid var(--line);
-        border-left: 4px solid var(--accent);
-        border-radius: 8px;
-        padding: 18px;
-        background: var(--panel);
+        border-radius: 14px;
+        background: var(--surface);
       }
-
-      .method h4 {
-        margin-top: 0;
-      }
-
       .method p {
         margin-top: 8px;
         color: var(--muted);
+        font-size: 14.5px;
       }
+
+      .note, .warning {
+        margin: 16px 0;
+        padding: 12px 14px;
+        border-radius: 12px;
+        font-size: 14.5px;
+        color: var(--muted);
+      }
+      .note {
+        border: 1px solid #b7d8cb;
+        background: #f0faf5;
+      }
+      .warning {
+        border: 1px solid var(--warn-line);
+        background: var(--warn-bg);
+        color: #6b4510;
+      }
+
+      .flow-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin: 16px 0;
+      }
+      .flow-item {
+        padding: 12px;
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        background: rgb(255 252 246 / 70%);
+        text-align: center;
+        font-size: 13px;
+      }
+      .flow-item strong {
+        display: block;
+        margin-bottom: 4px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--accent-ink);
+      }
+      .flow-item span { color: var(--muted); }
 
       .footer {
         display: flex;
         flex-wrap: wrap;
         justify-content: space-between;
-        gap: 16px;
-        padding: 32px clamp(20px, 5vw, 64px);
+        gap: 12px;
+        padding: 24px clamp(16px, 3vw, 32px) 40px;
         border-top: 1px solid var(--line);
         color: var(--muted);
         font-size: 14px;
       }
 
-      @media (max-width: 980px) {
-        .layout {
-          grid-template-columns: 1fr;
-        }
-
+      @media (max-width: 920px) {
+        .layout { grid-template-columns: 1fr; }
         .sidebar {
-          position: static;
+          position: relative;
+          top: 0;
           max-height: none;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 0 12px;
+          padding-bottom: 16px;
+        }
+        .sidebar strong {
+          grid-column: 1 / -1;
+          margin-top: 12px;
+        }
+        .grid-2, .grid-3, .flow-row {
+          grid-template-columns: 1fr;
         }
       }
 
-      @media (max-width: 680px) {
-        .topbar {
-          align-items: flex-start;
-          flex-direction: column;
-          gap: 12px;
+      @media (max-width: 640px) {
+        .topnav a:not(.is-active):not([href="./index.html"]) {
+          display: none;
         }
+        .sidebar { grid-template-columns: 1fr; }
+      }
 
-        .topnav,
-        .hero > *,
-        .layout,
-        .content,
-        .sidebar,
-        section,
-        pre,
-        .code-frame,
-        table,
-        .note,
-        .warning,
-        .method {
-          max-width: calc(100vw - 40px);
-        }
-
-        .hero-links {
-          max-width: calc(100vw - 40px);
-        }
-
-        h1,
-        .lede,
-        .summary {
-          max-width: calc(100vw - 40px);
-          overflow-wrap: break-word;
-        }
-
-        .grid {
-          grid-template-columns: 1fr;
-        }
-
-        .layout {
-          padding-top: 24px;
-        }
-
-        pre {
-          padding: 16px;
-          font-size: 12.5px;
-        }
-
-        th,
-        td {
-          padding: 9px 8px;
-        }
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
       }
     </style>
   </head>
@@ -592,54 +513,59 @@
         <span class="mark">tr</span>
         <span>Truffle</span>
       </a>
-      <nav class="topnav" aria-label="Primary navigation">
+      <nav class="topnav" aria-label="Primary">
         <a href="./index.html">Guide</a>
-        <a href="#mesh-node">Mesh node</a>
-        <a href="#tcp">TCP</a>
-        <a href="#udp">UDP</a>
-        <a href="#websocket">WebSocket</a>
-        <a href="#quic">QUIC</a>
+        <a class="is-active" href="./api.html">API</a>
+        <a href="#mesh-node">createMeshNode</a>
+        <a href="#identity">Peers</a>
+        <a href="#tcp">Transports</a>
+        <a href="https://github.com/jamesyong-42/truffle">GitHub</a>
       </nav>
     </header>
 
     <header class="hero">
-      <p class="eyebrow">API reference</p>
-      <h1>@vibecook/truffle</h1>
-      <p class="lede">
-        Start a Tailscale tsnet-backed mesh node, get interned <strong>Peer</strong> handles, and
-        use familiar network-programming namespaces for TCP, HTTP, UDP, WebSocket, and QUIC — plus
-        messaging, file transfer, synced stores, and diagnostics. Networking takes
-        <code>Peer | string</code>; you do not pick id strings for the happy path.
-      </p>
-      <nav class="hero-links" aria-label="Reference shortcuts">
-        <a href="#identity">Peers</a>
-        <a href="#tcp">TCP</a>
-        <a href="#http">HTTP</a>
-        <a href="#udp">UDP</a>
-        <a href="#websocket">WebSocket</a>
-        <a href="#quic">QUIC</a>
-        <a href="#messaging">Messaging</a>
-        <a href="#files">Files</a>
-      </nav>
+      <div class="hero-inner">
+        <p class="eyebrow">API reference · @vibecook/truffle</p>
+        <h1>Simple network programming on top of Tailscale.</h1>
+        <p class="lede">
+          Start one mesh node, get <strong>Peer</strong> handles, then use Node-shaped APIs for TCP,
+          HTTP, UDP, WebSocket, and QUIC — plus messaging, files, stores, and serve. Networking takes
+          <code class="inline-code">Peer | string</code>; you do not pick id strings for the happy path.
+        </p>
+        <nav class="hero-chips" aria-label="Jump to sections">
+          <a class="chip" href="#install">Install</a>
+          <a class="chip" href="#mesh-node">createMeshNode</a>
+          <a class="chip" href="#identity">Peers</a>
+          <a class="chip" href="#tcp">TCP</a>
+          <a class="chip" href="#http">HTTP</a>
+          <a class="chip" href="#serve">Serve</a>
+          <a class="chip" href="#messaging">Messages</a>
+          <a class="chip" href="#files">Files</a>
+          <a class="chip" href="#stores">Stores</a>
+        </nav>
+      </div>
     </header>
 
-    <main class="layout">
+    <div class="layout">
       <aside class="sidebar" aria-label="API sections">
         <strong>Start</strong>
         <a href="#install">Install</a>
+        <a href="#overview">API map</a>
         <a href="#mesh-node">createMeshNode</a>
         <a href="#identity">Peer handles</a>
         <strong>Transports</strong>
-        <a href="#tcp">TCP</a>
-        <a href="#http">HTTP</a>
-        <a href="#udp">UDP</a>
-        <a href="#websocket">WebSocket</a>
-        <a href="#quic">QUIC</a>
+        <a href="#tcp">TCP · mesh.net</a>
+        <a href="#http">HTTP · mesh.http</a>
+        <a href="#udp">UDP · mesh.dgram</a>
+        <a href="#websocket">WebSocket · mesh.ws</a>
+        <a href="#quic">QUIC · mesh.quic</a>
+        <strong>Publish</strong>
+        <a href="#serve">mesh.serve</a>
+        <a href="#proxy">Reverse proxy</a>
         <strong>App APIs</strong>
         <a href="#messaging">Messaging</a>
         <a href="#files">File transfer</a>
         <a href="#stores">Synced stores</a>
-        <a href="#proxy">Reverse proxy</a>
         <strong>Other</strong>
         <a href="#react">React hooks</a>
         <a href="#native">Native classes</a>
@@ -647,15 +573,16 @@
       </aside>
 
       <div class="content">
+        <!-- INSTALL -->
         <section id="install">
-          <p class="eyebrow">Install and import</p>
+          <p class="eyebrow">Install &amp; import</p>
           <h2>Install</h2>
           <p class="summary">
-            The main package is <code>@vibecook/truffle</code>. WebSocket support is implemented
-            through the standard <code>ws</code> package and is optional.
+            The main package is <code class="inline-code">@vibecook/truffle</code>. WebSocket support
+            uses the standard <code class="inline-code">ws</code> package and is optional.
           </p>
-          <pre><code>pnpm add @vibecook/truffle
-pnpm add ws # optional, only for mesh.ws</code></pre>
+          <pre><code class="shell">pnpm add @vibecook/truffle
+pnpm add ws   # optional, only for mesh.ws</code></pre>
           <pre><code>import {
   createMeshNode,
   Peer,
@@ -663,11 +590,100 @@ pnpm add ws # optional, only for mesh.ws</code></pre>
   NapiNode,
 } from '@vibecook/truffle';</code></pre>
           <div class="note">
-            Requires Node.js 18 or newer and a Tailscale tailnet. First run authenticates through a
-            Tailscale URL unless you provide an auth key.
+            Requires <strong>Node.js 18+</strong> and a Tailscale tailnet. First run authenticates
+            through a Tailscale URL unless you provide an <code class="inline-code">authKey</code>.
           </div>
         </section>
 
+        <!-- OVERVIEW MAP -->
+        <section id="overview">
+          <p class="eyebrow">Orientation</p>
+          <h2>API map</h2>
+          <p class="summary">
+            Everything hangs off a started <code class="inline-code">MeshNode</code>. Use this map to
+            choose the right altitude for a feature.
+          </p>
+
+          <div class="api-map">
+            <svg viewBox="0 0 720 340" role="img" aria-labelledby="map-title map-desc">
+              <title id="map-title">MeshNode API surface map</title>
+              <desc id="map-desc">
+                createMeshNode produces a MeshNode with peer APIs, transport namespaces, app
+                primitives, and publish helpers.
+              </desc>
+              <rect width="720" height="340" rx="16" fill="#101816" />
+              <text x="28" y="36" fill="#7f9187" font-family="IBM Plex Mono, monospace" font-size="12">createMeshNode(options) → MeshNode</text>
+
+              <!-- center -->
+              <rect x="270" y="58" width="180" height="56" rx="14" fill="#1f3d33" stroke="#5ec9a4" stroke-width="1.8" />
+              <text x="300" y="84" fill="#f4fffb" font-family="DM Sans, sans-serif" font-size="16" font-weight="600">MeshNode</text>
+              <text x="300" y="102" fill="#8fb5a4" font-family="IBM Plex Mono, monospace" font-size="11">mesh · Peer registry</text>
+
+              <!-- branches -->
+              <g fill="#15241e" stroke="#2f4a3e" stroke-width="1.2">
+                <rect x="28" y="150" width="150" height="150" rx="14" />
+                <rect x="198" y="150" width="150" height="150" rx="14" />
+                <rect x="368" y="150" width="150" height="150" rx="14" />
+                <rect x="538" y="150" width="154" height="150" rx="14" />
+              </g>
+              <g stroke="#3d6b58" stroke-width="1.4" fill="none">
+                <path d="M320 114 V138 H103 V150" />
+                <path d="M360 114 V138 H273 V150" />
+                <path d="M360 114 V138 H443 V150" />
+                <path d="M400 114 V138 H615 V150" />
+              </g>
+
+              <text x="44" y="176" fill="#9de0c4" font-family="IBM Plex Mono, monospace" font-size="12">Peers</text>
+              <text x="44" y="200" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">getPeers · peer()</text>
+              <text x="44" y="220" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">onPeerChange · ping</text>
+              <text x="44" y="240" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">getLocalInfo · health</text>
+              <text x="44" y="272" fill="#7f9187" font-family="IBM Plex Mono, monospace" font-size="11">RFC 022</text>
+
+              <text x="214" y="176" fill="#9de0c4" font-family="IBM Plex Mono, monospace" font-size="12">Transports</text>
+              <text x="214" y="200" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">net · http · dgram</text>
+              <text x="214" y="220" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">ws · quic</text>
+              <text x="214" y="240" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">openTcp · connectQuic</text>
+              <text x="214" y="272" fill="#7f9187" font-family="IBM Plex Mono, monospace" font-size="11">RFC 021</text>
+
+              <text x="384" y="176" fill="#9de0c4" font-family="IBM Plex Mono, monospace" font-size="12">App APIs</text>
+              <text x="384" y="200" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">send · broadcast</text>
+              <text x="384" y="220" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">onMessage</text>
+              <text x="384" y="240" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">fileTransfer · syncedStore</text>
+              <text x="384" y="272" fill="#7f9187" font-family="IBM Plex Mono, monospace" font-size="11">RFC 014 · 016</text>
+
+              <text x="554" y="176" fill="#9de0c4" font-family="IBM Plex Mono, monospace" font-size="12">Publish</text>
+              <text x="554" y="200" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">serve({ target|dir|routes })</text>
+              <text x="554" y="220" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">http.createServer</text>
+              <text x="554" y="240" fill="#dce8e1" font-family="DM Sans, sans-serif" font-size="13">proxy()</text>
+              <text x="554" y="272" fill="#7f9187" font-family="IBM Plex Mono, monospace" font-size="11">RFC 023</text>
+            </svg>
+            <p class="map-caption">
+              Rule of thumb: you wrote the HTTP handler → <code class="inline-code">mesh.http.createServer</code>.
+              Bytes are a directory or another process → <code class="inline-code">mesh.serve</code>.
+            </p>
+          </div>
+
+          <div class="flow-row" aria-label="Decision guide">
+            <div class="flow-item">
+              <strong>Discover</strong>
+              <span>Peer · getPeers · peer()</span>
+            </div>
+            <div class="flow-item">
+              <strong>Stream bytes</strong>
+              <span>net · quic · dgram · ws</span>
+            </div>
+            <div class="flow-item">
+              <strong>App data</strong>
+              <span>messages · files · stores</span>
+            </div>
+            <div class="flow-item">
+              <strong>Expose HTTP</strong>
+              <span>serve · http · proxy</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- MESH NODE -->
         <section id="mesh-node">
           <p class="eyebrow">Mesh node</p>
           <h2>createMeshNode(options)</h2>
@@ -714,6 +730,15 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
                 <td>Stable per-device ULID override. Generated and persisted when omitted.</td>
               </tr>
               <tr>
+                <td><code>hostname</code></td>
+                <td><code>string</code></td>
+                <td>
+                  Explicit Tailscale hostname (RFC 023) for pretty serving URLs. Single DNS label
+                  <code>[a-z0-9-]</code>, 1–63 chars. Read the granted name from
+                  <code>mesh.dnsName</code>.
+                </td>
+              </tr>
+              <tr>
                 <td><code>sidecarPath</code></td>
                 <td><code>string</code></td>
                 <td>Override sidecar path. Defaults to <code>resolveSidecarPath()</code>.</td>
@@ -754,7 +779,7 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
               <tr>
                 <td><code>openUrl</code></td>
                 <td><code>(url) =&gt; void</code></td>
-                <td>Custom URL opener, useful in Electron or other desktop shells.</td>
+                <td>Custom URL opener (Electron / desktop shells).</td>
               </tr>
               <tr>
                 <td><code>onAuthRequired</code></td>
@@ -765,7 +790,7 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
                 <td><code>onPeerChange</code></td>
                 <td><code>(event: MeshPeerEvent) =&gt; void</code></td>
                 <td>
-                  Called for peer lifecycle events after startup. Events carry an interned
+                  Peer lifecycle events after startup. Events carry an interned
                   <code>peer</code> when available.
                 </td>
               </tr>
@@ -775,24 +800,43 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
           <h3>MeshNode shape</h3>
           <pre><code>type PeerLike = Peer | string; // string = query, resolved internally
 
-type MeshNode = Omit&lt;NapiNode, 'getPeers' | 'peer' | 'send' | 'ping' | 'onPeerChange' | 'onMessage'&gt; &amp; {
+type MeshNode = {
+  // Namespaces
   net: TruffleNet;
   http: TruffleHttp;
   quic: TruffleQuic;
   dgram: TruffleDgram;
   ws: TruffleWs;
+  serve: TruffleServe;
   native: NapiNode;
+
+  // Identity / discovery
+  readonly dnsName: string | null;
+  getLocalInfo(): NapiNodeIdentity;
   getPeers(): Promise&lt;Peer[]&gt;;
   peer(query: string, opts?: { waitMs?: number }): Promise&lt;Peer | null&gt;;
-  send(to: PeerLike, namespace: string, data: Buffer | Uint8Array): Promise&lt;void&gt;;
   ping(to: PeerLike): Promise&lt;NapiPingResult&gt;;
+  health(): Promise&lt;NapiHealthInfo&gt;;
   onPeerChange(cb: (event: MeshPeerEvent) =&gt; void): void;
+
+  // Messaging
+  send(to: PeerLike, namespace: string, data: Buffer | Uint8Array): Promise&lt;void&gt;;
   onMessage(namespace: string, cb: (msg: MeshNamespacedMessage) =&gt; void): void;
+  // + broadcast / sendJson / … via native surface
+
+  // Raw dials
+  openTcp(to: PeerLike, port: number): Promise&lt;NapiTcpSocket&gt;;
+  connectQuic(to: PeerLike, port: number): Promise&lt;NapiQuicConnection&gt;;
+
+  // Subsystems
+  fileTransfer(): MeshFileTransfer;
+  syncedStore(id: string): NapiSyncedStore;
+  proxy(): NapiProxy;
 };
 
 type MeshPeerEvent = {
   type: string;          // joined | left | updated | identity | ws_connected | …
-  peerId: string;        // Tailscale routing key when peer-related; empty for auth
+  peerId: string;        // Tailscale routing key when peer-related
   peer?: Peer;           // interned handle when present
   authUrl?: string;
 };
@@ -806,18 +850,45 @@ type MeshNamespacedMessage = {
 };</code></pre>
         </section>
 
+        <!-- PEERS -->
         <section id="identity">
-          <p class="eyebrow">Identity and discovery</p>
+          <p class="eyebrow">Identity &amp; discovery</p>
           <h2>Peer handles (RFC 022)</h2>
           <p class="summary">
-            Networking takes <code>Peer</code> handles (or a query string). Do not pick between ULID
-            and Tailscale id for <code>send</code> / connect. A peer's
-            <code>deviceId</code> is an honest ULID or <code>null</code> — never a Tailscale id
-            fallback, and it does not flip mid-session. Use <code>deviceId</code> only to
+            Networking takes <code class="inline-code">Peer</code> handles (or a query string). Do not
+            pick between ULID and Tailscale id for send / connect. A peer’s
+            <code class="inline-code">deviceId</code> is an honest ULID or <code class="inline-code">null</code>
+            — never a Tailscale id fallback. Use <code class="inline-code">deviceId</code> only to
             <em>persist</em> across process restarts; rebind with
-            <code>mesh.peer(savedId, { waitMs })</code>. Your own
-            <code>getLocalInfo().deviceId</code> is always the real ULID.
+            <code class="inline-code">mesh.peer(savedId, { waitMs })</code>.
           </p>
+
+          <div class="grid-3">
+            <article class="card">
+              <span class="tag">Display</span>
+              <h3>Safe fields</h3>
+              <p>
+                <code>displayName</code>, <code>online</code>, <code>ip</code>,
+                <code>hostname</code>, <code>os</code>. Do not gate send on
+                <code>wsConnected</code>.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag blue">Lookup</span>
+              <h3>mesh.peer(query)</h3>
+              <p>
+                Name, ULID (or unique prefix ≥4), hostname slug, Tailscale id, or IP.
+                <code>waitMs</code> blocks until resolvable.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag warm">Persist</span>
+              <h3>deviceId only</h3>
+              <p>
+                Save when non-null. Do not persist <code>peer.ref</code> (process-local generation token).
+              </p>
+            </article>
+          </div>
 
           <h3>class Peer</h3>
           <table>
@@ -885,7 +956,7 @@ type MeshNamespacedMessage = {
               <tr>
                 <td><code>send(namespace, data)</code></td>
                 <td><code>Promise&lt;void&gt;</code></td>
-                <td>Sugar for <code>mesh.send(this, …)</code>.</td>
+                <td>Sugar for <code>mesh.send(this, …)</code>. Prefer <code>sendJson</code> / <code>sendBytes</code> when available.</td>
               </tr>
               <tr>
                 <td><code>ping()</code></td>
@@ -897,10 +968,11 @@ type MeshNamespacedMessage = {
 
           <div class="method">
             <h4>mesh.getLocalInfo(): NapiNodeIdentity</h4>
-            <p>Returns local <code>appId</code>, <code>deviceId</code>, <code>deviceName</code>,
-              Tailscale hostname, Tailscale ID, DNS name, and IP when available.</p>
+            <p>
+              Returns local <code>appId</code>, <code>deviceId</code>, <code>deviceName</code>,
+              Tailscale hostname, Tailscale ID, DNS name, and IP when available.
+            </p>
           </div>
-
           <div class="method">
             <h4>await mesh.getPeers(): Peer[]</h4>
             <p>
@@ -909,33 +981,29 @@ type MeshNamespacedMessage = {
               <code>===</code> work. Fields update in place as discovery and identity change.
             </p>
           </div>
-
           <div class="method">
             <h4>await mesh.peer(query, opts?: { waitMs?: number }): Peer | null</h4>
             <p>
               Resolve a query to an interned Peer. Accepts display/device name, ULID (or unique
               prefix ≥4 chars), hostname slug, Tailscale id, or tailnet IP. Not found →
               <code>null</code>. Ambiguous names throw. <code>waitMs</code> blocks until resolvable
-              or timeout (useful after restart while durable identity is learned via eager hello).
+              or timeout.
             </p>
           </div>
-
           <div class="method">
             <h4>await mesh.ping(to: PeerLike): NapiPingResult</h4>
             <p>Handle-first ping. String form is a query, resolved internally.</p>
           </div>
-
           <div class="method">
             <h4>mesh.onPeerChange(callback)</h4>
             <p>
               Events include <code>type</code> (<code>joined</code>, <code>left</code>,
               <code>updated</code>, <code>identity</code>, <code>ws_connected</code>,
-              <code>ws_disconnected</code>, auth-related), <code>peerId</code> (Tailscale routing
-              key when peer-related), optional interned <code>peer</code>, and optional
-              <code>authUrl</code>. Prefer <code>event.peer</code> for app state keyed by handle.
+              <code>ws_disconnected</code>, auth-related), <code>peerId</code>, optional interned
+              <code>peer</code>, and optional <code>authUrl</code>. Prefer <code>event.peer</code>
+              for app state keyed by handle.
             </p>
           </div>
-
           <div class="method">
             <h4>await mesh.health(): NapiHealthInfo</h4>
             <p>Returns Tailscale backend state, health warnings, key expiry, and a healthy flag.</p>
@@ -954,22 +1022,24 @@ const id = localStorage.getItem('lastPeer');
 const again = id ? await mesh.peer(id, { waitMs: 5000 }) : null;</code></pre>
 
           <div class="note">
-            <code>resolvePeerId</code> is legacy. Prefer <code>mesh.peer(query)</code> or pass a
-            <code>PeerLike</code> into networking APIs directly. Raw
-            <code>NapiNode.getPeers()</code> still returns snapshot objects without hard
-            <code>===</code>; use <code>createMeshNode()</code> for interned handles.
+            Prefer <code class="inline-code">mesh.peer(query)</code> or pass a
+            <code class="inline-code">PeerLike</code> into networking APIs. Raw
+            <code class="inline-code">NapiNode.getPeers()</code> returns snapshot objects without hard
+            <code class="inline-code">===</code>; use <code class="inline-code">createMeshNode()</code>
+            for interned handles.
           </div>
         </section>
 
+        <!-- TCP -->
         <section id="tcp">
           <p class="eyebrow">Transport</p>
-          <h2>mesh.net: TCP streams</h2>
+          <h2>mesh.net — TCP streams</h2>
           <p class="summary">
-            Node-style TCP over the mesh. <code>TruffleSocket</code> is a
-            <code>stream.Duplex</code>; <code>TruffleServer</code> emits
-            <code>listening</code>, <code>connection</code>, <code>close</code>, and
-            <code>error</code>. Connect targets are <code>PeerLike</code>
-            (<code>Peer | string</code>).
+            Node-style TCP over the mesh. <code class="inline-code">TruffleSocket</code> is a
+            <code class="inline-code">stream.Duplex</code>; <code class="inline-code">TruffleServer</code>
+            emits <code class="inline-code">listening</code>, <code class="inline-code">connection</code>,
+            <code class="inline-code">close</code>, and <code class="inline-code">error</code>. Connect
+            targets are <code class="inline-code">PeerLike</code>.
           </p>
           <pre><code>const server = mesh.net.createServer((socket) =&gt; {
   socket.pipe(socket);
@@ -1014,26 +1084,30 @@ socket.on('data', (chunk) =&gt; console.log(chunk.toString()));</code></pre>
           </table>
         </section>
 
+        <!-- HTTP -->
         <section id="http">
           <p class="eyebrow">Transport</p>
-          <h2>mesh.http: HTTP over mesh TCP</h2>
+          <h2>mesh.http — HTTP over mesh TCP</h2>
           <p class="summary">
-            Outbound HTTP is a <code>node:http</code> agent that dials peers through
-            <code>mesh.net</code>. Inbound HTTP uses an ordinary <code>http.Server</code>.
-            High-level helpers take a query string host; prefer
-            <code>mesh.net.connect({ peer })</code> when you already hold a handle.
+            Outbound HTTP is a <code class="inline-code">node:http</code> agent that dials peers
+            through <code class="inline-code">mesh.net</code>. Inbound HTTP uses
+            <code class="inline-code">mesh.http.createServer</code> (drop-in
+            <code class="inline-code">http.Server</code> on the mesh) or an ordinary server fed by
+            mesh TCP sockets. Every mesh connection carries verified Tailscale identity on
+            <code class="inline-code">req.socket</code>.
           </p>
-          <pre><code>import http from 'node:http';
+          <pre><code>// Serve (Express / Fastify / plain handlers attach unchanged)
+const server = mesh.http.createServer((req, res) =&gt; {
+  res.end(JSON.stringify({ ok: true, path: req.url }));
+});
+server.listen(8080, () =&gt; {
+  console.log(`http://${mesh.dnsName ?? 'device'}:8080/`);
+});
 
-const app = http.createServer((req, res) =&gt; res.end('ok'));
-mesh.net
-  .createServer((socket) =&gt; app.emit('connection', socket))
-  .listen(8080);
-
-// fetchText host is a query string (name / ULID / hostname)
+// Client helpers
 const res = await mesh.http.fetchText('bob-laptop', 8080, '/health');
 
-// Or dial with a Peer and hand the duplex to node:http yourself
+// Or dial with a Peer yourself
 const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
 if (bob) mesh.net.connect({ peer: bob, port: 8080 });</code></pre>
           <table>
@@ -1045,39 +1119,49 @@ if (bob) mesh.net.connect({ peer: bob, port: 8080 });</code></pre>
             </thead>
             <tbody>
               <tr>
+                <td><code>mesh.http.createServer(handler?)</code></td>
+                <td>
+                  Drop-in <code>node:http.createServer</code> whose <code>listen()</code> binds the
+                  mesh. Accepts Express/Fastify apps.
+                </td>
+              </tr>
+              <tr>
                 <td><code>mesh.http.agent</code></td>
                 <td>Shared <code>MeshAgent</code> instance for <code>http.request</code>.</td>
               </tr>
               <tr>
                 <td><code>mesh.http.Agent</code></td>
-                <td>Class for constructing a custom agent, for example with keep-alive options.</td>
+                <td>Class for constructing a custom agent (e.g. keep-alive options).</td>
               </tr>
               <tr>
-                <td><code>mesh.http.request(...)</code></td>
-                <td><code>http.request</code> with the mesh agent injected by default.</td>
-              </tr>
-              <tr>
-                <td><code>mesh.http.get(...)</code></td>
-                <td><code>http.get</code> with the mesh agent injected by default.</td>
+                <td><code>mesh.http.request(...)</code> / <code>get(...)</code></td>
+                <td><code>http.request</code> / <code>http.get</code> with the mesh agent injected.</td>
               </tr>
               <tr>
                 <td><code>mesh.http.fetchText(host, port, path)</code></td>
                 <td>
-                  GET helper that buffers the response body as UTF-8 text.
-                  <code>host</code> is a query string resolved by the mesh agent.
+                  GET helper buffering UTF-8 text. <code>host</code> is a query string resolved by
+                  the mesh agent.
                 </td>
               </tr>
             </tbody>
           </table>
+          <div class="note">
+            A served port is reachable by the <strong>whole tailnet</strong> (Tailscale ACLs), not
+            only same-<code class="inline-code">appId</code> Truffle peers. Mesh messaging remains
+            app-scoped.
+          </div>
         </section>
 
+        <!-- UDP -->
         <section id="udp">
           <p class="eyebrow">Transport</p>
-          <h2>mesh.dgram: UDP datagrams</h2>
+          <h2>mesh.dgram — UDP datagrams</h2>
           <p class="summary">
-            A Node-style datagram API over the mesh. Datagrams preserve message boundaries and emit
-            <code>message</code>, <code>listening</code>, <code>error</code>, and
-            <code>close</code>. Send address is <code>PeerLike</code>.
+            Node-style datagram API. Preserves message boundaries; emits
+            <code class="inline-code">message</code>, <code class="inline-code">listening</code>,
+            <code class="inline-code">error</code>, and <code class="inline-code">close</code>. Send
+            address is <code class="inline-code">PeerLike</code>.
           </p>
           <pre><code>const sock = mesh.dgram.createSocket();
 sock.on('message', (msg, rinfo) =&gt; {
@@ -1105,9 +1189,7 @@ sock.send(Buffer.from('ping'), 9999, bob ?? 'bob-laptop');</code></pre>
               </tr>
               <tr>
                 <td><code>socket.send(msg, port, address, callback?)</code></td>
-                <td>
-                  Send to a <code>PeerLike</code> address and port. Call <code>bind()</code> first.
-                </td>
+                <td>Send to a <code>PeerLike</code> address and port. Call <code>bind()</code> first.</td>
               </tr>
               <tr>
                 <td><code>socket.close(callback?)</code></td>
@@ -1120,18 +1202,20 @@ sock.send(Buffer.from('ping'), 9999, bob ?? 'bob-laptop');</code></pre>
             </tbody>
           </table>
           <div class="warning">
-            UDP is unreliable and unordered. Keep payloads around 1,200 bytes or smaller to avoid
-            tailnet MTU fragmentation problems.
+            UDP is unreliable and unordered. Keep payloads around <strong>1,200 bytes</strong> or
+            smaller to avoid tailnet MTU fragmentation problems.
           </div>
         </section>
 
+        <!-- WEBSOCKET -->
         <section id="websocket">
           <p class="eyebrow">Transport</p>
-          <h2>mesh.ws: WebSocket over mesh TCP</h2>
+          <h2>mesh.ws — WebSocket over mesh TCP</h2>
           <p class="summary">
-            Thin wrappers over the standard <code>ws</code> package. The package is optional and
-            loaded lazily, so install it only in apps that use this namespace.
-            <code>connect</code> host is <code>PeerLike</code>.
+            Thin wrappers over the standard <code class="inline-code">ws</code> package. Optional and
+            loaded lazily — install <code class="inline-code">ws</code> only in apps that use this
+            namespace. <code class="inline-code">connect</code> host is
+            <code class="inline-code">PeerLike</code>.
           </p>
           <pre><code>const wss = await mesh.ws.createServer({ port: 7788, path: '/chat' });
 wss.on('connection', (ws, req) =&gt; {
@@ -1164,13 +1248,15 @@ ws.once('open', () =&gt; ws.send('hello'));</code></pre>
           </table>
         </section>
 
+        <!-- QUIC -->
         <section id="quic">
           <p class="eyebrow">Transport</p>
-          <h2>mesh.quic: multiplexed streams</h2>
+          <h2>mesh.quic — multiplexed streams</h2>
           <p class="summary">
             QUIC connections carry many concurrent bidirectional byte streams. Streams are
-            <code>stream.Duplex</code> instances; connections and servers are async iterable.
-            <code>connect</code> takes <code>PeerLike</code>.
+            <code class="inline-code">stream.Duplex</code> instances; connections and servers are
+            async iterable. <code class="inline-code">connect</code> takes
+            <code class="inline-code">PeerLike</code>.
           </p>
           <pre><code>const server = await mesh.quic.listen(9420);
 (async () =&gt; {
@@ -1223,17 +1309,76 @@ stream.end();</code></pre>
             </tbody>
           </table>
           <div class="warning">
-            Ports 443 and 9417 are reserved. QUIC port 0 is not supported over the tsnet relay.
+            Ports <strong>443</strong> and <strong>9417</strong> are reserved. QUIC port
+            <strong>0</strong> is not supported over the tsnet relay.
           </div>
         </section>
 
+        <!-- SERVE -->
+        <section id="serve">
+          <p class="eyebrow">Publish</p>
+          <h2>mesh.serve — declarative HTTP on the tailnet</h2>
+          <p class="summary">
+            Publish a local service or directory to the whole tailnet (RFC 023). TLS defaults
+            <strong>on</strong> (browser audience / MagicDNS certs). Resolves with a
+            <code class="inline-code">ServeHandle</code>
+            (<code class="inline-code">{ id, url, port, config, close() }</code>.
+          </p>
+          <pre><code>// Expose a local dev server
+const h = await mesh.serve({ port: 443, target: 'http://localhost:3000' });
+console.log(h.url); // https://myapp.tail1234.ts.net
+
+// Static SPA
+await mesh.serve({ port: 443, dir: './public', fallback: '/index.html' });
+
+// Mixed routes (SPA + API)
+await mesh.serve({
+  port: 443,
+  routes: {
+    '/api': 'http://localhost:8000',
+    '/grafana': { target: 'http://localhost:3001' },
+    '/': { dir: './public', fallback: '/index.html' },
+  },
+});</code></pre>
+          <table>
+            <thead>
+              <tr>
+                <th>Config shape</th>
+                <th>When to use</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>{ port, target }</code></td>
+                <td>Forward a whole tailnet port to one local backend URL.</td>
+              </tr>
+              <tr>
+                <td><code>{ port, dir, fallback? }</code></td>
+                <td>Serve a static directory (SPA fallback optional).</td>
+              </tr>
+              <tr>
+                <td><code>{ port, routes }</code></td>
+                <td>Path map of proxies and static dirs under one origin.</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="note">
+            Common options: <code class="inline-code">tls</code> (default true),
+            <code class="inline-code">name</code>, <code class="inline-code">id</code>,
+            <code class="inline-code">allow</code> (loginName globs),
+            <code class="inline-code">allowNonLoopback</code> (opt-in pivot). Prefer
+            <code class="inline-code">mesh.dnsName</code> / <code class="inline-code">ServeHandle.url</code>
+            over hand-built hostnames.
+          </div>
+        </section>
+
+        <!-- MESSAGING -->
         <section id="messaging">
           <p class="eyebrow">Application API</p>
           <h2>Namespaced messaging</h2>
           <p class="summary">
-            Messages are routed by namespace and sent over Truffle's internal session transport.
-            JSON bytes are delivered as structured JSON payloads; other bytes are delivered as byte
-            arrays.
+            Messages are routed by namespace over Truffle’s internal session transport. JSON bytes
+            are delivered as structured JSON payloads; other bytes as byte arrays.
           </p>
           <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
   if (typeof msg.from === 'string') return;
@@ -1243,10 +1388,7 @@ stream.end();</code></pre>
 
 const peer = (await mesh.getPeers())[0];
 if (peer) {
-  await peer.send(
-    'chat',
-    Buffer.from(JSON.stringify({ text: 'hello' })),
-  );
+  await peer.send('chat', Buffer.from(JSON.stringify({ text: 'hello' })));
   // same: await mesh.send(peer, 'chat', Buffer.from(...));
 }
 
@@ -1271,28 +1413,27 @@ await mesh.broadcast(
               </tr>
               <tr>
                 <td><code>await mesh.broadcast(namespace, data)</code></td>
-                <td>Broadcast to currently connected peers. It does not lazy-connect peers.</td>
+                <td>Broadcast to currently connected peers. Does not lazy-connect peers.</td>
               </tr>
               <tr>
                 <td><code>mesh.onMessage(namespace, callback)</code></td>
                 <td>
-                  Subscribe to messages in one namespace. <code>msg.from</code> is a
-                  <code>Peer</code> when the sender is interned; otherwise a string id.
+                  Subscribe to one namespace. <code>msg.from</code> is a <code>Peer</code> when the
+                  sender is interned; otherwise a string id.
                 </td>
               </tr>
             </tbody>
           </table>
         </section>
 
+        <!-- FILES -->
         <section id="files">
           <p class="eyebrow">Application API</p>
           <h2>File transfer</h2>
           <p class="summary">
-            <code>mesh.fileTransfer()</code> returns a file-transfer handle for push, pull, offers,
-            progress events, max-size policy, and pull-root policy. Target peers are still query
-            strings (name / ULID / hostname) — full <code>PeerLike</code> on FT is not landed yet.
-            Resolve a handle first, then pass a stable query such as
-            <code>peer.displayName</code> or a saved <code>deviceId</code>.
+            <code class="inline-code">mesh.fileTransfer()</code> returns a handle for push, pull,
+            offers, progress events, max-size policy, and pull-root policy. Targets accept
+            <code class="inline-code">PeerLike</code> (<code class="inline-code">Peer | string</code>).
           </p>
           <pre><code>const ft = mesh.fileTransfer();
 
@@ -1304,7 +1445,7 @@ ft.onEvent((event) =&gt; console.log(event.eventType, event.progress));
 
 const peer = (await mesh.getPeers())[0];
 if (peer) {
-  await ft.sendFile(peer.displayName, './report.pdf', '/tmp/report.pdf');
+  await ft.sendFile(peer, './report.pdf', '/tmp/report.pdf');
 }</code></pre>
           <table>
             <thead>
@@ -1315,15 +1456,15 @@ if (peer) {
             </thead>
             <tbody>
               <tr>
-                <td><code>sendFile(peerQuery, localPath, remotePath)</code></td>
+                <td><code>sendFile(to, localPath, remotePath)</code></td>
                 <td>
-                  Push a local file to a peer (query string). Resolves with bytes, SHA-256, and
-                  elapsed time.
+                  Push a local file to a peer (<code>PeerLike</code>). Resolves with bytes, SHA-256,
+                  and elapsed time.
                 </td>
               </tr>
               <tr>
-                <td><code>pullFile(peerQuery, remotePath, localPath)</code></td>
-                <td>Pull a file from a peer (query string) into a local path.</td>
+                <td><code>pullFile(to, remotePath, localPath)</code></td>
+                <td>Pull a file from a peer into a local path.</td>
               </tr>
               <tr>
                 <td><code>autoAccept(outputDir)</code></td>
@@ -1357,15 +1498,15 @@ if (peer) {
           </table>
         </section>
 
+        <!-- STORES -->
         <section id="stores">
           <p class="eyebrow">Application API</p>
           <h2>Synced stores</h2>
           <p class="summary">
             A synced store holds device-owned JSON slices. Each device updates its own slice and
-            observes slices from peers. Slice keys are durable device ULIDs
-            (<code>getLocalInfo().deviceId</code> / peer <code>deviceId</code> once known) — that is
-            store identity, not a networking address. Prefer Peer handles for dial/send; use
-            store <code>deviceId</code> only to correlate slices with peers after identity is known.
+            observes slices from peers. Slice keys are durable device ULIDs — store identity, not a
+            networking address. Prefer Peer handles for dial/send; use store
+            <code class="inline-code">deviceId</code> to correlate slices after identity is known.
           </p>
           <pre><code>const store = mesh.syncedStore('presence');
 
@@ -1426,12 +1567,14 @@ for (const slice of await store.all()) {
           </table>
         </section>
 
+        <!-- PROXY -->
         <section id="proxy">
-          <p class="eyebrow">Application API</p>
+          <p class="eyebrow">Publish</p>
           <h2>Reverse proxy</h2>
           <p class="summary">
-            <code>mesh.proxy()</code> exposes local services on mesh ports and can announce them for
-            discovery.
+            <code class="inline-code">mesh.proxy()</code> exposes local services on mesh ports and can
+            announce them for discovery. Prefer <code class="inline-code">mesh.serve</code> for the
+            common “publish a directory or localhost process” cases — serve is sugar over this engine.
           </p>
           <pre><code>const proxy = mesh.proxy();
 const info = await proxy.add({
@@ -1471,16 +1614,20 @@ const info = await proxy.add({
           </table>
         </section>
 
+        <!-- REACT -->
         <section id="react">
           <p class="eyebrow">React</p>
           <h2>@vibecook/truffle-react</h2>
           <p class="summary">
-            React hooks are thin helpers around an already-started <code>NapiNode</code> or
-            <code>MeshNode</code>. Prefer passing a <code>MeshNode</code> from
-            <code>createMeshNode()</code>. Hook peer snapshots currently track native
-            <code>NapiPeer</code> fields; send helpers still take a peer query string. For
-            handle-first networking in React, keep the Peer from
-            <code>mesh.getPeers()</code> / events and call <code>peer.send</code> yourself.
+            Thin hooks around an already-started node. Prefer a
+            <code class="inline-code">MeshNode</code> from
+            <code class="inline-code">createMeshNode()</code> and pass
+            <code class="inline-code">mesh.native</code> where hooks still expect
+            <code class="inline-code">NapiNode</code>. Hook peer snapshots currently track native
+            <code class="inline-code">NapiPeer</code> fields; send helpers still take a peer query
+            string. For handle-first networking, keep Peers from
+            <code class="inline-code">mesh.getPeers()</code> / events and call
+            <code class="inline-code">peer.send</code> yourself.
           </p>
           <pre><code>import { useMesh, useAuth, useSyncedStore } from '@vibecook/truffle-react';
 
@@ -1519,19 +1666,17 @@ function Peers({ node }) {
           </table>
         </section>
 
+        <!-- NATIVE -->
         <section id="native">
           <p class="eyebrow">Lower-level handles</p>
           <h2>Native classes</h2>
           <p class="summary">
-            The package re-exports classes and types from <code>@vibecook/truffle-native</code> for
-            apps that need the lower-level pull-model handles directly. Native
-            <code>NapiNode.getPeers()</code> returns snapshot objects (honest
-            <code>deviceId: string | null</code>, <code>tailscaleId</code>,
-            <code>peerRef</code>, <code>generation</code>) without interned
-            <code>===</code>. Prefer <code>createMeshNode()</code> for the TS
-            <code>Peer</code> registry.
+            The package re-exports classes and types from
+            <code class="inline-code">@vibecook/truffle-native</code> for apps that need the lower-level
+            pull-model handles. Prefer <code class="inline-code">createMeshNode()</code> for the TS
+            <code class="inline-code">Peer</code> registry and stream wrappers.
           </p>
-          <div class="grid">
+          <div class="grid-2">
             <div class="card">
               <span class="tag">Node</span>
               <h3>NapiNode</h3>
@@ -1545,39 +1690,38 @@ function Peers({ node }) {
               <h3>Peer (packages/core)</h3>
               <p>
                 User-facing handle with hard <code>===</code> via <code>PeerRegistry</code>.
-                Exported from <code>@vibecook/truffle</code> alongside
-                <code>isPeer</code> and <code>peerLikeToQuery</code>.
+                Exported with <code>isPeer</code> and <code>peerLikeToQuery</code>.
               </p>
             </div>
             <div class="card">
-              <span class="tag">TCP</span>
+              <span class="tag muted">TCP</span>
               <h3>NapiTcpSocket, NapiTcpListener</h3>
               <p>Pull-model raw TCP handles. The high-level package wraps these as streams.</p>
             </div>
             <div class="card">
-              <span class="tag">UDP / QUIC</span>
+              <span class="tag muted">UDP / QUIC</span>
               <h3>NapiUdpSocket, NapiQuic*</h3>
               <p>Raw datagram and QUIC connection/listener/stream handles.</p>
             </div>
           </div>
           <div class="note">
-            Most application code should start with <code>createMeshNode()</code>, use
-            <code>Peer</code> handles, and the <code>mesh.net</code> /
-            <code>mesh.http</code> / <code>mesh.dgram</code> / <code>mesh.ws</code> /
-            <code>mesh.quic</code> namespaces.
+            Most application code should start with <code class="inline-code">createMeshNode()</code>,
+            use <code class="inline-code">Peer</code> handles, and the
+            <code class="inline-code">mesh.*</code> namespaces.
           </div>
         </section>
 
+        <!-- CLI -->
         <section id="cli">
           <p class="eyebrow">Companion</p>
           <h2>CLI commands</h2>
           <p class="summary">
-            The CLI is useful for manual operations and debugging, but it is not the main
-            integration surface for apps.
+            Useful for manual operations, debugging, and agent automation. Apps should integrate the
+            JavaScript API as the product surface.
           </p>
 
           <h3>Install</h3>
-          <pre><code># macOS / Linux
+          <pre><code class="shell"># macOS / Linux
 curl -fsSL https://jamesyong-42.github.io/truffle/install.sh | sh
 
 # Windows
@@ -1587,23 +1731,14 @@ iwr -useb https://jamesyong-42.github.io/truffle/install.ps1 | iex
 brew install jamesyong-42/tap/truffle</code></pre>
 
           <h3>Quick start</h3>
-          <pre><code># Start your node and join the mesh
-truffle up
-
-# See all nodes on your network
-truffle ls
-
-# Send a message to another node
+          <pre><code class="shell">truffle up                          # start node / daemon
+truffle ls                          # list peers
 truffle send laptop "deploy is done"
-
-# Copy a file to another node
 truffle cp ./report.pdf server:/tmp/
-
-# Check connectivity
 truffle ping laptop</code></pre>
 
           <h3>Additional commands</h3>
-          <pre><code>truffle
+          <pre><code class="shell">truffle
 truffle up --device-name alice-laptop
 truffle down
 truffle status --json
@@ -1621,29 +1756,34 @@ truffle doctor
 truffle update</code></pre>
         </section>
       </div>
-    </main>
+    </div>
 
     <footer class="footer">
-      <span>Released under the MIT License.</span>
-      <span><a href="https://github.com/jamesyong-42/truffle">GitHub</a></span>
+      <span>Truffle API · MIT License</span>
+      <span>
+        <a href="./index.html">Guide</a>
+        ·
+        <a href="https://github.com/jamesyong-42/truffle">GitHub</a>
+        ·
+        <a href="https://github.com/jamesyong-42/truffle/tree/main/docs/rfcs">RFCs</a>
+      </span>
     </footer>
 
     <script>
       (function () {
         "use strict";
 
+        // Syntax highlight
         var KW =
           "\\b(?:import|from|export|default|const|let|var|for|of|in|return|if|else|switch|case|break|new|function|type|interface|extends|implements|as|await|async|typeof|instanceof|void|true|false|null|undefined|this|readonly|satisfies|try|catch|throw|while|do|class)\\b";
         var JS_RE = new RegExp(
           "(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)" +
             "|(`(?:\\\\.|[^`\\\\])*`|\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*')" +
             "|(\\b\\d[\\d_.eExXa-fA-F]*\\b)" +
-            "|(" +
-            KW +
-            ")" +
+            "|(" + KW + ")" +
             "|(\\b[A-Z][A-Za-z0-9_]*\\b)" +
             "|([a-z_$][\\w$]*)(?=\\s*\\()",
-          "g",
+          "g"
         );
         var SH_RE =
           /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\b\d[\d_.]*\b)|(\b(?:pnpm|npm|yarn|curl|iwr|brew|truffle|node|npx|sh|iex)\b)/gm;
@@ -1653,11 +1793,9 @@ truffle update</code></pre>
         function esc(s) {
           return s.replace(/&/g, "&amp;").split(LT).join("&lt;").split(GT).join("&gt;");
         }
-
         function tok(cls, text) {
           return LT + 'span class="' + cls + '">' + text + LT + "/span" + GT;
         }
-
         function highlight(raw, re, shell) {
           var out = "";
           var last = 0;
@@ -1675,93 +1813,46 @@ truffle update</code></pre>
           }
           return out + esc(raw.slice(last));
         }
-
         function looksShell(raw, code) {
           return (
             code.classList.contains("shell") ||
-            /^\s*(?:#|pnpm\b|npm\b|yarn\b|curl\b|iwr\b|brew\b|truffle\b|node\b|npx\b)/m.test(raw)
+            /^(\s*#|pnpm |npm |yarn |curl |iwr |brew |truffle )/m.test(raw)
           );
         }
-
-        function labelFor(raw, shell) {
-          if (shell) return "terminal";
-          if (raw.indexOf("mesh.http") !== -1) return "http.ts";
-          if (raw.indexOf("mesh.dgram") !== -1) return "udp.ts";
-          if (raw.indexOf("mesh.ws") !== -1) return "websocket.ts";
-          if (raw.indexOf("mesh.quic") !== -1) return "quic.ts";
-          if (raw.indexOf("fileTransfer") !== -1) return "files.ts";
-          if (raw.indexOf("syncedStore") !== -1) return "store.ts";
-          if (raw.indexOf("createMeshNode") !== -1 || raw.indexOf("mesh.net") !== -1) return "mesh.ts";
-          return "example.ts";
-        }
-
-        function copyButton(raw) {
-          var btn = document.createElement("button");
-          btn.className = "copy";
-          btn.type = "button";
-          btn.textContent = "copy";
-          btn.addEventListener("click", function () {
-            function done() {
-              btn.textContent = "copied";
-              btn.classList.add("done");
-              setTimeout(function () {
-                btn.textContent = "copy";
-                btn.classList.remove("done");
-              }, 1400);
-            }
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(raw).then(done);
-            } else {
-              done();
-            }
-          });
-          return btn;
-        }
-
-        function enhanceTerminal(terminal, pre, raw, fallbackLabel) {
-          var header = terminal.querySelector(".terminal-header");
-          if (!header) {
-            header = document.createElement("div");
-            header.className = "terminal-header";
-            terminal.insertBefore(header, pre);
-          }
-          var label = terminal.getAttribute("data-file") || header.textContent.trim() || fallbackLabel;
-          header.textContent = "";
-          var file = document.createElement("span");
-          file.className = "terminal-file";
-          file.innerHTML = LT + "b" + GT + esc(label) + LT + "/b" + GT;
-          header.appendChild(file);
-          header.appendChild(copyButton(raw));
-        }
-
-        function wrapPre(pre, raw, label) {
-          if (pre.parentElement && pre.parentElement.classList.contains("code-frame")) return;
-          var fig = document.createElement("figure");
-          fig.className = "code-frame";
-          var bar = document.createElement("div");
-          bar.className = "code-bar";
-          var file = document.createElement("span");
-          file.className = "code-file";
-          file.textContent = label;
-          bar.appendChild(file);
-          bar.appendChild(copyButton(raw));
-          pre.parentNode.insertBefore(fig, pre);
-          fig.appendChild(bar);
-          fig.appendChild(pre);
-        }
-
-        document.querySelectorAll("pre code").forEach(function (code) {
-          if (code.dataset.highlighted) return;
-          var pre = code.closest("pre");
-          var raw = code.textContent.replace(/\n$/, "");
-          var shell = looksShell(raw, code);
-          code.innerHTML = highlight(raw, shell ? SH_RE : JS_RE, shell);
-          code.dataset.highlighted = "true";
-          var label = labelFor(raw, shell);
-          var terminal = pre.closest(".terminal");
-          if (terminal) enhanceTerminal(terminal, pre, raw, label);
-          else wrapPre(pre, raw, label);
+        document.querySelectorAll("pre > code").forEach(function (code) {
+          if (code.dataset.hl === "1") return;
+          var raw = code.textContent || "";
+          code.innerHTML = looksShell(raw, code)
+            ? highlight(raw, SH_RE, true)
+            : highlight(raw, JS_RE, false);
+          code.dataset.hl = "1";
         });
+
+        // Active section in sidebar
+        var links = Array.prototype.slice.call(
+          document.querySelectorAll(".sidebar a[href^='#']")
+        );
+        var sections = links
+          .map(function (a) {
+            return document.querySelector(a.getAttribute("href"));
+          })
+          .filter(Boolean);
+
+        function setActive() {
+          var y = window.scrollY + 100;
+          var current = sections[0];
+          for (var i = 0; i < sections.length; i++) {
+            if (sections[i].offsetTop <= y) current = sections[i];
+          }
+          links.forEach(function (a) {
+            a.classList.toggle(
+              "active",
+              current && a.getAttribute("href") === "#" + current.id
+            );
+          });
+        }
+        setActive();
+        window.addEventListener("scroll", setActive, { passive: true });
       })();
     </script>
   </body>
