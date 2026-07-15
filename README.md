@@ -2,50 +2,56 @@
 
 [![CI](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesyong-42/truffle/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/jamesyong-42/truffle?label=latest)](https://github.com/jamesyong-42/truffle/releases/latest)
+[![npm](https://img.shields.io/npm/v/@vibecook/truffle?label=%40vibecook%2Ftruffle)](https://www.npmjs.com/package/@vibecook/truffle)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Mesh networking for local-first apps and devices, built on Tailscale.**
+**Simple network programming on top of Tailscale.**
 
-Truffle helps devices on the same tailnet discover each other, exchange messages, sync state, and transfer files — without running your own central server.
+Truffle gives your apps familiar networking APIs — TCP, HTTP, UDP, WebSocket, QUIC — that run across devices on the same tailnet. Discover peers, open sockets, send messages, sync state, transfer files, and publish services. No central server. No new protocol to learn.
 
-It works as:
+```ts
+import { createMeshNode } from '@vibecook/truffle';
 
-- a **CLI + terminal UI** for humans
-- a **Rust library** for native apps
-- a **Node native addon** and **Tauri plugin** for desktop apps
+const mesh = await createMeshNode({
+  appId: 'field-tools',
+  deviceName: 'alice-laptop',
+});
 
-## Why Truffle
+const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
+if (bob) await bob.send('chat', Buffer.from('hello'));
 
-- **Built on Tailscale** — use your existing tailnet for identity, connectivity, and encryption
-- **Human-friendly** — interactive TUI, onboarding, slash commands, file picker, progress UI
-- **App-friendly** — typed messaging, request/reply, synced store, file transfer primitives
-- **Agent-friendly** — `--json`, streaming events, and commands that compose well in scripts
-
-## What it looks like
-
-```text
-╭─── truffle ──────────────────────────────────────────────────╮
-│                                         │ Devices                │
-│  ▀█▀ █▀█ █ █ █▀▀ █▀▀ █   █▀▀          │ ● server (direct)      │
-│   █  █▀▄ █ █ █▀  █▀  █   █▀           │ ● laptop (relay)       │
-│   █  █ █ ▀▄▀ █   █   █▄▄ █▄▄          │ ○ pi (offline)         │
-│                                         │                        │
-│  mesh networking for your devices       │                        │
-│  jamess-mbp · 100.64.0.5               │                        │
-│  ● online · 2 peers · 15m              │                        │
-╰───────────────────────────────────────────────────────────────╯
-  14:02  ● server joined (direct)
-  14:03  You → server: Hello!
-  14:05  ⬇ report.pdf from server ████████████████ 100% ✓
-─────────────────────────────────────────────────────────────────
-❯ /send how are things? @server
-─────────────────────────────────────────────────────────────────
-  truffle · ● online · 2 peers
+// Node-shaped transports over the private mesh
+const server = mesh.net.createServer((socket) => socket.pipe(socket));
+server.listen(7000);
 ```
+
+## What you get
+
+| Layer | Surface |
+| --- | --- |
+| **Transports** | `mesh.net` · `mesh.http` · `mesh.dgram` · `mesh.ws` · `mesh.quic` |
+| **Peers** | Interned `Peer` handles — no id-string soup for dial/send |
+| **App APIs** | Namespaced messaging, SHA-256 file transfer, device-owned synced stores |
+| **Publish** | `mesh.serve` and `mesh.http.createServer` for HTTP on the tailnet |
+| **CLI / TUI** | Interactive mesh view, `truffle cp`, JSONL for agents |
+
+Tailscale owns tunnels, identity, ACLs, and crypto. Truffle owns discovery-aware peers, app isolation (`appId`), and the APIs your code calls.
 
 ## Install
 
-> Requires Tailscale to be installed and authenticated on the devices you want to connect.
+> Requires [Tailscale](https://tailscale.com/) installed and authenticated on the devices you want to connect.
+
+### JavaScript / Node.js
+
+```bash
+pnpm add @vibecook/truffle
+# optional — only if you use mesh.ws
+pnpm add ws
+```
+
+Node.js 18+. The package includes a prebuilt native addon and platform sidecar.
+
+### CLI
 
 ```bash
 # macOS / Linux
@@ -62,44 +68,96 @@ Supports macOS (arm64/x64), Linux (x64/arm64), and Windows (x64).
 
 ## Quick start
 
+### API
+
+```ts
+import { createMeshNode } from '@vibecook/truffle';
+
+const mesh = await createMeshNode({
+  appId: 'notes',
+  deviceName: 'alice-laptop',
+  onAuthRequired: (url) => console.log('Auth URL:', url),
+});
+
+// Discovery yields Peer handles (same object from events / messages)
+for (const p of await mesh.getPeers()) {
+  console.log(p.displayName, p.online ? 'online' : 'offline');
+}
+
+mesh.onMessage('chat', async (msg) => {
+  if (typeof msg.from === 'string') return;
+  console.log(msg.from.displayName, msg.payload);
+  await msg.from.send('chat', Buffer.from('ack'));
+});
+
+// Serve a local process or SPA to the whole tailnet
+const h = await mesh.serve({
+  port: 443,
+  target: 'http://localhost:3000',
+});
+console.log(h.url); // https://….ts.net
+```
+
+### CLI
+
 ```bash
-truffle                           # launch the interactive TUI
+truffle                           # interactive TUI
 truffle up                        # start the background daemon
-truffle ls                        # list peers on your tailnet
+truffle ls                        # list peers
 truffle send server "hello"       # send a message
 truffle cp report.pdf server:/tmp/  # send a file
 truffle watch --json              # stream mesh events as JSONL
 ```
 
-On first run, Truffle guides you through device naming and Tailscale auth, then drops you into a live mesh view.
+## Mental model
 
-## What you can build with it
+1. **Start a node** — `createMeshNode({ appId })` boots the native core + tsnet sidecar in-process.
+2. **Discover peers** — Tailscale status is the source of truth; you get interned `Peer` objects.
+3. **Talk on purpose** — messages, sockets, files, and HTTP are addressed with a Peer (or a query that resolves to one).
+4. **Ship features** — chat, agents, shared state, local dashboards — without operating a broker.
 
-- **Device-to-device messaging**
-- **Verified file transfer**
-- **Request/reply workflows**
-- **Shared state with synced stores**
-- **Local-first desktop tools on top of your tailnet**
+`appId` is the isolation boundary: devices with different app IDs do not see each other as Truffle peers, even on the same tailnet.
 
 ## Packages
 
-- [`crates/truffle-cli`](crates/truffle-cli) — interactive CLI + TUI
-- [`crates/truffle`](crates/truffle) / [`crates/truffle-core`](crates/truffle-core) — Rust API
-- [`crates/truffle-napi`](crates/truffle-napi) — Node.js native addon (`@vibecook/truffle-native`)
-- [`crates/truffle-tauri-plugin`](crates/truffle-tauri-plugin) — Tauri v2 plugin
-- [`packages/sidecar-slim`](packages/sidecar-slim) — Go sidecar for Tailscale integration
+| Package | Role |
+| --- | --- |
+| [`@vibecook/truffle`](packages/core) | Primary JS API (`createMeshNode`, transports, files, stores, serve) |
+| [`@vibecook/truffle-react`](packages/react) | React hooks (`useMesh`, `useAuth`, `useSyncedStore`) |
+| [`@vibecook/truffle-native`](crates/truffle-napi) | NAPI-RS native addon |
+| [`truffle` CLI](crates/truffle-cli) | Interactive CLI + TUI |
+| [`truffle-core`](crates/truffle-core) | Rust core (network → transport → session → envelope → Node) |
+| [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Tauri v2 desktop plugin |
+| [`sidecar-slim`](packages/sidecar-slim) | Go sidecar embedding tsnet |
 
-## Learn more
+## Examples
 
-- [API-first guide](docs/index.html)
-- [API reference](docs/api.html)
-- [RFCs](docs/rfcs/)
+See [`examples/`](examples/) for runnable demos:
+
+- Discovery, chat, shared state
+- Netcat-style TCP, QUIC streams
+- Express over the mesh, static SPA + API, expose a local dev server
+
+## Docs
+
+- **Guide:** [jamesyong-42.github.io/truffle](https://jamesyong-42.github.io/truffle/)
+- **API reference:** [api.html](https://jamesyong-42.github.io/truffle/api.html)
+- **RFCs:** [docs/rfcs/](docs/rfcs/)
 
 ## Development
 
 ```bash
+pnpm install
 cargo build --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 cargo test --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+pnpm run build
+pnpm run test
+```
+
+Enable the pre-commit hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
 ```
 
 ## License
