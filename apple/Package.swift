@@ -20,12 +20,18 @@ let package = Package(
     ],
     products: [
         .library(name: "Truffle", targets: ["Truffle"]),
+        .library(name: "TruffleSwiftUI", targets: ["TruffleSwiftUI"]),
         .library(name: "TruffleTailscale", targets: ["TruffleTailscale"]),
     ],
     targets: [
         .target(
             name: "Truffle",
             path: "Sources/Truffle"
+        ),
+        .target(
+            name: "TruffleSwiftUI",
+            dependencies: ["Truffle"],
+            path: "Sources/TruffleSwiftUI"
         ),
         .target(
             name: "TruffleTailscale",

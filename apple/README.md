@@ -10,7 +10,12 @@ of the desktop sidecar.
 | Target | Contents |
 |---|---|
 | `Truffle` | Product core: identity (AppId / ULID / hostname slug), wire codecs (hello v2, envelope, byte payloads), session handshake + close codes, generation-checked peer registry, `MeshNode` actor, `NetworkBackend` seam, loopback test backend |
+| `TruffleSwiftUI` | `MeshModel` (@Observable — RFC 024 §6.7) + `AuthSafariView` for the interactive login sheet |
 | `TruffleTailscale` | Layer 0–1 (libtailscale / TailscaleKit glue). The production `TailscaleKitBackend` compiles only when `TailscaleKit.xcframework` is wired up (`#if canImport(TailscaleKit)`) |
+
+An iOS example lives in `Examples/MeshChatDemo/` — a SwiftUI chat app over an
+in-process demo mesh (your node + two bot peers on `LoopbackNetwork`); see
+its README.
 
 ## Build & test
 

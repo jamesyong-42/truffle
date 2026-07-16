@@ -34,6 +34,12 @@ jobs:
         working-directory: apple
         run: swift test
 
+      - name: Build example app (iOS Simulator)
+        working-directory: apple/Examples/MeshChatDemo
+        run: |
+          xcodebuild -project MeshChatDemo.xcodeproj -scheme MeshChatDemo \
+            -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO
+
   fixtures-rust:
     name: Interop fixtures (Rust side)
     runs-on: ubuntu-latest

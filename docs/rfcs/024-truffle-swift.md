@@ -342,7 +342,12 @@ public struct Peer: Identifiable, Hashable, Sendable {
     public let appId: String?
     public let isLocal: Bool
 
-    /// Equality and hashing use `ref` only, never mutable peer metadata.
+    /// Row IDENTITY (`id`/hash) is `ref` — stable per generation, so SwiftUI
+    /// rows never churn when hello lands. EQUALITY is full content: snapshots
+    /// of the same generation compare unequal once `deviceId`/`online`/
+    /// metadata change, so Equatable-based view diffing observes updates.
+    /// (Ref-only equality would make SwiftUI skip re-rendering confirmed
+    /// peers — found building the example app.)
     public static func == (lhs: Peer, rhs: Peer) -> Bool
     public func hash(into hasher: inout Hasher)
 }
@@ -370,7 +375,8 @@ collapsing ambiguity, timeout, and absence into nil.
 desktop handles are live). Every peer-taking call resolves `Peer.ref`, including
 its generation. If that generation left the registry, the call throws
 `MeshError.peerGone` even if the same Tailscale stable ID has since rejoined.
-Fresh snapshots for the same live generation compare and hash equally.
+Fresh snapshots for the same live generation share identity (`id`, hash) but
+compare equal only when their content also matches.
 
 ### 6.4 Namespaced messages
 

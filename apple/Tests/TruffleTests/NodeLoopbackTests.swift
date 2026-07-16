@@ -288,9 +288,10 @@ struct PongDroppingTransport: FrameTransport {
         }
         try await alice.sendJSON(to: carolPeer, namespace: "x", payload: ChatPayload(text: "."))
 
-        // Exact tailscaleId / ref / IP / deviceId / prefix.
+        // Exact tailscaleId / ref / IP / deviceId / prefix. Same identity
+        // (ref) — content differs since bobPeer predates the hello.
         let byRef = try await alice.peer(bobPeer.ref.description)
-        #expect(byRef == bobPeer)
+        #expect(byRef?.ref == bobPeer.ref)
         guard let confirmedBob = try await alice.peer("ts-b"),
             let bobUlid = confirmedBob.deviceId
         else {

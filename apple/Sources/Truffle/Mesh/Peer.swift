@@ -68,10 +68,19 @@ public struct Peer: Identifiable, Hashable, Sendable {
         self.isLocal = isLocal
     }
 
-    /// Equality and hashing use `ref` only, never mutable peer metadata —
-    /// fresh snapshots for the same live generation compare equal.
+    /// Row IDENTITY is `ref` (stable per generation — SwiftUI rows never
+    /// churn when hello lands), but EQUALITY is full content: two snapshots
+    /// of the same generation differ once `deviceId`/`online`/metadata
+    /// change, so SwiftUI's Equatable-based diffing re-renders them.
+    /// Hashing stays ref-only (legal: equal values always share a ref).
     public static func == (lhs: Peer, rhs: Peer) -> Bool {
         lhs.ref == rhs.ref
+            && lhs.deviceId == rhs.deviceId
+            && lhs.displayName == rhs.displayName
+            && lhs.hostname == rhs.hostname
+            && lhs.tailnetIPs == rhs.tailnetIPs
+            && lhs.online == rhs.online
+            && lhs.appId == rhs.appId
     }
 
     public func hash(into hasher: inout Hasher) {
