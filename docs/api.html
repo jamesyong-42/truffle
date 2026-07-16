@@ -570,6 +570,7 @@
         <a href="#react">React hooks</a>
         <a href="#native">Native classes</a>
         <a href="#cli">CLI companion</a>
+        <a href="#swift">Swift (RFC 024)</a>
       </aside>
 
       <div class="content">
@@ -819,10 +820,14 @@ type MeshNode = {
   health(): Promise&lt;NapiHealthInfo&gt;;
   onPeerChange(cb: (event: MeshPeerEvent) =&gt; void): void;
 
-  // Messaging
+  // Messaging — prefer explicit wire types over legacy send/broadcast
   send(to: PeerLike, namespace: string, data: Buffer | Uint8Array): Promise&lt;void&gt;;
+  sendJson(peerId: string, namespace: string, payload: unknown): Promise&lt;void&gt;;
+  sendBytes(peerId: string, namespace: string, data: Buffer): Promise&lt;void&gt;;
+  broadcast(namespace: string, data: Buffer): Promise&lt;void&gt;;
+  broadcastJson(namespace: string, payload: unknown): Promise&lt;NapiBroadcastReport&gt;;
+  broadcastBytes(namespace: string, data: Buffer): Promise&lt;NapiBroadcastReport&gt;;
   onMessage(namespace: string, cb: (msg: MeshNamespacedMessage) =&gt; void): void;
-  // + broadcast / sendJson / … via native surface
 
   // Raw dials
   openTcp(to: PeerLike, port: number): Promise&lt;NapiTcpSocket&gt;;
@@ -954,9 +959,22 @@ type MeshNamespacedMessage = {
                 <td>Same registry generation. Left+rejoin → false even with same Tailscale id.</td>
               </tr>
               <tr>
+                <td><code>sendJson(namespace, payload)</code></td>
+                <td><code>Promise&lt;void&gt;</code></td>
+                <td>Preferred for structured data. Explicit JSON wire type — never content-sniffs.</td>
+              </tr>
+              <tr>
+                <td><code>sendBytes(namespace, data)</code></td>
+                <td><code>Promise&lt;void&gt;</code></td>
+                <td>Preferred for opaque binary. Base64 <code>"bytes"</code> envelope on the wire.</td>
+              </tr>
+              <tr>
                 <td><code>send(namespace, data)</code></td>
                 <td><code>Promise&lt;void&gt;</code></td>
-                <td>Sugar for <code>mesh.send(this, …)</code>. Prefer <code>sendJson</code> / <code>sendBytes</code> when available.</td>
+                <td>
+                  Legacy content-sniffing: UTF-8 JSON bytes travel as JSON, everything else as a
+                  byte array. Prefer <code>sendJson</code> / <code>sendBytes</code>.
+                </td>
               </tr>
               <tr>
                 <td><code>ping()</code></td>
@@ -1377,25 +1395,29 @@ await mesh.serve({
           <p class="eyebrow">Application API</p>
           <h2>Namespaced messaging</h2>
           <p class="summary">
-            Messages are routed by namespace over Truffle’s internal session transport. JSON bytes
-            are delivered as structured JSON payloads; other bytes as byte arrays.
+            Messages are routed by namespace over Truffle’s internal session transport. Prefer
+            <strong>explicit wire types</strong> — <code class="inline-code">sendJson</code> /
+            <code class="inline-code">sendBytes</code> and their broadcast counterparts — so the
+            wire type never depends on the data’s contents. Legacy
+            <code class="inline-code">send</code> / <code class="inline-code">broadcast</code>
+            still content-sniff UTF-8 JSON.
           </p>
           <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
   if (typeof msg.from === 'string') return;
   console.log(msg.from.displayName, msg.msgType, msg.payload);
-  await msg.from.send('chat', Buffer.from(JSON.stringify({ text: 'ack' })));
+  await msg.from.sendJson('chat', { text: 'ack' });
 });
 
 const peer = (await mesh.getPeers())[0];
 if (peer) {
-  await peer.send('chat', Buffer.from(JSON.stringify({ text: 'hello' })));
-  // same: await mesh.send(peer, 'chat', Buffer.from(...));
+  await peer.sendJson('chat', { text: 'hello' });
+  await peer.sendBytes('bin', Buffer.from([0x01, 0x02]));
 }
 
-await mesh.broadcast(
-  'chat',
-  Buffer.from(JSON.stringify({ text: 'hello everyone' })),
-);</code></pre>
+// Broadcast only reaches peers with an active session (no lazy dial).
+// broadcastJson / broadcastBytes return a NapiBroadcastReport.
+const report = await mesh.broadcastJson('chat', { text: 'hello everyone' });
+console.log(report.queued, '/', report.attempted, 'queued');</code></pre>
           <table>
             <thead>
               <tr>
@@ -1405,15 +1427,42 @@ await mesh.broadcast(
             </thead>
             <tbody>
               <tr>
-                <td><code>await mesh.send(to, namespace, data)</code></td>
+                <td><code>await peer.sendJson(namespace, payload)</code></td>
                 <td>
-                  <code>to</code> is <code>Peer | string</code> (query). Lazily establishes a
-                  session connection if needed. Prefer <code>peer.send(...)</code> sugar.
+                  Preferred for structured data. Explicit JSON wire type. Also
+                  <code>mesh.sendJson(peerId, namespace, payload)</code> on the native surface
+                  (string route/query).
                 </td>
               </tr>
               <tr>
+                <td><code>await peer.sendBytes(namespace, data)</code></td>
+                <td>
+                  Preferred for opaque binary. Base64 <code>"bytes"</code> envelope;
+                  receivers see <code>msgType === "bytes"</code>. Also
+                  <code>mesh.sendBytes(peerId, …)</code>.
+                </td>
+              </tr>
+              <tr>
+                <td><code>await mesh.send(to, namespace, data)</code></td>
+                <td>
+                  Legacy content-sniffing. <code>to</code> is <code>Peer | string</code>. Prefer
+                  <code>peer.sendJson</code> / <code>sendBytes</code>.
+                </td>
+              </tr>
+              <tr>
+                <td><code>await mesh.broadcastJson(namespace, payload)</code></td>
+                <td>
+                  Broadcast JSON to currently connected peers. Returns
+                  <code>{ attempted, queued, failed }</code>. Does not lazy-connect peers.
+                </td>
+              </tr>
+              <tr>
+                <td><code>await mesh.broadcastBytes(namespace, data)</code></td>
+                <td>Broadcast opaque bytes; same report shape as <code>broadcastJson</code>.</td>
+              </tr>
+              <tr>
                 <td><code>await mesh.broadcast(namespace, data)</code></td>
-                <td>Broadcast to currently connected peers. Does not lazy-connect peers.</td>
+                <td>Legacy content-sniffing broadcast. Prefer <code>broadcastJson</code> / <code>broadcastBytes</code>.</td>
               </tr>
               <tr>
                 <td><code>mesh.onMessage(namespace, callback)</code></td>
@@ -1735,6 +1784,7 @@ brew install jamesyong-42/tap/truffle</code></pre>
 truffle ls                          # list peers
 truffle send laptop "deploy is done"
 truffle cp ./report.pdf server:/tmp/
+truffle serve http://localhost:3000 --port 443
 truffle ping laptop</code></pre>
 
           <h3>Additional commands</h3>
@@ -1747,6 +1797,10 @@ truffle ping bob-laptop -c 4
 truffle tcp bob-laptop:7000
 truffle send bob-laptop "hello"
 truffle cp ./report.pdf bob-laptop:/tmp/
+truffle serve http://localhost:3000 --port 443
+truffle serve ./public --port 443 --fallback /index.html
+truffle serve status
+truffle serve stop serve-443
 truffle watch --json
 truffle wait bob-laptop --timeout 30
 truffle recv --from bob-laptop --timeout 30
@@ -1754,6 +1808,71 @@ truffle proxy add --name api --target-port 3000 --listen-port 8443
 truffle proxy list
 truffle doctor
 truffle update</code></pre>
+          <div class="note">
+            <code class="inline-code">truffle serve</code> publishes one route on one port (URL
+            reverse-proxy or static directory). Compose multi-route origins with
+            <code class="inline-code">mesh.serve({ routes })</code> in JavaScript. See
+            <a href="https://github.com/jamesyong-42/truffle/blob/main/docs/guide/serving-http.md">serving-http.md</a>.
+          </div>
+        </section>
+
+        <!-- SWIFT -->
+        <section id="swift">
+          <p class="eyebrow">Platforms</p>
+          <h2>Truffle Swift (RFC 024)</h2>
+          <p class="summary">
+            An Apple-native SPM package under
+            <a href="https://github.com/jamesyong-42/truffle/tree/main/apple"><code>apple/</code></a>
+            implements the same mesh product model — Peers, <code class="inline-code">appId</code>
+            isolation, namespaced messages — wire-compatible with <code class="inline-code">truffle-core</code>.
+            It is designed for in-process embedding on iOS/macOS via libtailscale / TailscaleKit
+            (no desktop sidecar).
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Target</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Truffle</code></td>
+                <td>
+                  Identity, hello v2 + envelope codecs, session handshake, generation-checked
+                  <code>Peer</code> / <code>PeerRef</code>, <code>MeshNode</code> actor,
+                  <code>NetworkBackend</code> seam + loopback test backend.
+                </td>
+              </tr>
+              <tr>
+                <td><code>TruffleSwiftUI</code></td>
+                <td>
+                  <code>MeshModel</code> (<code>@Observable</code>) and
+                  <code>AuthSafariView</code> for interactive login.
+                </td>
+              </tr>
+              <tr>
+                <td><code>TruffleTailscale</code></td>
+                <td>
+                  TailscaleKit / libtailscale glue. Production
+                  <code>TailscaleKitBackend</code> compiles when the xcframework is wired up.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="note">
+            <strong>Status:</strong> Phase 0/1 exit criteria are not met — the product core and
+            wire contracts are tested end-to-end on macOS via an in-memory loopback backend;
+            <code class="inline-code">MeshNode.start</code> (production entry) throws until
+            TailscaleKit lands. Example:
+            <a href="https://github.com/jamesyong-42/truffle/tree/main/apple/Examples/MeshChatDemo">MeshChatDemo</a>
+            (iOS Simulator). Cross-runtime fixtures live in
+            <code class="inline-code">apple/Tests/TruffleTests/Fixtures/</code> and are decoded by
+            both Swift and Rust. See
+            <a href="https://github.com/jamesyong-42/truffle/blob/main/docs/rfcs/024-truffle-swift.md">RFC 024</a>
+            and the
+            <a href="https://github.com/jamesyong-42/truffle/blob/main/apple/README.md">apple README</a>.
+          </div>
         </section>
       </div>
     </div>

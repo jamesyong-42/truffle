@@ -1261,7 +1261,7 @@
                 <div class="layer-n l7">L7</div>
                 <div>
                   <strong>Applications</strong>
-                  <span>Your code, CLI/TUI, React hooks, Tauri plugins — chat, agents, dashboards, file workflows</span>
+                  <span>Your code, CLI/TUI, React hooks, Tauri plugins, Swift (RFC 024) — chat, agents, dashboards, file workflows</span>
                 </div>
               </div>
               <div class="layer">
@@ -1565,11 +1565,11 @@ for (const p of await mesh.getPeers()) {
               <pre><code>mesh.onMessage('chat', async (msg) =&gt; {
   if (typeof msg.from === 'string') return; // not interned yet
   console.log(msg.from.displayName, msg.payload);
-  await msg.from.send('chat', Buffer.from('ack'));
+  await msg.from.sendJson('chat', { text: 'ack' });
 });
 
 const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
-if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
+if (bob) await bob.sendJson('chat', { text: 'hello' });</code></pre>
             </div>
           </div>
 
@@ -1579,6 +1579,7 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
               Humans and agents can also drive the mesh with
               <code class="inline-code">truffle up</code>, <code class="inline-code">truffle ls</code>,
               <code class="inline-code">truffle send</code>, <code class="inline-code">truffle cp</code>,
+              <code class="inline-code">truffle serve</code>,
               and <code class="inline-code">truffle watch --json</code>. Apps should integrate the
               JavaScript API; the CLI is for ops, debugging, and interactive use. Install:
               <code class="inline-code">brew install jamesyong-42/tap/truffle</code>
@@ -1609,7 +1610,15 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
             <article class="pkg">
               <span class="tag tag-warm">CLI / TUI</span>
               <code>truffle</code>
-              <p>Interactive mesh view, slash commands, file picker, progress UI, JSONL for agents.</p>
+              <p>Interactive mesh view, slash commands, <code>truffle serve</code>, file transfer, JSONL for agents.</p>
+            </article>
+            <article class="pkg">
+              <span class="tag tag-blue">Swift</span>
+              <code>apple/ · Truffle SPM</code>
+              <p>
+                Apple-native mesh core (RFC 024): Peers, envelopes, <code>MeshNode</code>, SwiftUI
+                <code>MeshModel</code>. Wire-compatible with desktop; live TailscaleKit backend still pending.
+              </p>
             </article>
             <article class="pkg">
               <span class="tag tag-muted">Rust</span>
@@ -1645,6 +1654,7 @@ if (bob) await bob.send('chat', Buffer.from('hello'));</code></pre>
             <div class="actions">
               <a class="btn btn-primary" href="./api.html">Open API reference</a>
               <a class="btn btn-secondary" href="https://github.com/jamesyong-42/truffle/tree/main/examples">Browse examples</a>
+              <a class="btn btn-ghost" href="https://github.com/jamesyong-42/truffle/tree/main/apple">Swift package →</a>
             </div>
           </div>
         </div>

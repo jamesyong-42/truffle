@@ -18,7 +18,7 @@ const mesh = await createMeshNode({
 });
 
 const bob = await mesh.peer('bob-laptop', { waitMs: 5000 });
-if (bob) await bob.send('chat', Buffer.from('hello'));
+if (bob) await bob.sendJson('chat', { text: 'hello' });
 
 // Node-shaped transports over the private mesh
 const server = mesh.net.createServer((socket) => socket.pipe(socket));
@@ -87,7 +87,7 @@ for (const p of await mesh.getPeers()) {
 mesh.onMessage('chat', async (msg) => {
   if (typeof msg.from === 'string') return;
   console.log(msg.from.displayName, msg.payload);
-  await msg.from.send('chat', Buffer.from('ack'));
+  await msg.from.sendJson('chat', { text: 'ack' });
 });
 
 // Serve a local process or SPA to the whole tailnet
@@ -106,6 +106,7 @@ truffle up                        # start the background daemon
 truffle ls                        # list peers
 truffle send server "hello"       # send a message
 truffle cp report.pdf server:/tmp/  # send a file
+truffle serve http://localhost:3000 --port 443  # publish a local service
 truffle watch --json              # stream mesh events as JSONL
 ```
 
@@ -125,10 +126,13 @@ truffle watch --json              # stream mesh events as JSONL
 | [`@vibecook/truffle`](packages/core) | Primary JS API (`createMeshNode`, transports, files, stores, serve) |
 | [`@vibecook/truffle-react`](packages/react) | React hooks (`useMesh`, `useAuth`, `useSyncedStore`) |
 | [`@vibecook/truffle-native`](crates/truffle-napi) | NAPI-RS native addon |
-| [`truffle` CLI](crates/truffle-cli) | Interactive CLI + TUI |
+| [`truffle` CLI](crates/truffle-cli) | Interactive CLI + TUI (`truffle serve`, `cp`, agents JSONL, …) |
 | [`truffle-core`](crates/truffle-core) | Rust core (network → transport → session → envelope → Node) |
 | [`truffle-tauri-plugin`](crates/truffle-tauri-plugin) | Tauri v2 desktop plugin |
 | [`sidecar-slim`](packages/sidecar-slim) | Go sidecar embedding tsnet |
+| [Truffle Swift](apple/) | Apple-native SPM package (RFC 024) — wire-compatible mesh core + SwiftUI helpers |
+
+Messaging prefers explicit wire types: `peer.sendJson` / `peer.sendBytes` (and `mesh.broadcastJson` / `broadcastBytes`) over the legacy content-sniffing `send` / `broadcast`.
 
 ## Examples
 
@@ -137,12 +141,16 @@ See [`examples/`](examples/) for runnable demos:
 - Discovery, chat, shared state
 - Netcat-style TCP, QUIC streams
 - Express over the mesh, static SPA + API, expose a local dev server
+- WebSocket chat over mesh
+
+Swift: [`apple/Examples/MeshChatDemo`](apple/Examples/MeshChatDemo) — iOS SwiftUI chat over an in-process demo mesh (loopback backend today; live TailscaleKit backend still pending).
 
 ## Docs
 
 - **Guide:** [jamesyong-42.github.io/truffle](https://jamesyong-42.github.io/truffle/)
 - **API reference:** [api.html](https://jamesyong-42.github.io/truffle/api.html)
-- **RFCs:** [docs/rfcs/](docs/rfcs/)
+- **HTTP serving guide:** [docs/guide/serving-http.md](docs/guide/serving-http.md)
+- **RFCs:** [docs/rfcs/](docs/rfcs/) · Swift: [RFC 024](docs/rfcs/024-truffle-swift.md)
 
 ## Development
 
@@ -152,6 +160,12 @@ cargo build --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 cargo test --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 pnpm run build
 pnpm run test
+```
+
+Swift package (macOS / Xcode toolchain):
+
+```bash
+cd apple && DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
 Enable the pre-commit hook once per clone:
