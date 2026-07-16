@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.3](https://github.com/jamesyong-42/truffle/compare/truffle-v0.7.2...truffle-v0.7.3) (2026-07-16)
+
+
+### Features
+
+* **swift:** MeshChat iOS example app + TruffleSwiftUI MeshModel ([064dbb7](https://github.com/jamesyong-42/truffle/commit/064dbb7f4d90d0a3dff43017dd2a0830ed15ca30))
+
+
+### Bug Fixes
+
+* **swift:** address all 13 external review findings ([0f46d94](https://github.com/jamesyong-42/truffle/commit/0f46d947f68bc80f7ab97ba1b5ea85a3a35df700))
+
 ## [0.7.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.7.1...truffle-v0.7.2) (2026-07-16)
 
 
