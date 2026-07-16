@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/jamesyong-42/truffle/compare/truffle-v0.7.1...truffle-v0.7.2) (2026-07-16)
+
+
+### Features
+
+* **swift:** RFC 024 Phase 0/1 core — apple/ SPM package ([d6332fe](https://github.com/jamesyong-42/truffle/commit/d6332fe58da98670b6a1e6ffadeefb90c2a2236e))
+
 ## [0.7.1](https://github.com/jamesyong-42/truffle/compare/truffle-v0.7.0...truffle-v0.7.1) (2026-07-12)
 
 
