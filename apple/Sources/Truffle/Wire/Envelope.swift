@@ -63,8 +63,12 @@ public struct Envelope: Codable, Sendable, Equatable {
 
 public enum EnvelopeCodec {
     /// Encode an envelope, enforcing the local emission rules: namespace and
-    /// msg_type non-empty and ≤ 1,024 UTF-8 bytes each.
-    public static func encode(_ envelope: Envelope) throws -> Data {
+    /// msg_type non-empty and ≤ 1,024 UTF-8 bytes each, and the encoded
+    /// envelope within `maxBytes` — the 15 MiB bound applies in BOTH
+    /// directions (RFC 024 §8.3), not just on receive.
+    public static func encode(
+        _ envelope: Envelope, maxBytes: Int = SessionLimits.maxEnvelopeBytes
+    ) throws -> Data {
         guard !envelope.namespace.isEmpty,
             envelope.namespace.utf8.count <= SessionLimits.maxNamespaceBytes
         else {
@@ -79,7 +83,11 @@ public enum EnvelopeCodec {
                 "msg_type must be non-empty and at most \(SessionLimits.maxMsgTypeBytes) UTF-8 bytes"
             )
         }
-        return try JSONEncoder().encode(envelope)
+        let data = try JSONEncoder().encode(envelope)
+        guard data.count <= maxBytes else {
+            throw MeshError.payloadTooLarge(actual: data.count, limit: maxBytes)
+        }
+        return data
     }
 
     /// Decode an envelope, rejecting encoded data larger than `maxBytes`

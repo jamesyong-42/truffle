@@ -75,6 +75,25 @@ import Testing
             contentsOf: dir.appendingPathComponent(DeviceId.stateFileName), encoding: .utf8)
         #expect(onDisk.trimmingCharacters(in: .whitespacesAndNewlines) == first.value)
     }
+
+    @Test func corruptPersistedIdThrowsInsteadOfRotating() throws {
+        // Desktop parity (node.rs "device-id.txt contains an invalid
+        // ULID"): durable identity must fail loudly, never silently mint a
+        // new identity over a corrupt file.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("truffle-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent(DeviceId.stateFileName)
+        try Data("not-a-ulid".utf8).write(to: file)
+
+        #expect(throws: MeshError.self) {
+            _ = try DeviceId.loadOrCreate(stateDirectory: dir)
+        }
+        // The corrupt file is untouched — no rotation happened.
+        let onDisk = try String(contentsOf: file, encoding: .utf8)
+        #expect(onDisk == "not-a-ulid")
+    }
 }
 
 // MARK: - DeviceName

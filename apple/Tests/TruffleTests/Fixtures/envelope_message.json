@@ -5,6 +5,7 @@
     "text": "héllo wörld — 你好",
     "count": 42,
     "big": 1752675000000,
+    "huge": 18446744073709551615,
     "pi": 3.5,
     "ok": true,
     "nothing": null,

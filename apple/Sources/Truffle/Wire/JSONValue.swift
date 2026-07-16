@@ -3,12 +3,17 @@ import Foundation
 /// A JSON value that is `Sendable` and preserves the envelope payload
 /// structurally (RFC 024 §8.4: fixtures compare parsed structure, not bytes).
 ///
-/// Integers are kept as `Int64` when the JSON token is integral so 64-bit
-/// values (timestamps, sizes) survive a round trip without `Double` loss.
+/// Integers are kept exact so 64-bit values survive a round trip without
+/// `Double` loss: integral tokens decode as `Int64`, and values above
+/// `Int64.max` as `UInt64` (`uint`) — matching Rust `serde_json::Value`,
+/// which carries an unsigned 64-bit arm.
 public indirect enum JSONValue: Sendable, Equatable {
     case null
     case bool(Bool)
     case int(Int64)
+    /// Integral values above `Int64.max` only — smaller values always
+    /// decode as `.int`.
+    case uint(UInt64)
     case double(Double)
     case string(String)
     case array([JSONValue])
@@ -24,6 +29,8 @@ extension JSONValue: Codable {
             self = .bool(b)
         } else if let i = try? container.decode(Int64.self) {
             self = .int(i)
+        } else if let u = try? container.decode(UInt64.self) {
+            self = .uint(u)
         } else if let d = try? container.decode(Double.self) {
             self = .double(d)
         } else if let s = try? container.decode(String.self) {
@@ -44,6 +51,7 @@ extension JSONValue: Codable {
         case .null: try container.encodeNil()
         case .bool(let b): try container.encode(b)
         case .int(let i): try container.encode(i)
+        case .uint(let u): try container.encode(u)
         case .double(let d): try container.encode(d)
         case .string(let s): try container.encode(s)
         case .array(let a): try container.encode(a)

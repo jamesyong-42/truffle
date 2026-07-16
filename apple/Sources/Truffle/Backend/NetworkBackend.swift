@@ -111,5 +111,10 @@ public protocol NetworkBackend: Sendable {
     func dial(host: String, port: UInt16) async throws -> any MeshConnection
     func listen(port: UInt16) async throws -> any MeshListener
     func whoIs(remoteEndpoint: String) async throws -> AuthenticatedPeer
-    func makeURLSession() async throws -> URLSession
+    /// Build a URLSession that routes through the mesh, based on the
+    /// caller's configuration (RFC 024 §6.5): the implementation copies it
+    /// before installing proxy settings, preserves cache/cookie/timeout
+    /// options, and rejects background sessions or conflicting preconfigured
+    /// proxies rather than returning a session that bypasses the mesh.
+    func makeURLSession(configuration: URLSessionConfiguration) async throws -> URLSession
 }

@@ -15,6 +15,10 @@ public actor LoopbackNetwork {
         var hostname: String
         var ip: String
         var online: Bool
+        /// Hidden nodes can dial and are WhoIs-resolvable but never appear
+        /// in snapshots or join announcements — simulates an inbound hello
+        /// racing ahead of the netmap (RFC 024 §7.2).
+        var hidden: Bool = false
         var listeners: [UInt16: LoopbackListener] = [:]
         var backend: LoopbackBackend?
     }
@@ -34,20 +38,38 @@ public actor LoopbackNetwork {
 
     /// Register a node and return its backend. `hostname` should follow the
     /// `truffle-{appId}-{slug}` scheme for discovery (RFC 024 §7.2).
-    public func join(tailscaleId: String, hostname: String) -> LoopbackBackend {
+    /// `hidden` nodes stay out of snapshots/announcements (raced-netmap
+    /// simulation) until `reveal(tailscaleId:)`.
+    public func join(
+        tailscaleId: String, hostname: String, hidden: Bool = false
+    ) -> LoopbackBackend {
         let ip = "100.64.0.\(nextIP)"
         nextIP += 1
-        let node = Node(tailscaleId: tailscaleId, hostname: hostname, ip: ip, online: true)
+        let node = Node(
+            tailscaleId: tailscaleId, hostname: hostname, ip: ip, online: true, hidden: hidden)
         nodes[tailscaleId] = node
         let backend = LoopbackBackend(network: self, tailscaleId: tailscaleId, ip: ip)
         nodes[tailscaleId]?.backend = backend
-        // Announce to everyone else.
+        if !hidden {
+            announce(tailscaleId)
+        }
+        return backend
+    }
+
+    /// Make a hidden node visible: it enters snapshots and everyone gets
+    /// the netmap upsert (the "later Layer 3 event" of RFC 024 §7.2).
+    public func reveal(tailscaleId: String) {
+        guard nodes[tailscaleId]?.hidden == true else { return }
+        nodes[tailscaleId]?.hidden = false
+        announce(tailscaleId)
+    }
+
+    private func announce(_ tailscaleId: String) {
         for (id, other) in nodes where id != tailscaleId {
             if let peer = backendPeer(for: tailscaleId) {
                 other.backend?.push(.peerUpsert(peer))
             }
         }
-        return backend
     }
 
     /// Remove a node from the tailnet (peers observe `peerLeft`).
@@ -62,7 +84,7 @@ public actor LoopbackNetwork {
     }
 
     func backendPeer(for tailscaleId: String) -> BackendPeer? {
-        guard let node = nodes[tailscaleId] else { return nil }
+        guard let node = nodes[tailscaleId], !node.hidden else { return nil }
         return BackendPeer(
             tailscaleId: node.tailscaleId,
             hostname: node.hostname,
@@ -247,7 +269,7 @@ public actor LoopbackBackend: NetworkBackend {
         await network.whoIs(remoteEndpoint: remoteEndpoint)
     }
 
-    public func makeURLSession() async throws -> URLSession {
+    public func makeURLSession(configuration: URLSessionConfiguration) async throws -> URLSession {
         throw MeshError.transport("LoopbackBackend does not provide URLSession")
     }
 }

@@ -63,6 +63,8 @@ fn envelope_message_fixture_decodes() {
     assert_eq!(env.payload["text"], "héllo wörld — 你好");
     assert_eq!(env.payload["count"], 42);
     assert_eq!(env.payload["big"], 1_752_675_000_000_u64);
+    // Above i64::MAX — serde_json's u64 arm; Swift decodes this as .uint.
+    assert_eq!(env.payload["huge"], u64::MAX);
     assert_eq!(env.payload["pi"], 3.5);
     assert_eq!(env.payload["ok"], true);
     assert!(env.payload["nothing"].is_null());

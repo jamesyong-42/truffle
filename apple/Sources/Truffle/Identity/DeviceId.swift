@@ -74,25 +74,42 @@ public struct DeviceId: Hashable, Sendable, CustomStringConvertible {
     public static let stateFileName = "device-id.txt"
 
     /// Load the persisted device ULID from `stateDirectory`, or generate and
-    /// persist a fresh one. Creates the directory if needed.
+    /// persist a fresh one. Creates the directory if needed and excludes it
+    /// from backup (RFC 024 §14 — the directory also holds Tailscale keys).
     ///
-    /// `ephemeral` Tailscale state never rotates this identity (RFC 024 §7.1);
-    /// the ULID changes only when this file is explicitly deleted.
+    /// A file that exists but does not parse is an ERROR, never a silent
+    /// rotation — matching desktop (`node.rs`: "device-id.txt contains an
+    /// invalid ULID"). Durable identity must fail loudly (RFC 024 §7.1).
     public static func loadOrCreate(stateDirectory: URL) throws -> DeviceId {
         let fm = FileManager.default
         let file = stateDirectory.appendingPathComponent(stateFileName)
-        if let data = try? Data(contentsOf: file),
-            let text = String(data: data, encoding: .utf8)
-        {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let id = try? DeviceId(parsing: trimmed) {
-                return id
+        if fm.fileExists(atPath: file.path) {
+            let data = try Data(contentsOf: file)
+            let text = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            do {
+                return try DeviceId(parsing: text)
+            } catch {
+                throw MeshError.invalidPayload(
+                    "device-id.txt at \(file.path) contains an invalid ULID: '\(text)'")
             }
         }
         try fm.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        excludeFromBackup(stateDirectory)
         let fresh = DeviceId.generate()
         try Data(fresh.value.utf8).write(to: file, options: .atomic)
         return fresh
+    }
+
+    /// Best-effort `NSURLIsExcludedFromBackupKey` on the state directory —
+    /// private keys and identity must not round-trip through iCloud/Finder
+    /// backups (RFC 024 §14). Best-effort because some volumes (e.g. tmpfs
+    /// in tests) do not support the resource key.
+    private static func excludeFromBackup(_ directory: URL) {
+        var url = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
     }
 
     // MARK: Codec

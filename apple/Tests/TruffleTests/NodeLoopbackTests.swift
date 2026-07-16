@@ -3,6 +3,37 @@ import Testing
 
 @testable import Truffle
 
+/// A frame transport whose endpoints silently drop outgoing Pong frames —
+/// simulates a peer that stops answering keepalives (heartbeat tests).
+struct PongDroppingTransport: FrameTransport {
+    struct DroppingFrames: SessionFrames {
+        let inner: any SessionFrames
+
+        func send(_ frame: SessionFrame) async throws {
+            if case .pong = frame { return }
+            try await inner.send(frame)
+        }
+
+        func receive() async throws -> SessionFrame? {
+            try await inner.receive()
+        }
+
+        func close(code: UInt16, reason: String) async {
+            await inner.close(code: code, reason: reason)
+        }
+    }
+
+    private let base = LengthPrefixFrameTransport()
+
+    func clientFrames(over connection: any MeshConnection) async throws -> any SessionFrames {
+        DroppingFrames(inner: try await base.clientFrames(over: connection))
+    }
+
+    func serverFrames(over connection: any MeshConnection) async throws -> any SessionFrames {
+        DroppingFrames(inner: try await base.serverFrames(over: connection))
+    }
+}
+
 /// End-to-end tests: two `MeshNode`s over a shared `LoopbackNetwork`
 /// (RFC 024 §13 — mock-provider integration level).
 @Suite struct NodeLoopbackTests {
@@ -24,12 +55,14 @@ import Testing
         appId: String,
         deviceName: String,
         advertisedHostname: String? = nil,
+        hidden: Bool = false,
         identityPolicy: Handshake.IdentityPolicy = .failClosed
     ) async throws -> (MeshNode, URL) {
         let derived = Hostname.tailscaleHostname(
             appId: try AppId(parsing: appId), deviceName: DeviceName(deviceName))
         let hostname = advertisedHostname ?? derived
-        let backend = await network.join(tailscaleId: tailscaleId, hostname: hostname)
+        let backend = await network.join(
+            tailscaleId: tailscaleId, hostname: hostname, hidden: hidden)
         let dir = tempDir()
         let node = try await MeshNode.start(
             MeshConfiguration(
@@ -320,6 +353,163 @@ import Testing
             to: bobPeer, namespace: "chat", payload: ChatPayload(text: "hi again"))
         let confirmed = try await alice.peer("ts-b")
         #expect(confirmed?.deviceId != nil)
+
+        await alice.stop()
+        await bob.stop()
+    }
+
+    @Test func droppedSubscriptionHandleAutoCancels() async throws {
+        let network = LoopbackNetwork()
+        let (alice, dirA) = try await startNode(
+            network: network, tailscaleId: "ts-a", appId: "demo", deviceName: "Alice")
+        let (bob, dirB) = try await startNode(
+            network: network, tailscaleId: "ts-b", appId: "demo", deviceName: "Bob")
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        let inbox = Mailbox<MeshMessage>()
+        // Register a handler and immediately DROP the handle: the node holds
+        // it weakly, so release deinits + auto-cancels it (RFC 024 §6.4).
+        do {
+            _ = await bob.onMessage(namespace: "chat") { await inbox.put($0) }
+        }
+        // Keep a second, retained subscription on another namespace to prove
+        // delivery in general still works.
+        let keptInbox = Mailbox<MeshMessage>()
+        let kept = await bob.onMessage(namespace: "kept") { await keptInbox.put($0) }
+
+        guard let bobPeer = try await alice.peer("ts-b", waitMs: 2_000) else {
+            Issue.record("no peer")
+            return
+        }
+        try await alice.sendJSON(
+            to: bobPeer, namespace: "chat", payload: ChatPayload(text: "into the void"))
+        try await alice.sendJSON(
+            to: bobPeer, namespace: "kept", payload: ChatPayload(text: "delivered"))
+
+        // The retained subscription received its message...
+        let deliveredMessage = await keptInbox.take()
+        #expect(deliveredMessage != nil)
+        // ...while the dropped one never fired (its mailbox stays empty).
+        await inbox.finish()
+        let ghost = await inbox.take()
+        #expect(ghost == nil)
+
+        await kept.cancel()
+        await alice.stop()
+        await bob.stop()
+    }
+
+    @Test func provisionalEntrySurvivesSnapshotAndMergesLater() async throws {
+        let network = LoopbackNetwork()
+        let (alice, dirA) = try await startNode(
+            network: network, tailscaleId: "ts-a", appId: "demo", deviceName: "Alice")
+        defer { try? FileManager.default.removeItem(at: dirA) }
+
+        // Bob joins HIDDEN: dialable + WhoIs-resolvable, but absent from
+        // Alice's snapshots — his hello will race ahead of the netmap.
+        let (bob, dirB) = try await startNode(
+            network: network, tailscaleId: "ts-b", appId: "demo", deviceName: "Bob",
+            hidden: true)
+        defer { try? FileManager.default.removeItem(at: dirB) }
+
+        // Bob dials Alice (Bob sees Alice via his own snapshot).
+        guard let alicePeer = try await bob.peer("ts-a", waitMs: 2_000) else {
+            Issue.record("bob cannot see alice")
+            return
+        }
+        try await bob.sendJSON(to: alicePeer, namespace: "x", payload: ChatPayload(text: "."))
+
+        // Alice now has a provisional entry for Bob (hello-before-netmap).
+        guard let provisional = try await alice.peer("ts-b", waitMs: 2_000) else {
+            Issue.record("provisional entry missing")
+            return
+        }
+        #expect(provisional.deviceId != nil)
+        #expect(provisional.hostname.isEmpty)
+
+        // A full snapshot WITHOUT Bob must NOT reap the provisional entry
+        // (RFC 024 §7.2).
+        try await alice.refresh()
+        let afterSnapshot = try await alice.peer("ts-b")
+        #expect(afterSnapshot != nil)
+        #expect(afterSnapshot?.generation == provisional.generation)
+
+        // The netmap event finally arrives → merges into the SAME
+        // generation, now with Layer 3 metadata.
+        await network.reveal(tailscaleId: "ts-b")
+        var merged: Peer?
+        for _ in 0..<40 {
+            merged = try await alice.peer("ts-b")
+            if merged?.hostname.isEmpty == false { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(merged?.hostname.isEmpty == false)
+        #expect(merged?.generation == provisional.generation)
+
+        await alice.stop()
+        await bob.stop()
+    }
+
+    @Test func heartbeatTimeoutClosesDeadSession() async throws {
+        let network = LoopbackNetwork()
+        let tuning = SessionTuning(
+            handshakeTimeout: .seconds(2),
+            pingInterval: .milliseconds(50),
+            pongTimeout: .milliseconds(250))
+
+        let hostA = Hostname.tailscaleHostname(
+            appId: try AppId(parsing: "demo"), deviceName: DeviceName("Alice"))
+        let backendA = await network.join(tailscaleId: "ts-a", hostname: hostA)
+        let dirA = tempDir()
+        defer { try? FileManager.default.removeItem(at: dirA) }
+        let alice = try await MeshNode.start(
+            MeshConfiguration(
+                appId: "demo", deviceName: "Alice", stateDirectory: dirA,
+                auth: .existingState),
+            backend: backendA,
+            frameTransport: LengthPrefixFrameTransport(),
+            identityPolicy: .failClosed,
+            tuning: tuning)
+
+        // Bob's transport silently drops his outgoing Pongs: from Alice's
+        // side he is a peer that stops answering keepalives.
+        let hostB = Hostname.tailscaleHostname(
+            appId: try AppId(parsing: "demo"), deviceName: DeviceName("Bob"))
+        let backendB = await network.join(tailscaleId: "ts-b", hostname: hostB)
+        let dirB = tempDir()
+        defer { try? FileManager.default.removeItem(at: dirB) }
+        let bob = try await MeshNode.start(
+            MeshConfiguration(
+                appId: "demo", deviceName: "Bob", stateDirectory: dirB,
+                auth: .existingState),
+            backend: backendB,
+            frameTransport: PongDroppingTransport(),
+            identityPolicy: .failClosed,
+            tuning: tuning)
+
+        let aliceEvents = await alice.events
+
+        guard let bobPeer = try await alice.peer("ts-b", waitMs: 2_000) else {
+            Issue.record("no peer")
+            return
+        }
+        try await alice.sendJSON(to: bobPeer, namespace: "chat", payload: ChatPayload(text: "hi"))
+
+        // Alice's heartbeat must detect the missing Pongs and close the
+        // session (RFC 024 §8.1 step 8) within a few timeout periods.
+        var sawTimeout = false
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        for await event in aliceEvents {
+            if case .health(let message) = event, message.contains("heartbeat timeout") {
+                sawTimeout = true
+                break
+            }
+            if ContinuousClock.now >= deadline { break }
+        }
+        #expect(sawTimeout)
 
         await alice.stop()
         await bob.stop()

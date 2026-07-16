@@ -45,6 +45,13 @@ only the prefix): transliteration uses `CFStringTransform` instead of
 
 ## Status vs RFC 024 phases
 
+**RFC 024 Phase 0 and Phase 1 exit criteria are NOT met** — those require
+real devices, a pinned TailscaleKit build, and live login flows. What exists
+here is the backend-agnostic product core and wire contracts, exercised end
+to end on macOS through an in-memory loopback backend. `MeshNode.start(_:)`
+(the production entry point) deliberately throws until the TailscaleKit
+backend lands.
+
 Done (this tree, tested on macOS via the loopback backend):
 
 - Identity: AppId validation, device ULID (`device-id.txt`, desktop-compatible),
@@ -52,11 +59,18 @@ Done (this tree, tested on macOS via the loopback backend):
 - Wire: hello v2 + envelope codecs with all desktop bounds; base64 `"bytes"`
   schema with 11 MiB cap; 15 MiB envelope bound
 - Session: role-ordered handshake, 4001/4002/4003 on the wire, ≤16 control
-  frames, 5s/10s deadlines, fail-closed WhoIs with explicit test-only opt-out
-- Mesh: `MeshNode` (start contract, listener supervision with backoff,
-  events streams with bounded buffers), generation-checked `Peer`/`PeerRef`
-  (peerGone on stale refs), desktop-parity peer query resolution, `send` /
-  `sendBytes` / `sendJSON` / `onMessage` with bounded serial subscriptions
+  frames, full-exchange 10s deadline, 256-handshake concurrency cap,
+  Ping/Pong heartbeat with pong-timeout closure, token-guarded session
+  replacement (no supersede races), fail-closed WhoIs with explicit
+  test-only opt-out
+- Mesh: `MeshNode` (start contract with backend cleanup on failed
+  bootstrap, listener supervision with backoff, awaited shutdown, events
+  streams with bounded buffers + single lag notice), generation-checked
+  `Peer`/`PeerRef` (peerGone on stale refs), provisional entries preserved
+  across snapshots until netmap merge, desktop-parity peer query
+  resolution, `send` / `sendBytes` / `sendJSON` (u64-exact JSON, outbound
+  15 MiB bound) / `onMessage` with bounded serial subscriptions that
+  auto-cancel when the handle is released
 
 Pending (Phase 0 device work — needs TailscaleKit + hardware):
 

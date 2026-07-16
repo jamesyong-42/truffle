@@ -135,6 +135,8 @@ func fixture(_ name: String) throws -> Data {
         #expect(env.payload["text"]?.stringValue == "héllo wörld — 你好")
         #expect(env.payload["count"] == .int(42))
         #expect(env.payload["big"] == .int(1_752_675_000_000))
+        // Above Int64.max → exact unsigned, matching serde_json's u64 arm.
+        #expect(env.payload["huge"] == .uint(18_446_744_073_709_551_615))
         #expect(env.payload["pi"] == .double(3.5))
         #expect(env.payload["ok"] == .bool(true))
         #expect(env.payload["nothing"] == JSONValue.null)
@@ -171,6 +173,29 @@ func fixture(_ name: String) throws -> Data {
         #expect(throws: MeshError.payloadTooLarge(actual: 64, limit: 32)) {
             try EnvelopeCodec.decode(big, maxBytes: 32)
         }
+    }
+
+    @Test func enforcesEnvelopeBoundOutboundToo() {
+        // RFC 024 §8.3: the 15 MiB bound applies to emission as well —
+        // never rely on the transport's 16 MiB limit to catch it later.
+        let env = Envelope(
+            namespace: "chat", msgType: "message",
+            payload: .string(String(repeating: "x", count: 256)))
+        #expect(throws: MeshError.self) {
+            try EnvelopeCodec.encode(env, maxBytes: 128)
+        }
+    }
+
+    @Test func uintRoundTripsExactly() throws {
+        // UInt64.max must re-encode as the exact integer, never in
+        // scientific notation via a Double detour.
+        let env = Envelope(
+            namespace: "n", msgType: "message",
+            payload: .object(["huge": .uint(UInt64.max)]))
+        let encoded = try EnvelopeCodec.encode(env)
+        #expect(String(decoding: encoded, as: UTF8.self).contains("18446744073709551615"))
+        let decoded = try EnvelopeCodec.decode(encoded)
+        #expect(decoded.payload["huge"] == .uint(UInt64.max))
     }
 
     @Test func enforcesLocalEmissionBounds() {
