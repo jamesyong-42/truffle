@@ -1,0 +1,11 @@
+{
+  "kind": "hello",
+  "version": 2,
+  "identity": {
+    "app_id": "playground",
+    "device_id": "01J4K9M2Z8AB3RNYQPW6H5TC0X",
+    "device_name": "Alice's MacBook",
+    "os": "darwin",
+    "tailscale_id": "node-abc"
+  }
+}

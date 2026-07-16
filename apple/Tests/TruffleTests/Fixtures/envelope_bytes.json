@@ -1,0 +1,6 @@
+{
+  "namespace": "ft",
+  "msg_type": "bytes",
+  "payload": { "encoding": "base64", "data": "aGVsbG8gdHJ1ZmZsZQ==" },
+  "timestamp": 1752675000000
+}

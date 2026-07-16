@@ -1,0 +1,9 @@
+{
+  "namespace": "chat",
+  "msg_type": "message",
+  "payload": { "text": "forward compat" },
+  "timestamp": 1752675000000,
+  "v": 99,
+  "from_device_id": "SHOULD-BE-IGNORED",
+  "future_field": { "anything": true }
+}

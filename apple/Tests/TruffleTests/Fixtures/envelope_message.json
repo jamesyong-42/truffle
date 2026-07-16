@@ -1,0 +1,14 @@
+{
+  "namespace": "chat",
+  "msg_type": "message",
+  "payload": {
+    "text": "héllo wörld — 你好",
+    "count": 42,
+    "big": 1752675000000,
+    "pi": 3.5,
+    "ok": true,
+    "nothing": null,
+    "nested": { "deep": [1, 2, 3] }
+  },
+  "timestamp": 1752675000000
+}
