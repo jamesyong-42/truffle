@@ -6,6 +6,7 @@ REVISION="5e89501def80a6579ca5d0f9a02f336be62b8f2e"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="${TAILSCALE_SOURCE_DIR:-$ROOT/.vendor/libtailscale}"
 DESTINATION="$ROOT/Vendor/TailscaleKit.xcframework"
+PATCH="$ROOT/patches/libtailscale-remote-address-fd.patch"
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 export DEVELOPER_DIR
 export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
@@ -33,9 +34,18 @@ if [[ -n "$(git -C "$SOURCE" status --porcelain)" ]]; then
   exit 1
 fi
 
-echo "Building TailscaleKit from $REVISION"
-make -C "$SOURCE/swift" ios-fat
-ARTIFACT="$SOURCE/swift/build/Build/Products/Release-iphonefat/TailscaleKit.xcframework"
+BUILD_SOURCE="$(mktemp -d "$ROOT/.vendor/libtailscale-build.XXXXXX")"
+cleanup() {
+  git -C "$SOURCE" worktree remove --force "$BUILD_SOURCE" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+git -C "$SOURCE" worktree add --detach "$BUILD_SOURCE" "$REVISION"
+git -C "$BUILD_SOURCE" apply --check "$PATCH"
+git -C "$BUILD_SOURCE" apply "$PATCH"
+
+echo "Building patched TailscaleKit from $REVISION"
+make -C "$BUILD_SOURCE/swift" ios-fat
+ARTIFACT="$BUILD_SOURCE/swift/build/Build/Products/Release-iphonefat/TailscaleKit.xcframework"
 if [[ ! -d "$ARTIFACT" ]]; then
   echo "error: build did not produce $ARTIFACT" >&2
   exit 1
@@ -47,4 +57,3 @@ cp "$SOURCE/LICENSE" "$ROOT/Vendor/TAILSCALE-LICENSE"
 
 echo "Materialized $DESTINATION"
 find "$DESTINATION" -type f -maxdepth 5 -print | sort | xargs shasum -a 256
-

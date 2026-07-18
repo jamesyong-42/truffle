@@ -1,0 +1,85 @@
+diff --git a/tailscale.go b/tailscale.go
+--- a/tailscale.go
++++ b/tailscale.go
+@@ -237,19 +237,28 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
+ 			}
+ 			rights := syscall.UnixRights(int(connFd))
+-			err = syscall.Sendmsg(sp, nil, rights, nil, 0)
++
++			// SCM_RIGHTS duplicates the descriptor in the receiving process, so
++			// the integer returned by Recvmsg is not required to equal connFd.
++			// Carry the sender-side key as ordinary payload so TsnetAccept can
++			// remap the authenticated remote address to the received descriptor.
++			sourceFD := []byte(strconv.Itoa(int(connFd)))
++
++			// Map before Sendmsg so a receiver cannot race ahead of this write.
++			listener.mu.Lock()
++			listener.m[connFd] = netConn.RemoteAddr()
++			listener.mu.Unlock()
++			err = syscall.Sendmsg(sp, sourceFD, rights, nil, 0)
+ 			if err != nil {
++				listener.mu.Lock()
++				delete(listener.m, connFd)
++				listener.mu.Unlock()
+ 				// We handle sp being closed in the read goroutine above.
+ 				if s.s.Logf != nil {
+ 					s.s.Logf("libtailscale.accept: sendmsg failed: %v", err)
+ 				}
+ 				netConn.Close()
+ 				// fallthrough to close connFd, then continue Accept()ing
+ 			}
+-
+-			// map the connection to the remote address
+-			listener.mu.Lock()
+-			listener.m[connFd] = netConn.RemoteAddr()
+-			listener.mu.Unlock()
+ 
+ 			syscall.Close(int(connFd)) // now owned by recvmsg
+ 		}
+@@ -267,7 +276,8 @@ func TsnetAccept(listenerFd C.int, connOut *C.int) C.int {
+ 	}
+ 
+ 	buf := make([]byte, unix.CmsgLen(int(unsafe.Sizeof((C.int)(0)))))
+-	_, oobn, _, _, err := syscall.Recvmsg(int(listenerFd), nil, buf, 0)
++	sourceFDBytes := make([]byte, 32)
++	n, oobn, _, _, err := syscall.Recvmsg(int(listenerFd), sourceFDBytes, buf, 0)
+ 	if err != nil {
+ 		return ln.s.recErr(err)
+ 	}
+@@ -286,7 +296,27 @@ func TsnetAccept(listenerFd C.int, connOut *C.int) C.int {
+ 	if len(fds) != 1 {
+ 		return ln.s.recErr(fmt.Errorf("libtailscale: got %d FDs, want 1", len(fds)))
+ 	}
+-	*connOut = (C.int)(fds[0])
++	receivedFD := C.int(fds[0])
++	sourceFDValue, err := strconv.ParseInt(string(sourceFDBytes[:n]), 10, 32)
++	if err != nil {
++		syscall.Close(fds[0])
++		return ln.s.recErr(fmt.Errorf("libtailscale: parse source FD: %w", err))
++	}
++	sourceFD := C.int(sourceFDValue)
++
++	ln.mu.Lock()
++	remoteAddr, ok := ln.m[sourceFD]
++	if ok {
++		delete(ln.m, sourceFD)
++		ln.m[receivedFD] = remoteAddr
++	}
++	ln.mu.Unlock()
++	if !ok {
++		syscall.Close(fds[0])
++		return ln.s.recErr(fmt.Errorf("libtailscale: no remote address for source FD %d", sourceFD))
++	}
++
++	*connOut = receivedFD
+ 
+ 	return 0
+ }
+@@ -362,6 +392,7 @@ func TsnetGetRemoteAddr(listener C.int, conn C.int, buf *C.char, buflen C.size_
+ 		out[0] = '\x00'
+ 		return C.EBADF
+ 	}
++	delete(l.m, conn)
+ 
+ 	ip := extractIP(addr.String())
+ 

@@ -36,6 +36,7 @@ docs/.vitepress/cache/
 
 # State directories
 .truffle-state/
+apple/.vendor/
 
 # OS
 .DS_Store

@@ -475,6 +475,22 @@ public actor MeshNode {
         subscriptions[namespace]?.removeAll { $0.id == id }
     }
 
+    /// Completes the authenticated Truffle hello without sending an
+    /// application message. The supplied peer snapshot is generation-checked
+    /// before dialing, and the returned snapshot contains the durable device
+    /// ID learned from the handshake.
+    public func confirmIdentity(of peer: Peer) async throws -> Peer {
+        let entry = try resolveLive(peer)
+        _ = try await session(for: entry)
+        guard let confirmed = entries[entry.tailscaleId],
+            confirmed.generation == entry.generation,
+            confirmed.identity != nil
+        else {
+            throw MeshError.protocolViolation("peer identity handshake completed without identity")
+        }
+        return makePeer(from: confirmed)
+    }
+
     // MARK: - Raw transport (RFC 024 §6.6 — Phase 1b surface)
 
     public func dial(to peer: Peer, port: UInt16) async throws -> any MeshConnection {

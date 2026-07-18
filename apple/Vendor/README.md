@@ -1,10 +1,21 @@
 # TailscaleKit provenance
 
-`TruffleTailscale` consumes an unmodified TailscaleKit XCFramework built from:
+`TruffleTailscale` consumes a TailscaleKit XCFramework built from:
 
 - upstream: `https://github.com/tailscale/libtailscale.git`
 - revision: `5e89501def80a6579ca5d0f9a02f336be62b8f2e`
-- patch set: none
+
+The materialization script applies the reviewed
+`apple/patches/libtailscale-remote-address-fd.patch` in a temporary detached
+worktree. Upstream stores an accepted connection's remote address under the
+sender-side descriptor before passing that descriptor through `SCM_RIGHTS`.
+The receiver gets a duplicate whose integer value may differ, causing
+`tailscale_getremoteaddr` to return `EBADF`. The patch carries the source key in
+the Unix-domain message, remaps the address to the received descriptor inside
+`tailscale_accept`, and consumes it after lookup. The pinned upstream `main`
+branch still contained the defect when this patch was added on 2026-07-18.
+- patch set: `libtailscale-remote-address-fd.patch` (SHA-256
+  `71423557bd0f0a901c31fb4cbee90c8cbaa5ab5588e1d8e87024fcfa887cad8a`)
 - license: BSD-3-Clause; see `TAILSCALE-LICENSE`
 - recorded build environment: Xcode 26.1 (17B55), Apple Swift 6.2.1,
   Go 1.25.6, Apple silicon macOS

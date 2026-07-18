@@ -74,6 +74,32 @@ struct PongDroppingTransport: FrameTransport {
         return (node, dir)
     }
 
+    @Test func confirmsIdentityWithoutApplicationTraffic() async throws {
+        let network = LoopbackNetwork()
+        let (alice, dirA) = try await startNode(
+            network: network, tailscaleId: "ts-a", appId: "demo", deviceName: "Alice")
+        let (bob, dirB) = try await startNode(
+            network: network, tailscaleId: "ts-b", appId: "demo", deviceName: "Bob")
+        defer {
+            try? FileManager.default.removeItem(at: dirA)
+            try? FileManager.default.removeItem(at: dirB)
+        }
+
+        guard let candidate = try await alice.peer("ts-b", waitMs: 2_000) else {
+            Issue.record("alice never discovered bob")
+            return
+        }
+        #expect(candidate.deviceId == nil)
+
+        let confirmed = try await alice.confirmIdentity(of: candidate)
+        #expect(confirmed.ref == candidate.ref)
+        #expect(confirmed.generation == candidate.generation)
+        #expect(confirmed.deviceId != nil)
+
+        await alice.stop()
+        await bob.stop()
+    }
+
     @Test func exchangesJSONBothDirectionsWithAttribution() async throws {
         let network = LoopbackNetwork()
         let (alice, dirA) = try await startNode(
