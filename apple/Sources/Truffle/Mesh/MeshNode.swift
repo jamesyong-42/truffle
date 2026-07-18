@@ -778,6 +778,12 @@ public actor MeshNode {
                 self.listener = listener
                 backoffMs = 100
                 await acceptLoop(listener)
+                // `acceptLoop` returning means this listener can no longer
+                // accept. Close it before asking the backend to bind the same
+                // port again; embedded tsnet keeps the address registered
+                // until the listener descriptor is closed.
+                await listener.close()
+                self.listener = nil
             } catch {
                 emit(.health("listener error: \(error); retrying"))
             }
