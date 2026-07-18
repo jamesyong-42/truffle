@@ -7,12 +7,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="${TAILSCALE_SOURCE_DIR:-$ROOT/.vendor/libtailscale}"
 DESTINATION="$ROOT/Vendor/TailscaleKit.xcframework"
 PATCH="$ROOT/patches/libtailscale-remote-address-fd.patch"
+PRIVACY_MANIFEST="$ROOT/Vendor/TailscaleKit-PrivacyInfo.xcprivacy"
 DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 export DEVELOPER_DIR
 export PATH="$DEVELOPER_DIR/usr/bin:$PATH"
 
 if [[ ! -d "$DEVELOPER_DIR" ]]; then
   echo "error: full Xcode is required; set DEVELOPER_DIR" >&2
+  exit 1
+fi
+if [[ ! -f "$PRIVACY_MANIFEST" ]]; then
+  echo "error: missing reviewed privacy manifest $PRIVACY_MANIFEST" >&2
   exit 1
 fi
 
@@ -53,6 +58,16 @@ fi
 
 mkdir -p "$ROOT/Vendor"
 ditto "$ARTIFACT" "$DESTINATION"
+framework_count=0
+for framework in "$DESTINATION"/*/TailscaleKit.framework; do
+  [[ -d "$framework" ]] || continue
+  cp "$PRIVACY_MANIFEST" "$framework/PrivacyInfo.xcprivacy"
+  ((framework_count += 1))
+done
+if [[ "$framework_count" -ne 2 ]]; then
+  echo "error: expected two TailscaleKit framework slices, found $framework_count" >&2
+  exit 1
+fi
 cp "$SOURCE/LICENSE" "$ROOT/Vendor/TAILSCALE-LICENSE"
 
 echo "Materialized $DESTINATION"
