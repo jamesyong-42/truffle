@@ -11,7 +11,7 @@ of the desktop sidecar.
 |---|---|
 | `Truffle` | Product core: identity (AppId / ULID / hostname slug), wire codecs (hello v2, envelope, byte payloads), session handshake + close codes, generation-checked peer registry, `MeshNode` actor, `NetworkBackend` seam, loopback test backend |
 | `TruffleSwiftUI` | `MeshModel` (@Observable — RFC 024 §6.7) + `AuthSafariView` for the interactive login sheet |
-| `TruffleTailscale` | Layer 0–1 (libtailscale / TailscaleKit glue). The production `TailscaleKitBackend` compiles only when `TailscaleKit.xcframework` is wired up (`#if canImport(TailscaleKit)`) |
+| `TruffleTailscale` | Production Layer 0–1: pinned TailscaleKit, login/status/IPN supervision, full-duplex sockets, fail-closed LocalAPI WhoIs, SOCKS-backed URLSession, and `MeshNode.startTailscale` |
 
 An iOS example lives in `Examples/MeshChatDemo/` — a SwiftUI chat app over an
 in-process demo mesh (your node + two bot peers on `LoopbackNetwork`); see
@@ -24,6 +24,10 @@ cd apple
 swift build
 # Tests need swift-testing, which CommandLineTools does not bundle:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+
+# Enable the real iOS runtime (builds pinned libtailscale, then exposes the
+# conditional TailscaleKit binary target):
+./scripts/materialize-tailscalekit.sh
 ```
 
 Stick to one toolchain per `.build` directory: CommandLineTools and Xcode may
@@ -48,16 +52,32 @@ safe because a node only derives its *own* hostname and remote nodes validate
 only the prefix): transliteration uses `CFStringTransform` instead of
 `deunicode`, and the slug fallback hash is SHA-256 instead of BLAKE3.
 
+## Production startup
+
+Import `TruffleTailscale`, materialize the pinned XCFramework, and start with:
+
+```swift
+let node = try await MeshNode.startTailscale(
+    MeshConfiguration(
+        appId: "ghosttea",
+        deviceName: UIDevice.current.name,
+        auth: .interactive { url in /* present AuthSafariView(url:) */ }
+    )
+)
+```
+
+The explicit name keeps `Truffle` independent of the binary runtime and avoids
+a SwiftPM target cycle. `MeshNode.start(_:backend:frameTransport:)` remains the
+dependency-injection entry point for tests and custom backends.
+
 ## Status vs RFC 024 phases
 
-**RFC 024 Phase 0 and Phase 1 exit criteria are NOT met** — those require
-real devices, a pinned TailscaleKit build, and live login flows. What exists
-here is the backend-agnostic product core and wire contracts, exercised end
-to end on macOS through an in-memory loopback backend. `MeshNode.start(_:)`
-(the production entry point) deliberately throws until the TailscaleKit
-backend lands.
+The package implementation for Phase 0 and Phase 1 is present and builds for
+generic iOS device and simulator. Release qualification still requires the
+RFC's live two-device login, long-idle accept, cancellation, and desktop interop
+matrix; those are device gates, not alternate code paths.
 
-Done (this tree, tested on macOS via the loopback backend):
+Done:
 
 - Identity: AppId validation, device ULID (`device-id.txt`, desktop-compatible),
   DeviceName, 10-step hostname slug + `truffle-{appId}-{slug}` composition
@@ -76,19 +96,18 @@ Done (this tree, tested on macOS via the loopback backend):
   resolution, `send` / `sendBytes` / `sendJSON` (u64-exact JSON, outbound
   15 MiB bound) / `onMessage` with bounded serial subscriptions that
   auto-cancel when the handle is released
+- Production runtime: pinned/checksummed build provenance and license,
+  full-duplex fd adoption with blocking work off the cooperative executor,
+  cancellable listener, RFC 6455 `/ws` client/server roles, LocalAPI WhoIs,
+  IPN restart + status polling, interactive auth events, and URLSession proxy
 
-Pending (Phase 0 device work — needs TailscaleKit + hardware):
+Pending release gates:
 
-- Pinned, checksummed `TailscaleKit.xcframework` build (RFC 024 §5.4)
-- Full-duplex stream adapter + RFC 6455 `/ws` adoption (§5.5) — sessions
-  currently run over an in-memory frame transport in tests only; the
-  `FrameTransport` seam is where the WebSocket adapter lands
-- `TailscaleKitBackend`: IPN bus supervisor + `backendStatus` polling +
-  LocalAPI WhoIs (extract from
-  `project100/research/tailscale/ios-prototype`: `TailscaleSession`,
-  `BusConsumer`)
-- Interactive auth presentation (`SafariView` → `TruffleSwiftUI`)
-- `urlSession()` over the embedded SOCKS proxy
+- Run login, bidirectional raw stream, WhoIs, >60-second idle accept, and
+  cancellation probes on physical devices
+- Run Swift↔desktop JSON/bytes/attribution/app-mismatch interop matrix
+- Migrate the research prototype and example chat from loopback to the
+  production startup API
 
 ## Reserved port
 
