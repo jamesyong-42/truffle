@@ -6,18 +6,19 @@
 // on TailscaleKit and builds/tests on macOS with plain SwiftPM.
 //
 // The `TruffleTailscale` target hosts the L0–L1 runtime (libtailscale /
-// TailscaleKit glue). The TailscaleKit-dependent backend only compiles when
-// the TailscaleKit.xcframework is wired up (`#if canImport(TailscaleKit)`);
-// until then the target carries the backend-independent supervisor logic.
+// TailscaleKit glue). Its pinned XCFramework must be materialized before the
+// package is resolved so dependency wiring cannot vary with the caller's CWD.
 
-import Foundation
 import PackageDescription
 
 let tailscaleArtifactPath = "Vendor/TailscaleKit.xcframework"
-let hasTailscaleArtifact = FileManager.default.fileExists(atPath: tailscaleArtifactPath)
 
-var tailscaleDependencies: [Target.Dependency] = ["Truffle"]
-var packageTargets: [Target] = [
+let tailscaleDependencies: [Target.Dependency] = [
+    "Truffle",
+    .target(name: "TailscaleKit", condition: .when(platforms: [.iOS])),
+]
+let packageTargets: [Target] = [
+    .binaryTarget(name: "TailscaleKit", path: tailscaleArtifactPath),
     .target(
         name: "Truffle",
         path: "Sources/Truffle"
@@ -27,34 +28,24 @@ var packageTargets: [Target] = [
         dependencies: ["Truffle"],
         path: "Sources/TruffleSwiftUI"
     ),
-]
-
-if hasTailscaleArtifact {
-    tailscaleDependencies.append(
-        .target(name: "TailscaleKit", condition: .when(platforms: [.iOS])))
-    packageTargets.append(
-        .binaryTarget(name: "TailscaleKit", path: tailscaleArtifactPath))
-}
-
-packageTargets.append(
     .target(
         name: "TruffleTailscale",
         dependencies: tailscaleDependencies,
         path: "Sources/TruffleTailscale"
-    ))
-packageTargets.append(
+    ),
     .testTarget(
         name: "TruffleTests",
         dependencies: ["Truffle"],
         path: "Tests/TruffleTests",
         resources: [.copy("Fixtures")]
-    ))
+    ),
+]
 
 let package = Package(
     name: "Truffle",
     platforms: [
         .macOS(.v14),
-        .iOS(.v17),
+        .iOS("18.1"),
     ],
     products: [
         .library(name: "Truffle", targets: ["Truffle"]),
