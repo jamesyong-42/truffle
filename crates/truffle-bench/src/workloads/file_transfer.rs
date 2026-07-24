@@ -78,6 +78,7 @@ pub async fn run(args: Args, authkey: &str, out_dir: &str) -> anyhow_lite::Resul
     let src_dir = tempfile::TempDir::new()?;
     let dst_dir = tempfile::TempDir::new()?;
     let src_path = src_dir.path().join("payload.bin");
+    let dst_path = dst_dir.path().join("payload.bin");
     let content = make_payload(size as usize);
     tokio::fs::write(&src_path, &content).await?;
 
@@ -122,6 +123,16 @@ pub async fn run(args: Args, authkey: &str, out_dir: &str) -> anyhow_lite::Resul
             "  [{label}] iter {i:>2}: {} bytes in {:.3}s → {:.2} MB/s",
             r.bytes_transferred, secs, mb_per_sec
         );
+
+        // The receiver's production-safe default rejects overwriting an
+        // existing destination. Remove the completed output outside the timed
+        // interval so every benchmark iteration starts from the same state.
+        tokio::fs::remove_file(&dst_path).await.map_err(|e| {
+            anyhow_lite::Error(format!(
+                "failed to clean received file {} after iteration {i}: {e}",
+                dst_path.display()
+            ))
+        })?;
 
         if !is_warmup {
             let _ = latency_hist.record(elapsed.as_millis() as u64);

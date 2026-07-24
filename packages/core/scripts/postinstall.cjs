@@ -7,8 +7,9 @@
  * (npm integrity-protected). Fallback (e.g. `--no-optional`): download the
  * binary from GitHub Releases over HTTPS, then verify its SHA-256 against the
  * checksums shipped *inside this package* (`sidecar-checksums.json`). When a
- * checksum is present we fail closed on mismatch; when absent we warn loudly
- * that integrity could not be verified.
+ * checksum is present and correct the install continues. A missing or
+ * mismatched checksum is a hard failure: downloaded executables are never
+ * trusted without a package-pinned digest.
  *
  * This replaces the previous unverified `curl | chmod +x` fallback.
  */
@@ -31,6 +32,7 @@ const crypto = require('crypto');
 const GITHUB_REPO = 'jamesyong-42/truffle';
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPTS = 3;
+const MAX_REDIRECTS = 5;
 
 const PLATFORM_PACKAGES = {
   'darwin-arm64': '@vibecook/truffle-sidecar-darwin-arm64',
@@ -49,14 +51,35 @@ const GITHUB_ASSETS = {
   'win32-x64': 'tsnet-sidecar-windows-amd64.exe',
 };
 
-/** Download `url` to `dest` over HTTPS, following redirects, with a hard timeout. */
-function httpsDownload(url, dest, timeoutMs) {
+/** Best-effort removal for partial or rejected downloads. */
+function removeFile(path) {
+  try {
+    unlinkSync(path);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Download `url` to `dest` over HTTPS, following bounded redirects, with a hard timeout. */
+function httpsDownload(url, dest, timeoutMs, redirectsRemaining = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'truffle-postinstall' } }, (res) => {
       // GitHub release downloads redirect to a CDN — follow 3xx.
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        httpsDownload(res.headers.location, dest, timeoutMs).then(resolve, reject);
+        if (redirectsRemaining === 0) {
+          reject(new Error(`too many redirects (maximum ${MAX_REDIRECTS})`));
+          return;
+        }
+        const redirectUrl = new URL(res.headers.location, url);
+        if (redirectUrl.protocol !== 'https:') {
+          reject(new Error(`refusing insecure redirect to ${redirectUrl.protocol}`));
+          return;
+        }
+        httpsDownload(redirectUrl.toString(), dest, timeoutMs, redirectsRemaining - 1).then(
+          resolve,
+          reject,
+        );
         return;
       }
       if (res.statusCode !== 200) {
@@ -68,11 +91,7 @@ function httpsDownload(url, dest, timeoutMs) {
       res.pipe(file);
       file.on('finish', () => file.close((err) => (err ? reject(err) : resolve())));
       file.on('error', (err) => {
-        try {
-          unlinkSync(dest);
-        } catch {
-          /* ignore */
-        }
+        removeFile(dest);
         reject(err);
       });
     });
@@ -103,6 +122,19 @@ function loadExpectedChecksum(version, asset) {
   }
 }
 
+/** Return the pinned checksum, or throw before any network request is made. */
+function requireExpectedChecksum(version, asset) {
+  const checksum = loadExpectedChecksum(version, asset);
+  if (!checksum) {
+    throw new Error(
+      `SECURITY: no pinned checksum for truffle-v${version}/${asset}. ` +
+        'Refusing to download an unverified executable. Install with optionalDependencies enabled ' +
+        'or use a package release that includes this sidecar checksum.',
+    );
+  }
+  return checksum;
+}
+
 /** Release tags are `truffle-v{version}` (release-please monorepo tag scheme), NOT `v{version}`. */
 function buildDownloadUrl(version, asset) {
   return `https://github.com/${GITHUB_REPO}/releases/download/truffle-v${version}/${asset}`;
@@ -117,18 +149,35 @@ function assertChecksum(actual, expected, label) {
   }
 }
 
-async function main() {
-  const key = `${process.platform}-${process.arch}`;
+/** Resolve every platform-specific value together so unsupported targets fail closed. */
+function requirePlatformConfig(platform, arch) {
+  const key = `${platform}-${arch}`;
   const pkg = PLATFORM_PACKAGES[key];
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const binName = `sidecar-slim${ext}`;
-
-  if (!pkg) {
-    console.warn(
-      `[truffle] No prebuilt sidecar for ${key}. Build from source: cd packages/sidecar-slim && go build`,
+  const asset = GITHUB_ASSETS[key];
+  if (!pkg || !asset) {
+    throw new Error(
+      `No prebuilt sidecar is available for ${key}. ` +
+        'Build from source: cd packages/sidecar-slim && go build',
     );
+  }
+  return {
+    key,
+    pkg,
+    asset,
+    binName: platform === 'win32' ? 'sidecar-slim.exe' : 'sidecar-slim',
+  };
+}
+
+async function main() {
+  let config;
+  try {
+    config = requirePlatformConfig(process.platform, process.arch);
+  } catch (err) {
+    console.error(`[truffle] ${err.message}`);
+    process.exitCode = 1;
     return;
   }
+  const { pkg, asset, binName } = config;
 
   // Primary: was the platform optionalDependency installed?
   try {
@@ -152,12 +201,16 @@ async function main() {
   }
 
   // Fallback: download from GitHub Releases (verified).
-  const asset = GITHUB_ASSETS[key];
-  if (!asset) return;
-
   const version = require('../package.json').version;
   const url = buildDownloadUrl(version, asset);
-  const expected = loadExpectedChecksum(version, asset);
+  let expected;
+  try {
+    expected = requireExpectedChecksum(version, asset);
+  } catch (err) {
+    console.error(`[truffle] ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(`[truffle] Sidecar not found via npm. Downloading from GitHub Releases...`);
 
@@ -174,49 +227,46 @@ async function main() {
       downloaded = true;
       break;
     } catch (err) {
+      removeFile(dest);
       console.warn(`[truffle] Download attempt ${attempt}/${MAX_ATTEMPTS} failed: ${err.message}`);
     }
   }
 
   if (!downloaded) {
-    console.warn(`[truffle] Could not download sidecar binary.`);
-    console.warn(`[truffle] Download manually: ${url}`);
-    console.warn(
+    console.error(`[truffle] Could not download sidecar binary.`);
+    console.error(`[truffle] Download manually: ${url}`);
+    console.error(
       `[truffle] Or build from source: cd packages/sidecar-slim && go build -o bin/sidecar-slim`,
     );
+    process.exitCode = 1;
     return;
   }
 
   // Integrity check.
-  if (expected) {
-    const actual = await sha256File(dest);
-    try {
-      assertChecksum(actual, expected, `truffle-v${version}/${asset}`);
-    } catch (err) {
-      try {
-        unlinkSync(dest);
-      } catch {
-        /* ignore */
-      }
-      console.error(`[truffle] ${err.message} Deleted the download and refusing to install it.`);
-      process.exitCode = 1;
-      return;
-    }
-  } else {
-    console.warn(
-      `[truffle] WARNING: no pinned checksum for truffle-v${version}/${asset}; integrity NOT verified. ` +
-        `Prefer installing with optionalDependencies enabled.`,
-    );
+  const actual = await sha256File(dest);
+  try {
+    assertChecksum(actual, expected, `truffle-v${version}/${asset}`);
+  } catch (err) {
+    removeFile(dest);
+    console.error(`[truffle] ${err.message} Deleted the download and refusing to install it.`);
+    process.exitCode = 1;
+    return;
   }
 
   if (process.platform !== 'win32') {
     chmodSync(dest, 0o755);
   }
 
-  console.log(`[truffle] Sidecar downloaded${expected ? ' and verified' : ''}.`);
+  console.log('[truffle] Sidecar downloaded and verified.');
 }
 
-module.exports = { buildDownloadUrl, assertChecksum, loadExpectedChecksum };
+module.exports = {
+  buildDownloadUrl,
+  assertChecksum,
+  loadExpectedChecksum,
+  requireExpectedChecksum,
+  requirePlatformConfig,
+};
 
 if (require.main === module) {
   main().catch((err) => {

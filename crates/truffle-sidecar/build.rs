@@ -29,28 +29,28 @@ fn main() {
         "aarch64-unknown-linux-gnu" => ("tsnet-sidecar-linux-arm64", "sidecar-slim"),
         "x86_64-pc-windows-msvc" => ("tsnet-sidecar-windows-amd64.exe", "sidecar-slim.exe"),
         other => {
-            eprintln!(
-                "cargo:warning=truffle-sidecar: unsupported target {other}, skipping download"
+            panic!(
+                "truffle-sidecar: no verified prebuilt sidecar for target {other}. Set \
+                 TRUFFLE_SIDECAR_PATH to a trusted binary, or set \
+                 TRUFFLE_SIDECAR_SKIP_DOWNLOAD=1 to opt into resolving truffle-sidecar from PATH"
             );
-            println!("cargo:rustc-env=TRUFFLE_SIDECAR_PATH=truffle-sidecar");
-            return;
         }
     };
 
     // Look up the pinned checksum for this version/asset from the committed
-    // trust anchor. A malformed file is fatal; a missing entry only warns (so a
-    // freshly tagged release whose hash isn't committed yet still builds).
+    // trust anchor. A malformed file or missing entry is fatal: build scripts
+    // must never download and execute a binary whose digest was not shipped in
+    // the crate.
     println!("cargo:rerun-if-changed=sidecar-checksums.json");
     let expected =
         match lookup_checksum(include_str!("sidecar-checksums.json"), version, asset_name) {
-            Ok(v) => v,
+            Ok(Some(value)) => value,
+            Ok(None) => panic!(
+                "truffle-sidecar: SECURITY: no pinned checksum for {version}/{asset_name}. \
+                 Refusing to download an unverified executable"
+            ),
             Err(e) => panic!("truffle-sidecar: invalid sidecar-checksums.json: {e}"),
         };
-    if expected.is_none() {
-        println!(
-            "cargo:warning=truffle-sidecar: integrity NOT verified — no checksum entry for {version}/{asset_name} in sidecar-checksums.json"
-        );
-    }
 
     let sidecar_path = out_dir.join(bin_name);
 
@@ -59,26 +59,20 @@ fn main() {
     // file that no longer verifies (tampered, or a stale hash) is re-downloaded
     // rather than used.
     if sidecar_path.exists() {
-        let cached_ok = match &expected {
-            Some(exp) => match fs::read(&sidecar_path) {
-                Ok(bytes) => match verify_sha256(&bytes, exp) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!(
-                            "truffle-sidecar: cached sidecar failed integrity check ({e}); re-downloading"
-                        );
-                        false
-                    }
-                },
+        let cached_ok = match fs::read(&sidecar_path) {
+            Ok(bytes) => match verify_sha256(&bytes, &expected) {
+                Ok(()) => true,
                 Err(e) => {
                     eprintln!(
-                        "truffle-sidecar: could not read cached sidecar ({e}); re-downloading"
+                        "truffle-sidecar: cached sidecar failed integrity check ({e}); re-downloading"
                     );
                     false
                 }
             },
-            // No pinned checksum: preserve the previous cache-hit behavior.
-            None => true,
+            Err(e) => {
+                eprintln!("truffle-sidecar: could not read cached sidecar ({e}); re-downloading");
+                false
+            }
         };
         if cached_ok {
             println!(
@@ -95,7 +89,7 @@ fn main() {
 
     eprintln!("truffle-sidecar: downloading {url}");
 
-    match download(&url, &sidecar_path, expected.as_deref()) {
+    match download(&url, &sidecar_path, &expected) {
         Ok(()) => {
             #[cfg(unix)]
             set_executable(&sidecar_path);
@@ -107,12 +101,11 @@ fn main() {
             eprintln!("truffle-sidecar: downloaded to {}", sidecar_path.display());
         }
         Err(e) => {
-            eprintln!("cargo:warning=truffle-sidecar: failed to download sidecar: {e}");
-            eprintln!(
-                "cargo:warning=truffle-sidecar: set TRUFFLE_SIDECAR_PATH to provide it manually"
+            panic!(
+                "truffle-sidecar: failed to download the verified sidecar: {e}. Set \
+                 TRUFFLE_SIDECAR_PATH to a trusted binary, or set \
+                 TRUFFLE_SIDECAR_SKIP_DOWNLOAD=1 to explicitly use PATH"
             );
-            // Fall back to PATH lookup at runtime
-            println!("cargo:rustc-env=TRUFFLE_SIDECAR_PATH=truffle-sidecar");
         }
     }
 }
@@ -120,7 +113,7 @@ fn main() {
 fn download(
     url: &str,
     dest: &Path,
-    expected_sha256: Option<&str>,
+    expected_sha256: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = ureq::get(url).call()?;
 
@@ -133,19 +126,14 @@ fn download(
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut reader, &mut bytes)?;
 
-    // Integrity gate. A checksum mismatch is a HARD failure: we panic rather
-    // than return Err so it can never be swallowed by main()'s Err arm, which
-    // falls back to a bare "sidecar-slim" PATH lookup. Network/HTTP errors
-    // above stay as Err (retry / PATH fallback); tampered bytes must stop the
-    // build. Verified BEFORE writing so bad bytes never touch disk.
-    if let Some(exp) = expected_sha256 {
-        if let Err(e) = verify_sha256(&bytes, exp) {
-            panic!(
-                "truffle-sidecar: integrity check FAILED for {url}: {e}. Refusing to install the binary. If the release asset was legitimately rebuilt, update crates/truffle-sidecar/sidecar-checksums.json."
-            );
-        }
-        eprintln!("truffle-sidecar: sha256 verified for {url}");
+    // Integrity gate. Verified BEFORE writing so bad bytes never touch disk.
+    if let Err(e) = verify_sha256(&bytes, expected_sha256) {
+        return Err(format!(
+            "integrity check FAILED for {url}: {e}. Refusing to install the binary"
+        )
+        .into());
     }
+    eprintln!("truffle-sidecar: sha256 verified for {url}");
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;

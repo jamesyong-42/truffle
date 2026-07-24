@@ -11,6 +11,8 @@ use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::proxy::{ProxyEvent, ProxyStatus};
 use truffle_core::Node;
 
+use crate::subscription::NapiSubscription;
+
 // ---------------------------------------------------------------------------
 // NAPI types
 // ---------------------------------------------------------------------------
@@ -254,7 +256,8 @@ impl NapiProxy {
     /// Subscribe to proxy lifecycle events.
     ///
     /// The callback receives `NapiProxyEvent` objects whenever a proxy
-    /// starts, stops, or encounters an error.
+    /// starts, stops, or encounters an error. Call `close()` on the returned
+    /// subscription when the listener is no longer needed.
     #[napi(ts_args_type = "callback: (event: NapiProxyEvent) => void")]
     pub fn on_event(
         &self,
@@ -265,13 +268,10 @@ impl NapiProxy {
             Status,
             false,
         >,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let mut rx = self.node.proxy().subscribe();
 
-        // Task runs until the proxy event channel closes (when Node stops).
-        // The handle is intentionally not tracked because NapiProxy is a transient
-        // handle — the task's lifetime is bounded by the Node, not the handle.
-        napi::bindgen_prelude::spawn(async move {
+        let handle = napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -291,6 +291,6 @@ impl NapiProxy {
             }
         });
 
-        Ok(())
+        Ok(NapiSubscription::from_task(handle))
     }
 }

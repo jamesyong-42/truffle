@@ -9,6 +9,7 @@ import {
   type NapiQuicConnection,
   type NapiTcpSocket,
   type NapiTransferResult,
+  type NapiSubscription,
 } from '@vibecook/truffle-native';
 import { createNetNamespace, type TruffleNet } from './net.js';
 import { createHttpNamespace, type TruffleHttp } from './http.js';
@@ -109,12 +110,12 @@ export type MeshNode = Omit<
   /**
    * Peer-change subscription with interned `event.peer` when present.
    */
-  onPeerChange(callback: (event: MeshPeerEvent) => void): void;
+  onPeerChange(callback: (event: MeshPeerEvent) => void): () => void;
 
   /**
    * Namespace messages with `from` as an interned Peer when known.
    */
-  onMessage(namespace: string, callback: (msg: MeshNamespacedMessage) => void): void;
+  onMessage(namespace: string, callback: (msg: MeshNamespacedMessage) => void): () => void;
 };
 
 /** Native file-transfer handle with PeerLike parameters (RFC 022 §6.3). */
@@ -360,11 +361,13 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
   // to a handle and `left` carries one even when the app never calls
   // getPeers()/onPeerChange(). User callbacks fan out from here: the
   // registry must mutate exactly once per event, not once per subscriber.
-  const peerListeners: Array<(event: MeshPeerEvent) => void> = [];
+  const peerListeners = new Map<number, (event: MeshPeerEvent) => void>();
+  const messageSubscriptions = new Set<NapiSubscription>();
+  let nextPeerListenerId = 0;
   const nativeOnPeerChange = node.onPeerChange.bind(node);
-  nativeOnPeerChange((raw: NapiPeerEvent) => {
+  const registrySubscription = nativeOnPeerChange((raw: NapiPeerEvent) => {
     const ev = toMeshPeerEvent(registry, raw);
-    for (const cb of peerListeners) {
+    for (const cb of peerListeners.values()) {
       try {
         cb(ev);
       } catch (err) {
@@ -377,12 +380,16 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
     }
   });
   mesh.onPeerChange = (callback: (event: MeshPeerEvent) => void) => {
-    peerListeners.push(callback);
+    const listenerId = nextPeerListenerId++;
+    peerListeners.set(listenerId, callback);
+    return () => {
+      peerListeners.delete(listenerId);
+    };
   };
 
   const nativeOnMessage = node.onMessage.bind(node);
   mesh.onMessage = (namespace: string, callback: (msg: MeshNamespacedMessage) => void) => {
-    nativeOnMessage(namespace, (raw: NapiNamespacedMessage) => {
+    const subscription = nativeOnMessage(namespace, (raw: NapiNamespacedMessage) => {
       // Attribution is Tailscale id; intern when we already know the peer.
       const from: Peer | string = registry.getByTailscaleId(raw.from) ?? raw.from;
       callback({
@@ -393,6 +400,22 @@ export async function createMeshNode(options: CreateMeshNodeOptions): Promise<Me
         timestamp: raw.timestamp,
       });
     });
+    messageSubscriptions.add(subscription);
+    return () => {
+      messageSubscriptions.delete(subscription);
+      subscription.close();
+    };
+  };
+
+  const nativeStop = node.stop.bind(node);
+  mesh.stop = async () => {
+    registrySubscription.close();
+    peerListeners.clear();
+    for (const subscription of messageSubscriptions) {
+      subscription.close();
+    }
+    messageSubscriptions.clear();
+    await nativeStop();
   };
 
   if (onPeerChange) {

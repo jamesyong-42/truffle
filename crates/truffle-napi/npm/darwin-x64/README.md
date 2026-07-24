@@ -1,3 +1,7 @@
-# `@vibecook/truffle-native-darwin-x64`
+# @vibecook/truffle-native-darwin-x64
 
-This is the **x86_64-apple-darwin** binary for `@vibecook/truffle-native`
+Prebuilt Truffle native addon for macOS on x64. This implementation package is
+installed automatically by `@vibecook/truffle-native`; applications should not
+depend on it directly.
+
+See the [Truffle repository](https://github.com/jamesyong-42/truffle).

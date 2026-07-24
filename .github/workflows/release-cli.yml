@@ -112,7 +112,7 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --release --package truffle-cli --target ${{ matrix.rust_target }}
+          cargo build --locked --release --package truffle-cli --target ${{ matrix.rust_target }}
 
       - name: Build Go sidecar
         working-directory: packages/sidecar-slim

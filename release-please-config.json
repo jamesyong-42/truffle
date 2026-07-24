@@ -9,6 +9,10 @@
       "extra-files": [
         {
           "type": "generic",
+          "path": "Cargo.lock"
+        },
+        {
+          "type": "generic",
           "path": "Cargo.toml"
         },
         {
@@ -18,6 +22,10 @@
         {
           "type": "generic",
           "path": "crates/truffle-core/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/truffle-napi/Cargo.toml"
         },
         {
           "type": "generic",
@@ -31,6 +39,16 @@
           "type": "json",
           "path": "crates/truffle-napi/package.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "crates/truffle-napi/package-lock.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "crates/truffle-napi/package-lock.json",
+          "jsonpath": "$.packages[''].version"
         },
         {
           "type": "json",

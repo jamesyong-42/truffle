@@ -22,6 +22,19 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      - name: Pin checksums for this release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME##*v}"
+          mkdir -p /tmp/sidecar-assets
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'tsnet-sidecar-*' \
+            --dir /tmp/sidecar-assets
+          node scripts/update-sidecar-checksums.mjs "${VERSION}" /tmp/sidecar-assets
+          node scripts/check-release-versions.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -84,7 +97,8 @@ jobs:
             echo "Attempt $i/30 — not yet available, waiting 30s..."
             sleep 30
           done
-          echo "::warning::@vibecook/truffle-native@${VERSION} not found after 15 min. Publishing anyway."
+          echo "::error::@vibecook/truffle-native@${VERSION} not found after 15 min."
+          exit 1
 
       # Use `pnpm publish`, not `npm publish`, so that `workspace:*`
       # dependency specifiers get rewritten to concrete version ranges in
@@ -94,7 +108,17 @@ jobs:
       - name: Publish @vibecook/truffle
         run: |
           cd packages/core
-          pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks
+          VERSION=$(node -p "require('./package.json').version")
+          NPM_VIEW_ERROR=$(mktemp)
+          if npm view "@vibecook/truffle@${VERSION}" version >/dev/null 2>"$NPM_VIEW_ERROR"; then
+            echo "@vibecook/truffle@${VERSION} is already published; skipping."
+          elif ! grep -q 'E404' "$NPM_VIEW_ERROR"; then
+            cat "$NPM_VIEW_ERROR" >&2
+            echo "::error::Could not determine npm publication state; refusing to publish blindly."
+            exit 1
+          else
+            pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks
+          fi
 
       - name: Wait for @vibecook/truffle to be indexed
         run: sleep 30
@@ -102,4 +126,14 @@ jobs:
       - name: Publish @vibecook/truffle-react
         run: |
           cd packages/react
-          pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks
+          VERSION=$(node -p "require('./package.json').version")
+          NPM_VIEW_ERROR=$(mktemp)
+          if npm view "@vibecook/truffle-react@${VERSION}" version >/dev/null 2>"$NPM_VIEW_ERROR"; then
+            echo "@vibecook/truffle-react@${VERSION} is already published; skipping."
+          elif ! grep -q 'E404' "$NPM_VIEW_ERROR"; then
+            cat "$NPM_VIEW_ERROR" >&2
+            echo "::error::Could not determine npm publication state; refusing to publish blindly."
+            exit 1
+          else
+            pnpm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts --no-git-checks
+          fi

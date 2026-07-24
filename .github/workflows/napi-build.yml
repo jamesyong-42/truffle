@@ -83,7 +83,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd crates/truffle-napi
-          npm install
+          npm ci
 
       - name: Build native addon
         env:
@@ -131,7 +131,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd crates/truffle-napi
-          npm install
+          npm ci
 
       - name: Download artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -171,7 +171,10 @@ jobs:
       - name: Install dependencies
         run: |
           cd crates/truffle-napi
-          npm install
+          npm ci
+
+      - name: Verify release versions
+        run: node scripts/check-release-versions.mjs --allow-missing-checksums
 
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -201,8 +204,21 @@ jobs:
       - name: Publish platform packages
         run: |
           for pkg in crates/truffle-napi/npm/*/; do
-            echo "Publishing $(basename $pkg)..."
-            (cd "$pkg" && npm publish --provenance --access public --registry https://registry.npmjs.org)
+            (
+              cd "$pkg"
+              PACKAGE_NAME=$(node -p "require('./package.json').name")
+              VERSION=$(node -p "require('./package.json').version")
+              NPM_VIEW_ERROR=$(mktemp)
+              if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>"$NPM_VIEW_ERROR"; then
+                echo "${PACKAGE_NAME}@${VERSION} is already published; skipping."
+              elif ! grep -q 'E404' "$NPM_VIEW_ERROR"; then
+                cat "$NPM_VIEW_ERROR" >&2
+                echo "::error::Could not determine npm publication state; refusing to publish blindly."
+                exit 1
+              else
+                npm publish --provenance --access public --registry https://registry.npmjs.org
+              fi
+            )
           done
 
       # index.js/index.d.ts are generated + gitignored. Restore the freshly
@@ -224,4 +240,14 @@ jobs:
       - name: Publish main package
         run: |
           cd crates/truffle-napi
-          npm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts
+          VERSION=$(node -p "require('./package.json').version")
+          NPM_VIEW_ERROR=$(mktemp)
+          if npm view "@vibecook/truffle-native@${VERSION}" version >/dev/null 2>"$NPM_VIEW_ERROR"; then
+            echo "@vibecook/truffle-native@${VERSION} is already published; skipping."
+          elif ! grep -q 'E404' "$NPM_VIEW_ERROR"; then
+            cat "$NPM_VIEW_ERROR" >&2
+            echo "::error::Could not determine npm publication state; refusing to publish blindly."
+            exit 1
+          else
+            npm publish --provenance --access public --registry https://registry.npmjs.org --ignore-scripts
+          fi

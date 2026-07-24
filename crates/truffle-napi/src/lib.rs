@@ -12,6 +12,7 @@ pub mod peer;
 pub mod proxy;
 pub mod quic;
 pub mod raw_socket;
+pub mod subscription;
 pub mod synced_store;
 pub mod types;
 pub mod udp_socket;

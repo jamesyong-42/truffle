@@ -36,16 +36,18 @@ export declare class NapiFileTransfer {
    *
    * The callback receives `(offer, responder)` — call `responder.accept(path)`
    * or `responder.reject(reason)` to handle the offer. If neither is called
-   * within 60 seconds, the offer is auto-rejected.
+   * within 60 seconds, the offer is auto-rejected. Call `close()` on the
+   * returned subscription to stop receiving offers.
    */
-  onOffer(callback: (offer: FileOffer, responder: NapiOfferResponder) => void): void
+  onOffer(callback: (offer: FileOffer, responder: NapiOfferResponder) => void): NapiSubscription
   /**
    * Subscribe to file transfer events.
    *
    * The callback receives `NapiFileTransferEvent` objects for all
    * transfer lifecycle events (hashing, progress, completed, failed, etc.).
+   * Call `close()` on the returned subscription to stop receiving events.
    */
-  onEvent(callback: (event: FileTransferEvent) => void): void
+  onEvent(callback: (event: FileTransferEvent) => void): NapiSubscription
   /** Set the maximum allowed transfer size in bytes. */
   setMaxTransferSize(bytes: number): void
   /**
@@ -229,15 +231,17 @@ export declare class NapiNode {
    * Subscribe to peer change events.
    *
    * The callback receives `NapiPeerEvent` objects whenever peers
-   * join, leave, connect, disconnect, or update.
+   * join, leave, connect, disconnect, or update. Call `close()` on the
+   * returned subscription to stop receiving events.
    */
-  onPeerChange(callback: (event: PeerEvent) => void): void
+  onPeerChange(callback: (event: PeerEvent) => void): NapiSubscription
   /**
    * Subscribe to messages on a specific namespace.
    *
-   * The callback receives `NapiNamespacedMessage` objects.
+   * The callback receives `NapiNamespacedMessage` objects. Call `close()`
+   * on the returned subscription to stop receiving messages.
    */
-  onMessage(namespace: string, callback: (msg: NamespacedMessage) => void): void
+  onMessage(namespace: string, callback: (msg: NamespacedMessage) => void): NapiSubscription
   /** Get a `NapiFileTransfer` handle for file transfer operations. */
   fileTransfer(): NapiFileTransfer
   /** Get a `NapiProxy` handle for reverse proxy operations. */
@@ -285,9 +289,10 @@ export declare class NapiProxy {
    * Subscribe to proxy lifecycle events.
    *
    * The callback receives `NapiProxyEvent` objects whenever a proxy
-   * starts, stops, or encounters an error.
+   * starts, stops, or encounters an error. Call `close()` on the returned
+   * subscription when the listener is no longer needed.
    */
-  onEvent(callback: (event: NapiProxyEvent) => void): void
+  onEvent(callback: (event: NapiProxyEvent) => void): NapiSubscription
 }
 
 /**
@@ -366,6 +371,18 @@ export declare class NapiQuicStream {
 }
 
 /**
+ * A live native callback subscription.
+ *
+ * Call `close()` when the listener is no longer needed. Closing is
+ * idempotent. For backwards compatibility, ignoring the returned handle
+ * leaves the listener active until its owning node/store stops.
+ */
+export declare class NapiSubscription {
+  /** Stop forwarding events to the callback. Idempotent. */
+  close(): void
+}
+
+/**
  * Synchronized store handle exposed to JavaScript.
  *
  * Obtained via `NapiNode.syncedStore(storeId)`. Each store instance manages
@@ -391,9 +408,10 @@ export declare class NapiSyncedStore {
    * Subscribe to store change events.
    *
    * The callback receives `NapiStoreEvent` objects whenever local data
-   * changes, a peer's data is updated, or a peer is removed.
+   * changes, a peer's data is updated, or a peer is removed. Call `close()`
+   * on the returned subscription when the listener is no longer needed.
    */
-  onChange(callback: (event: StoreEvent) => void): void
+  onChange(callback: (event: StoreEvent) => void): NapiSubscription
   /**
    * Stop the store and cancel all event-forwarding tasks.
    *

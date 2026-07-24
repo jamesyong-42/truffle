@@ -1,5 +1,6 @@
 {
   "name": "@vibecook/truffle-cli",
+  "private": true,
   "version": "0.2.5",
   "description": "CLI for Truffle mesh networking",
   "license": "MIT",
@@ -23,9 +24,6 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "type": "module",
   "bin": {

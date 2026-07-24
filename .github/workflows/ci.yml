@@ -25,6 +25,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Release version consistency
+        # A release PR cannot contain checksums for binaries that do not exist
+        # until after its tag is built. Release publishing uses the strict mode.
+        run: node scripts/check-release-versions.mjs --allow-missing-checksums
+
       - name: Lint
         run: pnpm run lint
 
@@ -50,16 +55,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
+      - name: Locked dependency graph
+        run: cargo metadata --locked --no-deps --format-version 1
+
       - name: Rustfmt
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+        run: cargo clippy --locked --workspace --all-targets --exclude truffle-tauri-plugin --exclude truffle-napi -- -D warnings
 
       - name: Doc warnings
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --no-deps --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+        run: cargo doc --locked --no-deps --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 
   cargo-deny:
     name: Supply-chain security (cargo-deny)
@@ -110,10 +118,14 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Cargo test
-        run: cargo nextest run --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+        run: cargo nextest run --locked --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 
       - name: Doc tests
-        run: cargo test --doc --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+        run: cargo test --locked --doc --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+
+      - name: Transport stress tests
+        if: runner.os == 'Linux'
+        run: cargo test --locked -p truffle-core --test integration_transport -- --ignored --test-threads=1
 
       # Compile-check the tier-1 micro benchmarks from RFC 019. We don't run
       # them here (wall-clock benches on hosted runners are noisy), just
@@ -122,4 +134,4 @@ jobs:
       # runners triples the time for no new signal.
       - name: Bench compile-check
         if: runner.os == 'Linux'
-        run: cargo bench -p truffle-core --no-run
+        run: cargo bench --locked -p truffle-core --no-run

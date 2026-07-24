@@ -1088,8 +1088,12 @@ mod tests {
         std::fs::write(&file_b, b"secret").unwrap();
 
         // (1) A file that lives entirely outside the root is rejected.
-        let err =
-            authorize_pull_path(&[root_a.clone()], file_b.to_str().unwrap(), u64::MAX).unwrap_err();
+        let err = authorize_pull_path(
+            std::slice::from_ref(&root_a),
+            file_b.to_str().unwrap(),
+            u64::MAX,
+        )
+        .unwrap_err();
         assert!(matches!(err, TransferError::Rejected(_)));
 
         // (2) A `..` escape that climbs out of the root is rejected: canonicalize

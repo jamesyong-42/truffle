@@ -586,7 +586,7 @@ mod tests {
         // alpha ("α") which is 2 bytes in UTF-8. If we accidentally did
         // a byte-based truncation we'd end up with a broken UTF-8
         // sequence and a panic on `String` construction. Verify we don't.
-        let long: String = std::iter::repeat('α').take(300).collect();
+        let long = "α".repeat(300);
         // Sanity check: byte length is 600 but char count is 300.
         assert_eq!(long.chars().count(), 300);
         assert_eq!(long.len(), 600);

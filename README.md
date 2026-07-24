@@ -150,14 +150,17 @@ Swift: [`apple/Examples/MeshChatDemo`](apple/Examples/MeshChatDemo) — iOS Swif
 - **Guide:** [jamesyong-42.github.io/truffle](https://jamesyong-42.github.io/truffle/)
 - **API reference:** [api.html](https://jamesyong-42.github.io/truffle/api.html)
 - **HTTP serving guide:** [docs/guide/serving-http.md](docs/guide/serving-http.md)
+- **API stability:** [docs/API-STABILITY.md](docs/API-STABILITY.md)
+- **Testing:** [docs/TESTING.md](docs/TESTING.md)
+- **Releasing:** [docs/RELEASING.md](docs/RELEASING.md)
 - **RFCs:** [docs/rfcs/](docs/rfcs/) · Swift: [RFC 024](docs/rfcs/024-truffle-swift.md)
 
 ## Development
 
 ```bash
 pnpm install
-cargo build --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
-cargo test --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+cargo build --locked --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
+cargo test --locked --workspace --exclude truffle-tauri-plugin --exclude truffle-napi
 pnpm run build
 pnpm run test
 ```

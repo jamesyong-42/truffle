@@ -10,6 +10,9 @@ publish = false
 [[bin]]
 name = "truffle"
 path = "src/main.rs"
+# The public `truffle` library owns target/doc/truffle. Documenting this
+# private binary under the same target name causes Cargo to overwrite it.
+doc = false
 
 [lints]
 workspace = true

@@ -68,19 +68,23 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: packages/sidecar-slim/go.sum
 
+      - name: Validate tailnet credentials
+        timeout-minutes: 3
+        run: cargo test --locked -p truffle-core --test integration_eager_identity -- --nocapture
+
       - name: Build truffle-bench in release mode
-        run: cargo build -p truffle-bench --release
+        run: cargo build --locked -p truffle-bench --release
 
       - name: File transfer
         run: |
           SIZE="${{ github.event.inputs.file_transfer_size || '10M' }}"
-          cargo run -p truffle-bench --release -- \
+          cargo run --locked -p truffle-bench --release -- \
             file-transfer --size "$SIZE" --iterations 5 --warmup 1
 
       - name: SyncedStore B1 (sequential)
         run: |
           OPS="${{ github.event.inputs.synced_store_ops || '1000' }}"
-          cargo run -p truffle-bench --release -- \
+          cargo run --locked -p truffle-bench --release -- \
             synced-store --scenario b1-sequential --ops "$OPS"
 
       - name: SyncedStore B2 (concurrent)
@@ -88,13 +92,13 @@ jobs:
           OPS="${{ github.event.inputs.synced_store_ops || '1000' }}"
           # Halve B2 ops vs B1 — both sides write concurrently so we double
           # the combined workload anyway.
-          cargo run -p truffle-bench --release -- \
+          cargo run --locked -p truffle-bench --release -- \
             synced-store --scenario b2-concurrent --ops "$((OPS / 2))"
 
       - name: Request/reply RTT
         run: |
           COUNT="${{ github.event.inputs.request_reply_count || '500' }}"
-          cargo run -p truffle-bench --release -- \
+          cargo run --locked -p truffle-bench --release -- \
             request-reply --count "$COUNT" --payload-bytes 1024
 
       - name: Summarise results

@@ -3,3 +3,8 @@ packages:
   - 'crates/truffle-napi'
   - 'npm/*'
   - 'examples/*'
+
+onlyBuiltDependencies:
+  - '@vibecook/truffle'
+  - electron
+  - esbuild

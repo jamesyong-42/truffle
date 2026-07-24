@@ -20,16 +20,16 @@
   "scripts": {
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
-    "test:rust": "cargo test --workspace",
-    "test:real": "cargo test -p truffle-core --tests -- --nocapture",
+    "test:rust": "cargo test --locked --workspace",
+    "test:real": "cargo test --locked -p truffle-core --tests -- --nocapture",
     "test:all": "pnpm run test && pnpm run test:rust",
     "bench": "pnpm run bench:micro",
-    "bench:micro": "cargo bench -p truffle-core",
-    "bench:macro": "cargo run -p truffle-bench --release -- file-transfer --size 10M --iterations 5 && cargo run -p truffle-bench --release -- synced-store --scenario b1-sequential --ops 1000 && cargo run -p truffle-bench --release -- request-reply --count 500",
-    "bench:macro:fast": "cargo run -p truffle-bench --release -- file-transfer --size 1M --iterations 3",
-    "bench:file-transfer": "cargo run -p truffle-bench --release -- file-transfer",
-    "bench:synced-store": "cargo run -p truffle-bench --release -- synced-store",
-    "bench:request-reply": "cargo run -p truffle-bench --release -- request-reply",
+    "bench:micro": "cargo bench --locked -p truffle-core",
+    "bench:macro": "cargo run --locked -p truffle-bench --release -- file-transfer --size 10M --iterations 5 && cargo run --locked -p truffle-bench --release -- synced-store --scenario b1-sequential --ops 1000 && cargo run --locked -p truffle-bench --release -- request-reply --count 500",
+    "bench:macro:fast": "cargo run --locked -p truffle-bench --release -- file-transfer --size 1M --iterations 3",
+    "bench:file-transfer": "cargo run --locked -p truffle-bench --release -- file-transfer",
+    "bench:synced-store": "cargo run --locked -p truffle-bench --release -- synced-store",
+    "bench:request-reply": "cargo run --locked -p truffle-bench --release -- request-reply",
     "run-all": "bash scripts/run-all-tests-and-benches.sh",
     "run-all:fast": "bash scripts/run-all-tests-and-benches.sh --fast",
     "build:sidecar": "cd packages/sidecar-slim && go build -o ../../crates/truffle-core/tests/test-sidecar .",
@@ -41,16 +41,9 @@
     "lint:fix": "eslint 'packages/*/src/**/*.ts' --fix",
     "format": "prettier --write 'packages/*/src/**/*.ts'",
     "format:check": "prettier --check 'packages/*/src/**/*.ts'",
-    "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "pnpm run build && changeset publish"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": ["@vibecook/truffle", "electron", "esbuild"]
+    "release:verify": "node scripts/check-release-versions.mjs && cargo metadata --locked --no-deps --format-version 1"
   },
   "devDependencies": {
-    "@changesets/changelog-github": "^0.6.0",
-    "@changesets/cli": "^2.29.8",
     "@types/node": "^25.6.0",
     "@typescript-eslint/eslint-plugin": "^8.56.1",
     "@typescript-eslint/parser": "^8.59.1",

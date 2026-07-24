@@ -6,7 +6,7 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Status, Unknown};
 use napi_derive::napi;
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::Node;
@@ -15,6 +15,7 @@ use crate::file_transfer::NapiFileTransfer;
 use crate::proxy::NapiProxy;
 use crate::quic::{NapiQuicConnection, NapiQuicListener};
 use crate::raw_socket::{NapiTcpListener, NapiTcpSocket};
+use crate::subscription::NapiSubscription;
 use crate::synced_store::NapiSyncedStore;
 use crate::types::{
     NapiHealthInfo, NapiNamespacedMessage, NapiNodeConfig, NapiNodeIdentity, NapiPeer,
@@ -52,7 +53,7 @@ fn peer_to_napi(p: &truffle_core::node::Peer) -> NapiPeer {
 pub struct NapiNode {
     node: Option<Arc<Node<TailscaleProvider>>>,
     /// Handles to spawned event-forwarding tasks (cancelled on stop).
-    task_handles: Vec<JoinHandle<()>>,
+    task_handles: Vec<AbortHandle>,
     /// Pre-start auth-required callback. Installed via `on_auth_required()`
     /// and consumed by `start()`, which wires it into
     /// `NodeBuilder::build_with_auth_handler`. Necessary because auth fires
@@ -449,12 +450,13 @@ impl NapiNode {
     /// Subscribe to peer change events.
     ///
     /// The callback receives `NapiPeerEvent` objects whenever peers
-    /// join, leave, connect, disconnect, or update.
+    /// join, leave, connect, disconnect, or update. Call `close()` on the
+    /// returned subscription to stop receiving events.
     #[napi(ts_args_type = "callback: (event: PeerEvent) => void")]
     pub fn on_peer_change(
         &mut self,
         callback: ThreadsafeFunction<NapiPeerEvent, Unknown<'static>, NapiPeerEvent, Status, false>,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let node = self.require_node()?;
         let mut rx = node.on_peer_change();
         let node_for_lookup = node.clone();
@@ -482,14 +484,17 @@ impl NapiNode {
                 }
             }
         });
-        self.task_handles.push(handle);
+        let subscription = NapiSubscription::from_task(handle);
+        self.task_handles.retain(|handle| !handle.is_finished());
+        self.task_handles.push(subscription.abort_handle());
 
-        Ok(())
+        Ok(subscription)
     }
 
     /// Subscribe to messages on a specific namespace.
     ///
-    /// The callback receives `NapiNamespacedMessage` objects.
+    /// The callback receives `NapiNamespacedMessage` objects. Call `close()`
+    /// on the returned subscription to stop receiving messages.
     #[napi(ts_args_type = "namespace: string, callback: (msg: NamespacedMessage) => void")]
     pub fn on_message(
         &mut self,
@@ -501,7 +506,7 @@ impl NapiNode {
             Status,
             false,
         >,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let node = self.require_node()?;
         let mut rx = node.subscribe(&namespace);
 
@@ -534,9 +539,11 @@ impl NapiNode {
                 }
             }
         });
-        self.task_handles.push(handle);
+        let subscription = NapiSubscription::from_task(handle);
+        self.task_handles.retain(|handle| !handle.is_finished());
+        self.task_handles.push(subscription.abort_handle());
 
-        Ok(())
+        Ok(subscription)
     }
 
     /// Get a `NapiFileTransfer` handle for file transfer operations.

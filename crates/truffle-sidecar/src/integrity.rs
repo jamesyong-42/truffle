@@ -58,8 +58,7 @@ pub(crate) fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), Stri
 ///
 /// - `Err(_)` — the JSON is malformed; the build script treats this as fatal.
 /// - `Ok(None)` — the JSON parsed but has no entry for this version/asset. The
-///   build script warns (integrity not verified) rather than failing, so a
-///   freshly tagged release whose hash is not committed yet still builds.
+///   build script treats this as fatal and refuses the unverified download.
 /// - `Ok(Some(hex))` — the pinned checksum for this asset.
 pub(crate) fn lookup_checksum(
     json: &str,
@@ -129,7 +128,7 @@ mod tests {
     #[test]
     fn lookup_missing_version_or_asset_is_none() {
         let json = r#"{"0.4.8": {"a": "x"}}"#;
-        // Unknown version -> None (warn, don't fail).
+        // Unknown version -> None (the build script fails closed).
         assert_eq!(lookup_checksum(json, "9.9.9", "a").unwrap(), None);
         // Known version, unknown asset -> None.
         assert_eq!(lookup_checksum(json, "0.4.8", "b").unwrap(), None);

@@ -34,6 +34,8 @@ export function useAuth(node: NapiNode | null): UseAuthResult {
   const [authUrl, setAuthUrl] = useState<string | null>(null);
 
   useEffect(() => {
+    setStatus('unknown');
+    setAuthUrl(null);
     if (!node) return;
     let cancelled = false;
 
@@ -49,7 +51,7 @@ export function useAuth(node: NapiNode | null): UseAuthResult {
     init();
 
     // Listen for auth events via onPeerChange
-    node.onPeerChange((event: NapiPeerEvent) => {
+    const subscription = node.onPeerChange((event: NapiPeerEvent) => {
       if (cancelled) return;
 
       if (event.eventType === 'auth_required' && event.authUrl) {
@@ -64,6 +66,7 @@ export function useAuth(node: NapiNode | null): UseAuthResult {
 
     return () => {
       cancelled = true;
+      subscription.close();
     };
   }, [node]);
 

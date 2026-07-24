@@ -37,10 +37,10 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
   const nodeRef = useRef<NapiNode | null>(null);
 
   useEffect(() => {
+    setIsStarted(false);
+    setLocalInfo(null);
+    setPeers([]);
     if (!node) {
-      setIsStarted(false);
-      setLocalInfo(null);
-      setPeers([]);
       return;
     }
 
@@ -69,7 +69,7 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
     // peer-scoped event and stable for the entry's lifetime, while
     // `deviceId` is null until identity is learned (RFC 022) — keying on it
     // would collide all pre-identity peers and never match `left` events.
-    node.onPeerChange((event: NapiPeerEvent) => {
+    const subscription = node.onPeerChange((event: NapiPeerEvent) => {
       if (cancelled) return;
       const key = event.peerId;
       if (!key) return; // auth_required has no peer
@@ -107,6 +107,7 @@ export function useMesh(node: NapiNode | null): UseMeshResult {
     return () => {
       cancelled = true;
       nodeRef.current = null;
+      subscription.close();
     };
   }, [node]);
 

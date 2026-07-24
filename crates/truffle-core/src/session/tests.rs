@@ -1,5 +1,6 @@
 //! Unit tests for Layer 5: Session.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +17,8 @@ use crate::transport::WsConfig;
 
 use super::reconnect::ReconnectBackoff;
 use super::{
-    format_peer_ref, parse_peer_ref, PeerEvent, PeerIdentity, PeerRegistry, PeerRegistryOptions,
-    SessionError,
+    format_peer_ref, parse_peer_ref, preferred_connection_direction, should_replace_connection,
+    ConnectionDirection, PeerEvent, PeerIdentity, PeerRegistry, PeerRegistryOptions, SessionError,
 };
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ struct MockNetworkProvider {
     identity: NodeIdentity,
     local_addr: PeerAddr,
     peer_event_tx: broadcast::Sender<NetworkPeerEvent>,
+    dial_failures_remaining: AtomicUsize,
 }
 
 impl MockNetworkProvider {
@@ -61,7 +63,16 @@ impl MockNetworkProvider {
                 dns_name: None,
             },
             peer_event_tx,
+            dial_failures_remaining: AtomicUsize::new(0),
         }
+    }
+
+    fn with_dial_failures(app_id: &str, id: &str, failures: usize) -> Self {
+        let provider = Self::new_with_app(app_id, id);
+        provider
+            .dial_failures_remaining
+            .store(failures, Ordering::Relaxed);
+        provider
     }
 
     /// Get a sender to inject peer events for testing.
@@ -96,6 +107,17 @@ impl NetworkProvider for MockNetworkProvider {
     }
 
     async fn dial_tcp(&self, addr: &str, port: u16) -> Result<TcpStream, NetworkError> {
+        if self
+            .dial_failures_remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(NetworkError::DialFailed(
+                "mock transient dial failure".to_string(),
+            ));
+        }
         let target = format!("{addr}:{port}");
         TcpStream::connect(&target)
             .await
@@ -252,6 +274,29 @@ fn build_registry_with_options(
     let network = Arc::new(provider);
     let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(port)));
     let registry = PeerRegistry::with_options(network, ws_transport, options);
+    (registry, event_sender)
+}
+
+fn build_registry_with_dial_failures(
+    id: &str,
+    port: u16,
+    failures: usize,
+) -> (
+    PeerRegistry<MockNetworkProvider>,
+    broadcast::Sender<NetworkPeerEvent>,
+) {
+    let provider = MockNetworkProvider::with_dial_failures("test", id, failures);
+    let event_sender = provider.event_sender();
+    let network = Arc::new(provider);
+    let ws_transport = Arc::new(WebSocketTransport::new(network.clone(), ws_config(port)));
+    let registry = PeerRegistry::with_options(
+        network,
+        ws_transport,
+        PeerRegistryOptions {
+            eager_identity_jitter_ms: 0,
+            ..Default::default()
+        },
+    );
     (registry, event_sender)
 }
 
@@ -1249,6 +1294,107 @@ async fn test_rfc022_eager_identity_without_app_send() {
         client.published_device_id().is_some(),
         "server should see client identity after eager exchange"
     );
+}
+
+#[test]
+fn test_rfc022_cross_dials_choose_the_same_physical_connection() {
+    assert_eq!(
+        preferred_connection_direction("alpha", "beta"),
+        Some(ConnectionDirection::Outbound)
+    );
+    assert_eq!(
+        preferred_connection_direction("beta", "alpha"),
+        Some(ConnectionDirection::Inbound)
+    );
+    assert!(should_replace_connection(
+        ConnectionDirection::Inbound,
+        ConnectionDirection::Outbound,
+        Some(ConnectionDirection::Outbound),
+    ));
+    assert!(!should_replace_connection(
+        ConnectionDirection::Inbound,
+        ConnectionDirection::Outbound,
+        Some(ConnectionDirection::Inbound),
+    ));
+}
+
+#[tokio::test]
+async fn test_rfc022_inbound_identity_is_reconciled_after_discovery() {
+    let server_port = random_port().await;
+
+    let (server_registry, server_es) = build_registry("server", server_port);
+    server_registry.start().await;
+
+    let (client_registry, client_es) = build_registry("client", server_port);
+    client_registry.start().await;
+
+    // Client discovers and dials first. The server has not received its
+    // Layer-3 Joined event yet, so the inbound hello must be retained.
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        server_registry
+            .peers()
+            .await
+            .iter()
+            .all(|peer| peer.id != "client"),
+        "server should not synthesize a Layer-3 peer from the hello"
+    );
+
+    server_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("client")))
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let peers = server_registry.peers().await;
+        if peers
+            .iter()
+            .find(|peer| peer.id == "client")
+            .is_some_and(|peer| peer.published_device_id() == Some("dev-client"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pending inbound identity was not reconciled after discovery"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_rfc022_eager_identity_retries_transient_dial_failure() {
+    let server_port = random_port().await;
+
+    let (server_registry, _server_es) = build_registry("server", server_port);
+    server_registry.start().await;
+
+    let (client_registry, client_es) = build_registry_with_dial_failures("client", server_port, 1);
+    client_registry.start().await;
+
+    client_es
+        .send(NetworkPeerEvent::Joined(make_loopback_peer("server")))
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let peers = client_registry.peers().await;
+        if peers
+            .iter()
+            .find(|peer| peer.id == "server")
+            .is_some_and(|peer| peer.published_device_id() == Some("dev-server"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "eager identity did not recover after a transient dial failure"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 #[tokio::test]

@@ -5,7 +5,9 @@
 //!
 //! Run with: `cargo bench -p truffle-core --bench envelope`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::json;
 use truffle_core::envelope::{Envelope, EnvelopeCodec, JsonCodec};
 

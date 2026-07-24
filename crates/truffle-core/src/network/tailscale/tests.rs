@@ -368,7 +368,7 @@ fn event_peer_changed_left_deserialization() {
 fn filter_app_peers_only() {
     // Given peers from multiple apps on the same tailnet, the filter should
     // admit only those whose hostname prefix matches `truffle-{app_id}-`.
-    let peers = vec![
+    let peers = [
         // playground peer with a real slug — kept.
         SidecarPeer {
             id: "node1".into(),

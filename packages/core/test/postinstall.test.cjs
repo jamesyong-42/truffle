@@ -1,6 +1,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildDownloadUrl, assertChecksum, loadExpectedChecksum } = require('../scripts/postinstall.cjs');
+const {
+  buildDownloadUrl,
+  assertChecksum,
+  loadExpectedChecksum,
+  requireExpectedChecksum,
+  requirePlatformConfig,
+} = require('../scripts/postinstall.cjs');
+const { version } = require('../package.json');
 
 test('fallback URL uses the truffle-v release tag scheme', () => {
   assert.equal(
@@ -14,7 +21,7 @@ test('checksum mismatch throws (fail closed); match and case-insensitive match p
   assert.doesNotThrow(() => assertChecksum('AB'.repeat(32), 'ab'.repeat(32), 'x'));
 });
 
-test('shipped checksums contain real sha256 entries for all 0.4.8 assets', () => {
+test('shipped checksums contain real sha256 entries for every current-version asset', () => {
   for (const asset of [
     'tsnet-sidecar-darwin-arm64',
     'tsnet-sidecar-darwin-amd64',
@@ -22,8 +29,29 @@ test('shipped checksums contain real sha256 entries for all 0.4.8 assets', () =>
     'tsnet-sidecar-linux-arm64',
     'tsnet-sidecar-windows-amd64.exe',
   ]) {
-    assert.match(loadExpectedChecksum('0.4.8', asset) ?? '', /^[0-9a-f]{64}$/);
+    assert.match(loadExpectedChecksum(version, asset) ?? '', /^[0-9a-f]{64}$/);
   }
+});
+
+test('missing checksums fail closed before a download can be attempted', () => {
+  assert.throws(
+    () => requireExpectedChecksum('999.999.999', 'tsnet-sidecar-linux-amd64'),
+    /Refusing to download an unverified executable/,
+  );
+});
+
+test('supported platform configuration resolves every required asset', () => {
+  assert.deepEqual(requirePlatformConfig('linux', 'x64'), {
+    key: 'linux-x64',
+    pkg: '@vibecook/truffle-sidecar-linux-x64',
+    asset: 'tsnet-sidecar-linux-amd64',
+    binName: 'sidecar-slim',
+  });
+  assert.equal(requirePlatformConfig('win32', 'x64').binName, 'sidecar-slim.exe');
+});
+
+test('unsupported platforms fail closed', () => {
+  assert.throws(() => requirePlatformConfig('freebsd', 'x64'), /No prebuilt sidecar/);
 });
 
 test('requiring the script does not execute main()', () => {

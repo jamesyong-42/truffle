@@ -270,14 +270,14 @@ async fn test_ws_concurrent_bidirectional() {
 
         // Verify client received all server messages
         assert_eq!(client_received.len(), msg_count);
-        for i in 0..msg_count {
-            assert_eq!(client_received[i], format!("server-{i}"));
+        for (i, message) in client_received.iter().enumerate() {
+            assert_eq!(message, &format!("server-{i}"));
         }
 
         // Verify server received all client messages
         assert_eq!(server_received.len(), msg_count);
-        for i in 0..msg_count {
-            assert_eq!(server_received[i], format!("client-{i}"));
+        for (i, message) in server_received.iter().enumerate() {
+            assert_eq!(message, &format!("client-{i}"));
         }
 
         client_stream.close().await.unwrap();
@@ -813,8 +813,8 @@ async fn test_udp_rapid_fire() {
             // Encode sequence number at the start
             data[0..4].copy_from_slice(&(i as u32).to_be_bytes());
             // Fill rest with recognizable pattern
-            for j in 4..payload_size {
-                data[j] = ((i + j) % 256) as u8;
+            for (j, byte) in data.iter_mut().enumerate().skip(4) {
+                *byte = ((i + j) % 256) as u8;
             }
             sender_socket.send_to(&data, &recv_addr).await.unwrap();
         }
@@ -1001,13 +1001,13 @@ async fn test_quic_concurrent_bidirectional() {
 
         // Verify all messages received in order
         assert_eq!(client_received.len(), msg_count);
-        for i in 0..msg_count {
-            assert_eq!(client_received[i], format!("quic-server-{i}"));
+        for (i, message) in client_received.iter().enumerate() {
+            assert_eq!(message, &format!("quic-server-{i}"));
         }
 
         assert_eq!(server_received.len(), msg_count);
-        for i in 0..msg_count {
-            assert_eq!(server_received[i], format!("quic-client-{i}"));
+        for (i, message) in server_received.iter().enumerate() {
+            assert_eq!(message, &format!("quic-client-{i}"));
         }
 
         client_stream.close().await.unwrap();

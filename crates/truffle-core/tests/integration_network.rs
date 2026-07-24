@@ -276,7 +276,7 @@ async fn test_health() {
     assert!(health.healthy);
 
     // Stop alpha only (not the whole pair) so we can check its health after stop
-    let mut alpha = pair.alpha;
+    let alpha = pair.alpha;
     let beta = pair.beta;
     let _alpha_hostname = pair.alpha_hostname;
     let _beta_hostname = pair.beta_hostname;
@@ -287,6 +287,6 @@ async fn test_health() {
     assert!(!after.healthy);
 
     // Stop beta explicitly to avoid leaking an ephemeral peer longer than needed.
-    let mut beta = beta;
+    let beta = beta;
     let _ = beta.stop().await;
 }

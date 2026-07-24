@@ -4,6 +4,7 @@ export {
   NapiFileTransfer,
   NapiOfferResponder,
   NapiSyncedStore,
+  NapiSubscription,
   NapiProxy,
   NapiTcpSocket,
   NapiTcpListener,

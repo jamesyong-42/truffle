@@ -1,10 +1,9 @@
-# Testing and Benchmarking — Local Phase
+# Testing and Benchmarking
 
-This guide covers **running truffle's test and benchmark suites on your own
-machine**, against either mocks (no setup) or a real Tailscale network
-(one-time setup). It implements Phase 1 of [RFC
-019](rfcs/019-local-testing-and-benchmarking.md); CI automation is the next
-phase.
+This guide covers Truffle's local and CI test suites, against either mocks
+(no setup) or a real Tailscale network (one-time setup). The local harness is
+specified in [RFC 019](rfcs/019-local-testing-and-benchmarking.md), and the CI
+automation in [RFC 020](rfcs/020-ci-testing.md).
 
 ---
 
@@ -12,8 +11,9 @@ phase.
 
 | You want to... | Command |
 |---|---|
-| Run all unit tests (no network) | `cargo test --workspace` |
+| Run all unit tests (no network) | `cargo test --locked --workspace` |
 | Run real-network integration tests | `TRUFFLE_TEST_AUTHKEY=tskey-... cargo test -p truffle-core` |
+| Run the ignored transport stress suite | `cargo test --locked -p truffle-core --test integration_transport -- --ignored --test-threads=1` |
 | Run micro benchmarks (no network) | `cargo bench -p truffle-core` |
 | Run macro benchmarks against a real tailnet | `cargo run -p truffle-bench --release -- file-transfer` |
 
@@ -112,13 +112,17 @@ All variables read by tests and benchmarks. Defaults shown.
 | `crates/truffle-core/tests/integration_synced_store.rs` | **Real Tailscale** (pair) | Yes (skip w/o auth) |
 | `crates/truffle-core/tests/integration_request_reply.rs` | **Real Tailscale** (pair) | Yes (skip w/o auth) |
 | `crates/truffle-core/tests/integration_file_transfer.rs` | **Real Tailscale** (pair) | Yes (skip w/o auth) |
-| `crates/truffle-core/tests/integration_transport.rs` | In-process loopback (heavy) | No — still `#[ignore]` |
+| `crates/truffle-core/tests/integration_transport.rs` | In-process loopback (heavy) | CI on Linux; locally only with `--ignored` |
 
 ### Running
 
 ```bash
 # Fast: unit + integration (integrations skip without a key)
-cargo test --workspace
+cargo test --locked --workspace
+
+# Heavy loopback transport stress suite (serial to reduce flakiness)
+cargo test --locked -p truffle-core --test integration_transport \
+    -- --ignored --test-threads=1
 
 # Just the integration suite, verbose
 TRUFFLE_TEST_LOG="truffle_core=debug,integration_synced_store=debug" \
@@ -281,9 +285,9 @@ The harness runs in GitHub Actions too. See
 
 | Workflow | Trigger | What it runs |
 |---|---|---|
-| `ci.yml` | PR + push to main | unit tests, lint, fmt, bench compile-check |
-| `integration-tests.yml` | PR + push to main | 16 real-network tests (skips gracefully on fork PRs) |
-| `benchmarks.yml` | nightly cron (06:00 UTC) + manual | macro bench suite, uploads JSON artefacts |
+| `ci.yml` | PR + push to main | locked dependency graph, release metadata, unit tests, warnings-as-errors, fmt, Linux transport stress, bench compile-check |
+| `integration-tests.yml` | PR + push to main | real-network tests; only fork PRs may skip without the secret |
+| `benchmarks.yml` | nightly cron (06:00 UTC) + manual | credential preflight, macro bench suite, uploads JSON artefacts |
 
 ### One-time setup: configure the `TRUFFLE_TEST_AUTHKEY` secret
 
@@ -320,9 +324,8 @@ Every 80 days (before the 90-day expiry), do:
 2. Update the `TRUFFLE_TEST_AUTHKEY` secret in GitHub with the new value.
 3. Revoke the old key in the Tailscale admin panel.
 
-Future: [RFC 022](rfcs/020-ci-testing.md#9-follow-ups-deferred) will
-migrate this to an OAuth client so keys mint on-demand and never
-accumulate 90 days of blast radius.
+An OAuth client that mints short-lived keys on demand remains the preferred
+long-term replacement for the reusable repository secret.
 
 ### Nightly benchmarks
 
@@ -330,6 +333,10 @@ The `benchmarks.yml` workflow runs every night at 06:00 UTC with default
 parameters (10MB file transfer × 5, 1000 SyncedStore ops, 500 request/reply
 round trips). Results go to the workflow's **Artefacts** section as a
 JSON bundle, retained 30 days.
+
+Before compiling and running that matrix, CI runs a three-minute real-tailnet
+identity test. A missing, expired, revoked, or mis-scoped key therefore fails
+quickly with a focused error instead of wasting the whole benchmark job.
 
 To run on-demand with custom parameters:
 - Actions → **Benchmarks (nightly + on-demand)** → **Run workflow**

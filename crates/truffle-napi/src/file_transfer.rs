@@ -12,6 +12,7 @@ use truffle_core::file_transfer::types::OfferResponder;
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::{FileTransferEvent, Node};
 
+use crate::subscription::NapiSubscription;
 use crate::types::{
     NapiFileOffer, NapiFileTransferEvent, NapiTransferProgress, NapiTransferResult,
 };
@@ -143,7 +144,8 @@ impl NapiFileTransfer {
     ///
     /// The callback receives `(offer, responder)` — call `responder.accept(path)`
     /// or `responder.reject(reason)` to handle the offer. If neither is called
-    /// within 60 seconds, the offer is auto-rejected.
+    /// within 60 seconds, the offer is auto-rejected. Call `close()` on the
+    /// returned subscription to stop receiving offers.
     #[napi(ts_args_type = "callback: (offer: FileOffer, responder: NapiOfferResponder) => void")]
     pub fn on_offer(
         &self,
@@ -154,10 +156,10 @@ impl NapiFileTransfer {
             Status,
             false,
         >,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let node = self.node.clone();
 
-        napi::bindgen_prelude::spawn(async move {
+        let handle = napi::bindgen_prelude::spawn(async move {
             let ft = node.file_transfer();
             let mut rx = ft.offer_channel(node.clone()).await;
 
@@ -186,13 +188,14 @@ impl NapiFileTransfer {
             }
         });
 
-        Ok(())
+        Ok(NapiSubscription::from_task(handle))
     }
 
     /// Subscribe to file transfer events.
     ///
     /// The callback receives `NapiFileTransferEvent` objects for all
     /// transfer lifecycle events (hashing, progress, completed, failed, etc.).
+    /// Call `close()` on the returned subscription to stop receiving events.
     #[napi(ts_args_type = "callback: (event: FileTransferEvent) => void")]
     pub fn on_event(
         &self,
@@ -203,11 +206,11 @@ impl NapiFileTransfer {
             Status,
             false,
         >,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let ft = self.node.file_transfer();
         let mut rx = ft.subscribe();
 
-        napi::bindgen_prelude::spawn(async move {
+        let handle = napi::bindgen_prelude::spawn(async move {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
@@ -227,7 +230,7 @@ impl NapiFileTransfer {
             }
         });
 
-        Ok(())
+        Ok(NapiSubscription::from_task(handle))
     }
 
     /// Set the maximum allowed transfer size in bytes.

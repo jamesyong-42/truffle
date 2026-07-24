@@ -24,6 +24,7 @@ import type {
   NapiProxyConfig,
   NapiProxyEvent,
   NapiProxyRoute,
+  NapiSubscription,
 } from '@vibecook/truffle-native';
 
 /** Options common to every {@link ServeConfig} shape. */
@@ -241,6 +242,7 @@ export function normalizeServeConfig(config: ServeConfig): NapiProxyConfig {
 export function createServeNamespace(getProxy: () => NapiProxy): TruffleServe {
   const handles = new Map<string, ServeHandle>();
   let eventProxy: NapiProxy | null = null;
+  let eventSubscription: NapiSubscription | null = null;
 
   function routeEvent(ev: NapiProxyEvent): void {
     const handle = handles.get(ev.id);
@@ -259,7 +261,8 @@ export function createServeNamespace(getProxy: () => NapiProxy): TruffleServe {
     // Retain the subscribed handle so the native subscription outlives GC of
     // this NapiProxy. Events are node-global (all handles share one Arc<Node>).
     eventProxy = proxy;
-    proxy.onEvent(routeEvent);
+    eventSubscription = proxy.onEvent(routeEvent);
+    void eventSubscription;
   }
 
   return async function serve(config: ServeConfig): Promise<ServeHandle> {

@@ -38,23 +38,9 @@ jobs:
         run: |
           gh workflow run release-sidecar.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
 
-      - name: Trigger crates.io publish
-        if: ${{ steps.release.outputs.release_created }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run publish-crates.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
-
       - name: Trigger NAPI build and publish
         if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh workflow run napi-build.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"
-
-      - name: Trigger npm publish (@vibecook/truffle)
-        if: ${{ steps.release.outputs.release_created }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh workflow run release-npm.yml --repo "${{ github.repository }}" --ref "${{ steps.release.outputs.tag_name }}"

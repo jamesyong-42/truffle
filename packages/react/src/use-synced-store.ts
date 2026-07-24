@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { NapiNode, NapiNamespacedMessage } from '@vibecook/truffle';
+import type { NapiNode } from '@vibecook/truffle';
+import {
+  subscribeSyncedStore,
+  type SyncedStoreController,
+  type SyncedStoreLike,
+} from './synced-store-controller.js';
 
 /** A device-owned slice of data. */
 export interface Slice<T> {
@@ -25,19 +30,14 @@ export interface UseSyncedStoreResult<T> {
   /** Current local version number. */
   version: number;
   /** Update this device's data (broadcasts automatically). */
-  set: (data: T) => void;
+  set: (data: T) => Promise<void>;
 }
 
 /**
  * React hook for a Truffle synced store.
  *
- * Provides reactive access to device-owned synchronized state.
- * Built on the Node API's namespace messaging — syncs automatically
- * when peers join or leave.
- *
- * This hook implements the client-side sync protocol (RFC 016) over
- * the namespace `"ss:{storeId}"` using `node.onMessage()` and
- * `node.broadcast()`.
+ * Provides reactive access to the native RFC 016 synced-store implementation,
+ * including current snapshots, peer removal, and automatic peer synchronization.
  *
  * @example
  * ```tsx
@@ -56,144 +56,55 @@ export function useSyncedStore<T>(node: NapiNode | null, storeId: string): UseSy
   const [localData, setLocalData] = useState<T | null>(null);
   const [allSlices, setAllSlices] = useState<Map<string, Slice<T>>>(new Map());
   const [version, setVersion] = useState(0);
-  const nodeRef = useRef<NapiNode | null>(null);
-  const versionRef = useRef(0);
-  const deviceIdRef = useRef<string>('');
-
-  const namespace = `ss:${storeId}`;
+  const storeRef = useRef<{
+    store: SyncedStoreLike<T>;
+    controller: SyncedStoreController;
+  } | null>(null);
 
   useEffect(() => {
+    setLocalData(null);
+    setAllSlices(new Map());
+    setVersion(0);
+
     if (!node) {
-      setLocalData(null);
-      setAllSlices(new Map());
-      setVersion(0);
       return;
     }
 
-    nodeRef.current = node;
-    let cancelled = false;
-
+    let store: SyncedStoreLike<T>;
     try {
-      deviceIdRef.current = node.getLocalInfo().deviceId;
-    } catch {
+      store = node.syncedStore(storeId) as unknown as SyncedStoreLike<T>;
+    } catch (error) {
+      console.error('[truffle-react] Failed to create synced store:', error);
       return;
     }
 
-    // Listen for sync messages from peers
-    node.onMessage(namespace, (msg: NapiNamespacedMessage) => {
-      if (cancelled) return;
-
-      const payload = msg.payload as Record<string, unknown>;
-      const type = payload?.type as string;
-
-      if (type === 'update' || type === 'full') {
-        const deviceId = payload.device_id as string;
-        if (deviceId === deviceIdRef.current) return; // ignore echo
-
-        const incomingVersion = payload.version as number;
-        const data = payload.data as T;
-        const updatedAt = payload.updated_at as number;
-
-        setAllSlices((prev) => {
-          const existing = prev.get(deviceId);
-          if (existing && incomingVersion <= existing.version) return prev; // stale
-          const next = new Map(prev);
-          next.set(deviceId, { deviceId, data, version: incomingVersion, updatedAt });
-          return next;
-        });
-      } else if (type === 'request') {
-        // Peer wants our data — send it
-        if (localData !== null) {
-          const full = {
-            type: 'full',
-            device_id: deviceIdRef.current,
-            data: localData,
-            version: versionRef.current,
-            updated_at: Date.now(),
-          };
-          const buf = Buffer.from(JSON.stringify(full));
-          node.send(msg.from, namespace, buf).catch(() => {});
-        }
-      } else if (type === 'clear') {
-        const deviceId = payload.device_id as string;
-        setAllSlices((prev) => {
-          if (!prev.has(deviceId)) return prev;
-          const next = new Map(prev);
-          next.delete(deviceId);
-          return next;
-        });
-      }
-    });
-
-    // Listen for peer join/leave to trigger sync
-    node.onPeerChange((event) => {
-      if (cancelled) return;
-
-      if (event.eventType === 'joined') {
-        // Request new peer's data
-        const request = { type: 'request' };
-        const buf = Buffer.from(JSON.stringify(request));
-        node.send(event.peerId, namespace, buf).catch(() => {});
-
-        // Send our data to the new peer
-        if (localData !== null) {
-          const full = {
-            type: 'full',
-            device_id: deviceIdRef.current,
-            data: localData,
-            version: versionRef.current,
-            updated_at: Date.now(),
-          };
-          const buf = Buffer.from(JSON.stringify(full));
-          node.send(event.peerId, namespace, buf).catch(() => {});
-        }
-      } else if (event.eventType === 'left') {
-        setAllSlices((prev) => {
-          if (!prev.has(event.peerId)) return prev;
-          const next = new Map(prev);
-          next.delete(event.peerId);
-          return next;
-        });
-      }
-    });
+    const controller = subscribeSyncedStore(
+      store,
+      (snapshot) => {
+        setLocalData(snapshot.localData);
+        setAllSlices(snapshot.allSlices);
+        setVersion(snapshot.version);
+      },
+      (error) => {
+        console.error('[truffle-react] Synced store failed:', error);
+      },
+    );
+    storeRef.current = { store, controller };
 
     return () => {
-      cancelled = true;
-      nodeRef.current = null;
+      if (storeRef.current?.controller === controller) {
+        storeRef.current = null;
+      }
+      void controller.close();
     };
   }, [node, storeId]);
 
-  const set = useCallback(
-    (data: T) => {
-      if (!nodeRef.current) return;
-
-      const newVersion = versionRef.current + 1;
-      versionRef.current = newVersion;
-      setVersion(newVersion);
-      setLocalData(data);
-
-      // Update local slice in allSlices
-      const deviceId = deviceIdRef.current;
-      const now = Date.now();
-      setAllSlices((prev) => {
-        const next = new Map(prev);
-        next.set(deviceId, { deviceId, data, version: newVersion, updatedAt: now });
-        return next;
-      });
-
-      // Broadcast to all peers
-      const update = {
-        type: 'update',
-        device_id: deviceId,
-        data,
-        version: newVersion,
-        updated_at: now,
-      };
-      const buf = Buffer.from(JSON.stringify(update));
-      nodeRef.current.broadcast(namespace, buf).catch(() => {});
-    },
-    [namespace],
-  );
+  const set = useCallback(async (data: T): Promise<void> => {
+    const current = storeRef.current;
+    if (!current) return;
+    await current.store.set(data);
+    await current.controller.refresh();
+  }, []);
 
   return {
     localData,

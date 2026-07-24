@@ -6,12 +6,13 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Status, Unknown};
 use napi_derive::napi;
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 
 use truffle_core::network::tailscale::TailscaleProvider;
 use truffle_core::synced_store::{StoreEvent, SyncedStore};
 use truffle_core::Node;
 
+use crate::subscription::NapiSubscription;
 use crate::types::{NapiSlice, NapiStoreEvent};
 
 /// Synchronized store handle exposed to JavaScript.
@@ -22,7 +23,7 @@ use crate::types::{NapiSlice, NapiStoreEvent};
 #[napi]
 pub struct NapiSyncedStore {
     inner: Arc<SyncedStore<serde_json::Value>>,
-    task_handles: Vec<JoinHandle<()>>,
+    task_handles: Vec<AbortHandle>,
 }
 
 impl NapiSyncedStore {
@@ -104,7 +105,8 @@ impl NapiSyncedStore {
     /// Subscribe to store change events.
     ///
     /// The callback receives `NapiStoreEvent` objects whenever local data
-    /// changes, a peer's data is updated, or a peer is removed.
+    /// changes, a peer's data is updated, or a peer is removed. Call `close()`
+    /// on the returned subscription when the listener is no longer needed.
     #[napi(ts_args_type = "callback: (event: StoreEvent) => void")]
     pub fn on_change(
         &mut self,
@@ -115,7 +117,7 @@ impl NapiSyncedStore {
             Status,
             false,
         >,
-    ) -> Result<()> {
+    ) -> Result<NapiSubscription> {
         let mut rx = self.inner.subscribe();
 
         let handle = napi::bindgen_prelude::spawn(async move {
@@ -137,9 +139,11 @@ impl NapiSyncedStore {
                 }
             }
         });
-        self.task_handles.push(handle);
+        let subscription = NapiSubscription::from_task(handle);
+        self.task_handles.retain(|handle| !handle.is_finished());
+        self.task_handles.push(subscription.abort_handle());
 
-        Ok(())
+        Ok(subscription)
     }
 
     /// Stop the store and cancel all event-forwarding tasks.

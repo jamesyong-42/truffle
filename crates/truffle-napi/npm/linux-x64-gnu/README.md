@@ -1,3 +1,7 @@
-# `@vibecook/truffle-native-linux-x64-gnu`
+# @vibecook/truffle-native-linux-x64-gnu
 
-This is the **x86_64-unknown-linux-gnu** binary for `@vibecook/truffle-native`
+Prebuilt Truffle native addon for GNU/Linux on x64. This implementation package
+is installed automatically by `@vibecook/truffle-native`; applications should
+not depend on it directly.
+
+See the [Truffle repository](https://github.com/jamesyong-42/truffle).

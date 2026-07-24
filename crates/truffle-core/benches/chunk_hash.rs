@@ -6,7 +6,9 @@
 //!
 //! Run with: `cargo bench -p truffle-core --bench chunk_hash`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use sha2::{Digest, Sha256};
 
 fn make_payload(size: usize) -> Vec<u8> {
