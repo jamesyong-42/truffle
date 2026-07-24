@@ -4,27 +4,37 @@ on:
   push:
     branches: [main]
     paths:
-      - "apple/**"
-      - "crates/truffle-core/tests/interop_fixtures.rs"
-      - ".github/workflows/apple-tests.yml"
+      - 'apple/**'
+      - 'crates/truffle-core/tests/interop_fixtures.rs'
+      - '.github/workflows/apple-tests.yml'
   pull_request:
     paths:
-      - "apple/**"
-      - "crates/truffle-core/tests/interop_fixtures.rs"
-      - ".github/workflows/apple-tests.yml"
+      - 'apple/**'
+      - 'crates/truffle-core/tests/interop_fixtures.rs'
+      - '.github/workflows/apple-tests.yml'
 
 jobs:
   swift:
     name: Swift package (macOS)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
 
       - name: Swift version
         run: swift --version
+
+      - name: Install recorded Go toolchain
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: '1.25.6'
+          cache: false
+
+      - name: Materialize pinned TailscaleKit
+        working-directory: apple
+        run: DEVELOPER_DIR="$(xcode-select -p)" ./scripts/materialize-tailscalekit.sh
 
       - name: Build
         working-directory: apple
@@ -44,8 +54,8 @@ jobs:
     name: Interop fixtures (Rust side)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
       - name: Cross-decode shared fixtures
-        run: cargo test -p truffle-core --test interop_fixtures
+        run: cargo test --locked -p truffle-core --test interop_fixtures

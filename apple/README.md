@@ -7,11 +7,11 @@ of the desktop sidecar.
 
 ## Package layout
 
-| Target | Contents |
-|---|---|
-| `Truffle` | Product core: identity (AppId / ULID / hostname slug), wire codecs (hello v2, envelope, byte payloads), session handshake + close codes, generation-checked peer registry, `MeshNode` actor, `NetworkBackend` seam, loopback test backend |
-| `TruffleSwiftUI` | `MeshModel` (@Observable — RFC 024 §6.7) + `AuthSafariView` for the interactive login sheet |
-| `TruffleTailscale` | Production Layer 0–1: pinned TailscaleKit, login/status/IPN supervision, full-duplex sockets, fail-closed LocalAPI WhoIs, SOCKS-backed URLSession, and `MeshNode.startTailscale` |
+| Target             | Contents                                                                                                                                                                                                                                  |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Truffle`          | Product core: identity (AppId / ULID / hostname slug), wire codecs (hello v2, envelope, byte payloads), session handshake + close codes, generation-checked peer registry, `MeshNode` actor, `NetworkBackend` seam, loopback test backend |
+| `TruffleSwiftUI`   | `MeshModel` (@Observable — RFC 024 §6.7) + `AuthSafariView` for the interactive login sheet                                                                                                                                               |
+| `TruffleTailscale` | Production Layer 0–1: pinned TailscaleKit, login/status/IPN supervision, full-duplex sockets, fail-closed LocalAPI WhoIs, SOCKS-backed URLSession, and `MeshNode.startTailscale`                                                          |
 
 An iOS example lives in `Examples/MeshChatDemo/` — a SwiftUI chat app over an
 in-process demo mesh (your node + two bot peers on `LoopbackNetwork`); see
@@ -21,13 +21,12 @@ its README.
 
 ```bash
 cd apple
+# Package.swift always wires the production binary target, so materialize the
+# pinned XCFramework before SwiftPM resolves the package.
+./scripts/materialize-tailscalekit.sh
 swift build
 # Tests need swift-testing, which CommandLineTools does not bundle:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
-
-# Enable the real iOS runtime (builds pinned libtailscale, then exposes the
-# conditional TailscaleKit binary target):
-./scripts/materialize-tailscalekit.sh
 ```
 
 Stick to one toolchain per `.build` directory: CommandLineTools and Xcode may
@@ -48,7 +47,7 @@ decoded by BOTH this suite (`WireTests.swift`) and the Rust suite
 (`crates/truffle-core/tests/interop_fixtures.rs`).
 
 Two intentional divergences from Rust internals (documented in `Slug.swift`;
-safe because a node only derives its *own* hostname and remote nodes validate
+safe because a node only derives its _own_ hostname and remote nodes validate
 only the prefix): transliteration uses `CFStringTransform` instead of
 `deunicode`, and the slug fallback hash is SHA-256 instead of BLAKE3.
 
