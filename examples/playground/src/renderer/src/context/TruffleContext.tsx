@@ -98,11 +98,14 @@ export function TruffleProvider({ children }: TruffleProviderProps) {
     await window.truffle.stop();
     setNodeIdentity(null);
     setNodeState('idle');
+    setHealth(null);
   }, []);
 
   const clearAuthUrl = useCallback(() => setAuthUrl(null), []);
 
-  // Subscribe to main process events, pull initial state, and auto-start.
+  // Subscribe to main process events, pull initial node state, and auto-start.
+  // Do NOT call health() here — the node is not started yet and requireNode()
+  // would throw "Node not started" (logged as an IPC handler error).
   useEffect(() => {
     const api = window.truffle;
     if (!api) {
@@ -121,19 +124,17 @@ export function TruffleProvider({ children }: TruffleProviderProps) {
       if (event.identity) setNodeIdentity(event.identity);
       if (event.state === 'running') setAuthUrl(null);
       if (event.state === 'error' && event.error) setStartError(event.error);
+      if (event.state !== 'running') setHealth(null);
     });
 
     const unsubHealth = api.onHealthUpdate((info) => {
       setHealth(info);
     });
 
-    // Pull initial snapshots. These may race with the auto-start below, so
-    // tolerate partial state gracefully.
     void api.getNodeState().then((evt) => {
       setNodeState(evt.state);
       if (evt.identity) setNodeIdentity(evt.identity);
     });
-    void api.health().then((info) => setHealth(info)).catch(() => {});
 
     // Auto-start the node once.
     if (!autoStartedRef.current) {
@@ -149,6 +150,26 @@ export function TruffleProvider({ children }: TruffleProviderProps) {
       unsubHealth();
     };
   }, [startNode]);
+
+  // Pull a health snapshot only after the node is running. Periodic updates
+  // still arrive via onHealthUpdate from the main-process poll.
+  useEffect(() => {
+    if (nodeState !== 'running') return;
+
+    let cancelled = false;
+    void window.truffle
+      .health()
+      .then((info) => {
+        if (!cancelled) setHealth(info);
+      })
+      .catch(() => {
+        // Transient failure (e.g. node stopped mid-request); ignore.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeState]);
 
   const value = useMemo<TruffleContextValue>(
     () => ({

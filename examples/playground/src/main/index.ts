@@ -7,14 +7,15 @@
  */
 
 import { app, BrowserWindow, shell } from 'electron';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import { TruffleManager } from './truffle-manager.js';
 import { registerIpcHandlers } from './ipc-handlers.js';
 
-// ESM-safe __dirname (electron-vite emits ESM for the main process).
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// electron-vite injects a CJS-style `__dirname` shim for ESM main builds.
+// Do not redeclare it — that produces "Identifier '__dirname' has already
+// been declared". Prefer import.meta.dirname for explicit paths.
+const mainDir = import.meta.dirname;
 
 const manager = new TruffleManager();
 let mainWindow: BrowserWindow | null = null;
@@ -30,7 +31,7 @@ function createWindow(): BrowserWindow {
     show: false,
     webPreferences: {
       // electron-vite emits the preload as `.mjs` (ESM), not `.js`
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(mainDir, '../preload/index.mjs'),
       contextIsolation: true,
       sandbox: false,
       nodeIntegration: false,
@@ -53,7 +54,7 @@ function createWindow(): BrowserWindow {
   if (devUrl) {
     void win.loadURL(devUrl);
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'));
+    void win.loadFile(join(mainDir, '../renderer/index.html'));
   }
 
   return win;
